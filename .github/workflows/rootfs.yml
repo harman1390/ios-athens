@@ -1,0 +1,75 @@
+name: rootfs
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipsw_url:
+        description: Apple CDN URL of the iPhone10,3 iOS 16.7.16 (20H392) IPSW (from ipsw.me)
+        required: true
+      rootfs_size:
+        description: HFS+ volume size, e.g. 52G. Must fit inside "userdata" minus the log-ring tail
+        default: "52G"
+
+jobs:
+  rootfs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y hfsprogs android-sdk-libsparse-utils cmake ninja-build \
+            libfuse-dev zlib1g-dev liblzma-dev libzstd-dev libbz2-dev attr python3-pip git
+          # apfs-fuse is not packaged; build the pinned tool the README uses
+          git clone --depth 1 --recurse-submodules https://github.com/sgan81/apfs-fuse /tmp/apfs-fuse
+          cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/apfs-fuse/build
+          sudo install /tmp/apfs-fuse/build/apfs-fuse /usr/local/bin/
+
+      - name: Fetch IPSW members (ranged; no full download)
+        run: |
+          mkdir -p research/ipsw-x
+          # OS, SystemOS, AppOS disk images + the D22AP device tree
+          python3 tools/remotezip.py "${{ inputs.ipsw_url }}" BuildManifest.plist research/ipsw-x/
+          for f in $(python3 - <<'EOF'
+          import plistlib
+          m = plistlib.load(open('research/ipsw-x/BuildManifest.plist','rb'))
+          for p in m['buildIdentities'][0]['manifest'].values():
+              n = p['info'].get('Path','')
+              if n.endswith('.dmg'): print(n)
+          EOF
+          ); do python3 tools/remotezip.py "${{ inputs.ipsw_url }}" "$f" research/ipsw-x/; done
+          python3 tools/remotezip.py "${{ inputs.ipsw_url }}" Firmware/all_flash/DeviceTree.d22ap.im4p research/ipsw-x/dt
+
+      - name: Extract D22AP device tree (for mkadt /product)
+        run: |
+          pip3 install --user ipsw
+          python3 -m ipsw img4 im4p extract \
+            research/ipsw-x/dt/Firmware/all_flash/DeviceTree.d22ap.im4p -o research/ipsw-x/d22ap.adt
+          test -s research/ipsw-x/d22ap.adt
+
+      - name: Build the iOS root image
+        run: |
+          # mount each dmg via apfs-fuse and copy into one journaled case-sensitive HFS+ volume
+          OS_DMG=$(ls research/ipsw-x/*.dmg | head -1)
+          SYS_DMG=$(ls research/ipsw-x/*.dmg | sed -n 2p)
+          APP_DMG=$(ls research/ipsw-x/*.dmg | sed -n 3p)
+          tools/mkiosroot.sh "$OS_DMG" "$SYS_DMG" "$APP_DMG" ios16-root.img "${{ inputs.rootfs_size }}"
+          sudo fsck.hfsplus -fy ios16-root.img
+          sudo mkdir -p /mnt/iosroot
+          sudo mount -t hfsplus -o loop,force ios16-root.img /mnt/iosroot
+          sudo python3 tools/sweet-root-tweaks.py /mnt/iosroot
+          sudo umount /mnt/iosroot
+
+      - name: Sparse + upload
+        run: img2simg ios16-root.img ios16-root.simg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios16-root
+          path: |
+            ios16-root.simg
+            ios16-root.img
+            research/ipsw-x/d22ap.adt
+          retention-days: 7

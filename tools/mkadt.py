@@ -55,6 +55,21 @@ VIVA_ECID = 0x5649564100000001  # 'VIVA' + 1, synthetic
 # MediaTek ufshci@11270000 (DT size 0x2300, one 16K page)
 VIVA_UFS, VIVA_UFS_SIZE = 0x11270000, 0x4000
 
+# --athens: realme Narzo 30 Pro 5G / realme 7 5G (RMX2117 "athens", MT6853 /
+# Dimensity 800U). Addresses marked dts come from realme's published kernel
+# source (android_kernel_realme_mt6853, mt6853.dts); addresses marked MEASURE
+# must be confirmed from the phone's live FDT / atag before flashing (Phase 0
+# in ATHENS.md).
+ATHENS_PHYS_BASE, ATHENS_MEM_SIZE = 0xc0000000, 0x1be000000 - 0xc0000000  # MEASURE live FDT
+ATHENS_GICD, ATHENS_GICD_SIZE = 0x0c000000, 0x40000          # dts
+ATHENS_GICR, ATHENS_GICR_SIZE = 0x0c040000, 0x200000         # dts
+ATHENS_FB, ATHENS_FB_STRIDE = 0x7bc10000, 1088 * 4           # MEASURE atag,videolfb
+ATHENS_FB_SIZE = (ATHENS_FB_STRIDE * 2400 + 0x3fff) & ~0x3fff
+ATHENS_TIMEBASE = 13000000                                   # dts clock-frequency
+ATHENS_VTIMER_INTID = 27                                     # dts timer PPI 11
+ATHENS_ECID = 0x4154484e53000001                             # 'ATHNS' + 1, synthetic
+ATHENS_UFS, ATHENS_UFS_SIZE = 0x11270000, 0x4000             # dts ufshci (sz 0x2300)
+
 BOOT_MANIFEST_HASH = hashlib.sha384(b'sweet boot manifest').digest()
 
 # The iOS userland is the iPhone X (iPhone10,3 / D22AP) IPSW. MobileGestalt
@@ -81,6 +96,18 @@ def d22ap_product(path=D22AP_ADT):
 u32 = lambda *v: struct.pack('<%dI' % len(v), *v)
 u64 = lambda *v: struct.pack('<%dQ' % len(v), *v)
 cstr = lambda s: s.encode() + b'\0'
+
+# Synthetic identity injected into /product on --athens: iBoot normally fills
+# these from syscfg (they are the flag-marked props d22ap_product() strips).
+# Values are valid-format stand-ins; replace per device, never commit real ones.
+ATHENS_IDENTITY = [
+    ('serial-number', cstr('G6TX00ATH3N5')),            # 12-char iPhone X format
+    ('model-number', cstr('MQA62HN/A')),                # iPhone X 64GB, India PN
+    ('region-info', cstr('HN/A')),                      # India
+    ('mlb-serial-number', cstr('C3700000ATHENS000')),
+    ('unique-device-id', hashlib.sha256(b'athens-ecid').hexdigest().encode()),
+    ('rom', cstr('BootROM-7429.0.0.0.1')),              # generic stand-in
+]
 
 
 def node(name, props=(), children=()):
@@ -247,13 +274,129 @@ def viva_devices(ph, phandle, gic_ph, ecid):
     ]
 
 
-def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
+def athens_devices(ph, phandle, gic_ph, ecid):
+    """athens /arm-io devices (RMX2117, MT6853). Addresses/SPIs from the realme
+    mt6853.dts; pins marked MEASURE need the live FDT before enabling."""
+    io = lambda pa, size: u64(pa - SOC_BASE, size)
+    eint_ph = next(phandle)
+    return [
+        # MediaTek keypad (kp@10010000, SPI 74 edge): same block as viva's,
+        # driver matching extended to mt6853 by the athens patch series.
+        node('keypad', [
+            ph(),
+            ('compatible', cstr('mediatek,mt6853-keypad')),
+            ('reg', io(0x10010000, 0x1000)),
+            ('interrupt-parent', u32(gic_ph)),
+            ('interrupts', spi(0x4a, IRQ_EDGE_RISING)),
+            ('keymap', u32(0, HID_CSMR_VOLUME_DOWN)),  # MEASURE: kpd-hw-init-map
+        ]),
+        # External interrupts (apirq/eint@1000b000; pio's own GIC SPI 212 level):
+        # interrupt controller under the GIC; children use <EINT flags>.
+        node('eint', [
+            ('AAPL,phandle', u32(eint_ph)),
+            ('compatible', cstr('mediatek,mt6853-eint')),
+            ('reg', io(0x1000b000, 0x1000)),
+            ('interrupt-controller', b''),
+            ('#interrupt-cells', u32(2)),
+            ('interrupt-parent', u32(gic_ph)),
+            ('interrupts', spi(0xd4, IRQ_LEVEL_HIGH)),
+        ]),
+        # PMIC wrapper (pwrap@10026000 "mediatek,mt6853-pwrap"): bus for the
+        # MT6359 main PMIC (interrupt = pio EINT 118 level, dts main_pmic) and
+        # its key inputs (PWRKEY = power, HOMEKEY = volume up; register layout
+        # differs from viva's MT6366 — see drivers/misc/mediatek/pmic/mt6359).
+        node('pwrap', [
+            ph(),
+            ('compatible', cstr('mediatek,mt6853-pwrap')),
+            ('reg', io(0x10026000, 0x1000)),
+        ], [node('pmic', [
+            ph(),
+            ('compatible', cstr('mediatek,mt6359-pmic')),
+            ('interrupt-parent', u32(eint_ph)),
+            ('interrupts', u32(118, IRQ_LEVEL_HIGH)),
+        ], [
+            node('keys', [
+                ph(),
+                ('compatible', cstr('mediatek,mt6359-keys')),
+                ('keymap', u32(0, HID_CSMR_POWER, 1, HID_CSMR_VOLUME_UP)),
+            ]),
+            # Fuel gauge is inside the MT6359 (dts mt6359_gauge; FGADC via
+            # pwrap + auxadc). Registers TBD for the battery driver.
+            node('gauge', [
+                ph(),
+                ('compatible', cstr('mediatek,mt6359-gauge')),
+                ('design-capacity', u32(5000)),
+            ]),
+        ])]),
+        # GPIO (pio/pinctrl@10005000): only pins that must be driven go here.
+        node('gpio', [
+            ph(),
+            ('compatible', cstr('mediatek,mt6853-gpio')),
+            ('reg', io(0x10005000, 0x1000)),
+            ('output-pins', u32(15)),  # touch reset (cust_mt6853_touch dtsi)
+        ]),
+        # I2C0 (i2c0@11e00000, SPI 112 level, 400 kHz): second reg is the APDMA
+        # channel (0x10217080); SCL GPIO 97, SDA GPIO 98 (dts). Source clock and
+        # IMP_IIC_WRAP gate are MEASURE items (clk-mt6853).
+        node('i2c0', [
+            ph(),
+            ('compatible', cstr('mediatek,mt6853-i2c')),
+            ('reg', io(0x11e00000, 0x1000) + io(0x10217080, 0x80)),
+            ('interrupt-parent', u32(gic_ph)),
+            ('interrupts', spi(0x70, IRQ_LEVEL_HIGH)),
+            ('clock-frequency', u32(400000)),
+            ('clock-div', u32(5)),
+            ('scl-gpio', u32(97)),
+            ('sda-gpio', u32(98)),
+        ], [
+            # Goodix GT9886 touch (gt9886@5d on i2c0): interrupt GPIO14 falling
+            # edge, reset GPIO15, rail = MT6359 VTP LDO (no avdd/dvdd GPIO
+            # switches in the cust dtsi). The alternative population is a
+            # GT9896s on spi4@11018000 — the live FDT says which. Register map
+            # (reg-coor/reg-pid) comes from the vendor goodix cfg blob.
+            node('touch', [
+                ph(),
+                ('compatible', cstr('goodix,gt9886')),
+                ('i2c-address', u32(0x5d)),
+                ('interrupt-parent', u32(eint_ph)),
+                ('interrupts', u32(14, IRQ_EDGE_FALLING)),
+                ('reset-gpio', u32(15)),
+                ('max-x', u32(1080)),
+                ('max-y', u32(2400)),
+            ]),
+        ]),
+        # Mali-G57 MC3 (mali@13000000; GPU/MMU/JOB/EVENT/PWR = SPI 364-368
+        # level high): power domains SCP_SYS_MFG0-5 (scpsys/spm@10006000),
+        # mfgcfg + topckgen/apmixed/infracfg bases as on MT6781 — MEASURE.
+        node('gpu', [
+            ph(),
+            ('compatible', cstr('mediatek,mt6853-mali')),
+            ('reg', u64(0x13000000 - SOC_BASE, 0x4000)),
+            ('interrupt-parent', u32(gic_ph)),
+            ('interrupts', spi(0x16c, IRQ_LEVEL_HIGH) + spi(0x16d, IRQ_LEVEL_HIGH) +
+                         spi(0x16e, IRQ_LEVEL_HIGH) + spi(0x16f, IRQ_LEVEL_HIGH) +
+                         spi(0x170, IRQ_LEVEL_HIGH)),
+        ]),
+        # CONNSYS WiFi (MT6853 + MT663x combo): same family as viva's wlan.
+        node('wlan', [
+            ph(),
+            ('device_type', cstr('wlan')),
+            ('compatible', cstr('mediatek,mt6853-wlan')),
+            ('local-mac-address', wifi_mac(ecid)),
+        ]),
+    ]
+
+
+def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False,
+          athens=False, athens_ufs=False):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py).
     viva=True: Redmi Note 11 Pro 4G addresses. Without viva_ufs there is no UFS node, so the
     kernel never touches storage; with it the kernel drives the MediaTek host LK left running."""
     phys_base, mem_size = (HIGH_PHYS_BASE, HIGH_MEM_SIZE) if highmem else (PHYS_BASE, MEM_SIZE)
     if viva:
         phys_base, mem_size = VIVA_PHYS_BASE, VIVA_MEM_SIZE
+    elif athens:
+        phys_base, mem_size = ATHENS_PHYS_BASE, ATHENS_MEM_SIZE
     # Carve the panic log off the top so the kernel never allocates over it.
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
@@ -264,6 +407,10 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
         gicd, gicr, timebase = VIVA_GICD, VIVA_GICR, VIVA_TIMEBASE
         gicd_size, gicr_size, vtimer = VIVA_GICD_SIZE, VIVA_GICR_SIZE, VIVA_VTIMER_INTID
         fb, fb_size, fb_stride, ecid = VIVA_FB, VIVA_FB_SIZE, VIVA_FB_STRIDE, VIVA_ECID
+    elif athens:
+        gicd, gicr, timebase = ATHENS_GICD, ATHENS_GICR, ATHENS_TIMEBASE
+        gicd_size, gicr_size, vtimer = ATHENS_GICD_SIZE, ATHENS_GICR_SIZE, ATHENS_VTIMER_INTID
+        fb, fb_size, fb_stride, ecid = ATHENS_FB, ATHENS_FB_SIZE, ATHENS_FB_STRIDE, ATHENS_ECID
     seed = seed if seed is not None else os.urandom(64)
     phandle = iter(range(1, 1000))
     ph = lambda: ('AAPL,phandle', u32(next(phandle)))
@@ -275,8 +422,8 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
         ('random-seed', seed),
         ('debug-enabled', u32(1)),
         ('embedded-panic-log-size', u32(PANIC_LOG_SIZE)),
-        ('firmware-version', cstr('viva-shim' if viva else 'sweet-shim')),
-        ('system-firmware-version', cstr('viva-shim' if viva else 'sweet-shim')),
+        ('firmware-version', cstr('athens-shim' if athens else ('viva-shim' if viva else 'sweet-shim'))),
+        ('system-firmware-version', cstr('athens-shim' if athens else ('viva-shim' if viva else 'sweet-shim'))),
         # iBoot's SHA-384 of the boot manifest; /sbin/mount -P 1 exits unless
         # it exists (bind mounts /private/preboot/<hex>/usr/standalone/firmware,
         # tolerating a missing directory). Fixed stand-in value.
@@ -339,7 +486,7 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
             ('l3-cache-id', u32(0)),     # shared L3
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(timebase)),
-            ('clock-frequency', u32((2050000000 if core >= 6 else 2000000000) if viva else (2304000000 if core >= 6 else 1804800000))),
+            ('clock-frequency', u32((2400000000 if core >= 6 else 2000000000) if athens else ((2050000000 if core >= 6 else 2000000000) if viva else (2304000000 if core >= 6 else 1804800000)))),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(timebase)),
@@ -381,7 +528,8 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
             ('compatible', cstr('sweet,display')),
             ('canvas-width', u32(1125)),
             ('canvas-height', u32(2436)),
-        ])] + (viva_devices(ph, phandle, gic_ph, ecid) if viva else []))
+        ])] + ((viva_devices(ph, phandle, gic_ph, ecid) if viva else
+                athens_devices(ph, phandle, gic_ph, ecid) if athens else [])))
 
     fbcon = node('sweet-fbcon', [
         ph(),
@@ -394,8 +542,10 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
     # bsd/dev/sweet_ufs.c: the UFS host ABL leaves running (absolute physical reg).
     ufs = node('sweet-ufs', [
         ph(),
-        ('compatible', cstr('mediatek,mt8183-ufshci') if viva else cstr('qcom,ufshc')),
-        ('reg', u64(VIVA_UFS, VIVA_UFS_SIZE) if viva else u64(UFS, UFS_SIZE)),
+        # The kernel's MediaTek UFS driver matches 'mediatek,mt8183-ufshci'
+        # (the athens patch series may add an mt6853 alias).
+        ('compatible', cstr('mediatek,mt8183-ufshci') if (viva or athens) else cstr('qcom,ufshc')),
+        ('reg', u64(VIVA_UFS, VIVA_UFS_SIZE) if viva else (u64(ATHENS_UFS, ATHENS_UFS_SIZE) if athens else u64(UFS, UFS_SIZE))),
     ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
@@ -414,10 +564,16 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
     ])
 
     product_props = d22ap_product()
-    if product_props and viva:
+    if product_props and (viva or athens):
         # The iPhone X is a P3 display: CoreAnimation would then compose in extended-range 10-bit formats
-        # (w30r/w40a). viva's panel is shown as 8-bit BGRA, so say sRGB (AppleCLCD also converts XR10).
+        # (w30r/w40a). These panels are shown as 8-bit BGRA, so say sRGB (AppleCLCD also converts XR10).
         product_props = [(k, cstr('sRGB') if k == 'artwork-display-gamut' else v) for k, v in product_props]
+    if product_props and athens:
+        # Inject the synthetic identity (serial number, model number, region,
+        # MLB, UDID) that iBoot would have filled from syscfg. Replace-in-place
+        # if a name already exists, else append.
+        have = {k for k, _ in product_props}
+        product_props += [kv for kv in ATHENS_IDENTITY if kv[0] not in have]
     product = [node('product', [ph()] + product_props)] if product_props else []
 
     # Panic log region. /pram reg = <phys size>; it sits just above the
@@ -429,19 +585,23 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False):
     # (iPhone10,3). 'xiaomi,sweet' stays for SweetPlatformExpert matching.
     return node('device-tree', [
         ph(),
-        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') + cstr('qcom,sm7150') + cstr('AppleARM')),
+        ('compatible', cstr('D22AP') + cstr('iPhone10,3') + cstr('xiaomi,sweet') +
+                   (cstr('realme,athens') + cstr('mediatek,mt6853') if athens else cstr('qcom,sm7150')) +
+                   cstr('AppleARM')),
         ('model', cstr('iPhone10,3')),
         ('target-type', cstr('D22')),
         ('target-sub-type', cstr('D22AP')),
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product + ([ufs] if (viva_ufs if viva else not qemu) else []))
+    ], [chosen, defaults, cpus, arm_io, fbcon, buttons, pram] + product +
+        ([ufs] if ((viva_ufs if viva else athens_ufs) if (viva or athens) else not qemu) else []))
 
 
 if __name__ == '__main__':
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv, viva='--viva' in sys.argv,
-                 viva_ufs='--ufs' in sys.argv)
+    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
+                 viva='--viva' in sys.argv, viva_ufs='--ufs' in sys.argv,
+                 athens='--athens' in sys.argv, athens_ufs='--athens-ufs' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
