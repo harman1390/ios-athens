@@ -23,10 +23,10 @@ identity/storage decisions). Device runbook: `docs/athens-flash.md`.
 | boot addrs | dtb_addr 0x4bc80000; kernel@2048, ramdisk@5791744, dtbo/dtb@6694912 | boot.img header |
 | Entry | EL1, MMU off, `x0` = DTB | same as viva; verify |
 | Watchdog | toprgu 0x10007000, `WDT_MODE = (mode & ~1 & 0xffffff) \| 0x22000000` | mt6853.dts + viva |
-| Panel | 1080×2400 IPS, 120 Hz, DSI video mode expected | spec; fb fmt MEASURE |
-| Framebuffer | `/chosen/atag,videolfb`: address/pitch TBD (provisional 0x7bc10000, 1088-px pitch) | MEASURE |
-| RAM | 6 GiB (64 GB SKU): 0x40000000–0x1c0000000 expected; reservations TBD | MEASURE live FDT |
-| XNU RAM | provisional 0xc0000000–0x1be000000 | MEASURE live FDT |
+| Panel | NT36672C JDI 1080×2400 120 Hz **DSI video mode** (videolfb blob name) OR NT35595 Truly cmd-mode (lcmname prop) — two panel variants, runtime tells which | measured live FDT |
+| Framebuffer | **0x77e20000** (atag,videolfb qword), vramSize 0x01be0000, fps 6000; pitch provisional 1088 px | measured live FDT |
+| RAM | **6 GiB, 0x40000000–0x1c0000000** (memory/reg) + reserved@1401x000 carve-outs | measured live FDT |
+| XNU RAM | provisional 0xc0000000–0x1be000000 (viva-style high window) | verify against live reserved-memory |
 | GICv3 | GICD 0x0c000000 (0x40000), GICR 0x0c040000 (0x200000), INTPOL 0x0c53d668 | mt6853.dts |
 | Timer | 13 MHz, virtual timer PPI 11 = INTID 27 | mt6853.dts |
 | CPUs | 6× A55 MPIDR 0x000–0x500, 2× A76 0x600/0x700, PSCI CPU_ON | mt6853.dts |
@@ -36,7 +36,7 @@ identity/storage decisions). Device runbook: `docs/athens-flash.md`.
 | Keypad | kp@10010000, SPI 74 edge; volume-down bit from kpd-hw-init-map | mt6853.dts |
 | PMIC | MT6359 via pwrap@10026000; interrupt = pio EINT 118 level | mt6853.dts |
 | Keys | PWRKEY/HOMEKEY in MT6359 (+ _r variants); volume down = keypad | mt6359p.dtsi; regs TBD |
-| Touch | Goodix GT9886 i2c0@0x5d, irq GPIO14 falling, reset GPIO15, VTP LDO — **or** GT9896s on spi4@11018000 (SPI 163) | cust dtsi; live FDT decides |
+| Touch | **Goodix GT9896s on spi4@11018000** (live FDT: ctp_gt9896s_* pinctrls, touchscreen@0, goodix,touch) — NOT the i2c variant; i2c0 GT9886 unused on this unit | measured live FDT |
 | i2c0 | 0x11e00000 (+ apdma 0x10217080), SPI 112 level, 400 kHz, div 5, scl 97 / sda 98 | mt6853.dts |
 | Battery | MT6359 internal gauge (FGADC/auxadc via pwrap), 5000 mAh, 30 W Dart (MT6360 charger companion) | mt6853.dts; regs TBD |
 | GPU | Mali-G57 MC3 @0x13000000, SPI 364–368 (GPU/MMU/JOB/EVENT/PWR), SCP_SYS_MFG0-5 domains | mt6853.dts |
