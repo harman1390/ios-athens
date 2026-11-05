@@ -27,6 +27,11 @@ jobs:
           cmake -S /tmp/apfs-fuse -B /tmp/apfs-fuse/build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build /tmp/apfs-fuse/build
           sudo install /tmp/apfs-fuse/build/apfs-fuse /usr/local/bin/
+          # lzfse decoder for the bvx2-wrapped DeviceTree
+          git clone --depth 1 https://github.com/lzfse/lzfse /tmp/lzfse
+          cmake -S /tmp/lzfse -B /tmp/lzfse/build -G Ninja
+          cmake --build /tmp/lzfse/build
+          sudo install /tmp/lzfse/build/lzfse /usr/local/bin/
 
       - name: Fetch IPSW members (ranged; no full download)
         run: |
@@ -45,9 +50,8 @@ jobs:
 
       - name: Extract D22AP device tree (for mkadt /product)
         run: |
-          pip3 install --user ipsw
-          python3 -m ipsw img4 im4p extract \
-            research/ipsw-x/dt/Firmware/all_flash/DeviceTree.d22ap.im4p -o research/ipsw-x/d22ap.adt
+          python3 tools/adt.py unwrap \
+            research/ipsw-x/dt/Firmware/all_flash/DeviceTree.d22ap.im4p research/ipsw-x/d22ap.adt
           test -s research/ipsw-x/d22ap.adt
 
       - name: Build the iOS root image
