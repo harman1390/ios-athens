@@ -21,11 +21,14 @@
 #define FB_STRIDE	(FB_W * 4)	/* a8r8g8b8, matches mainline simplefb */
 #endif
 
+#define BLACK	0xff000000U
 #define RED	0xffff0000U
 #define BLUE	0xff0000a0U
 #define WHITE	0xffffffffU
 #define YELLOW	0xffffff00U
 #define GREEN	0xff00ff00U
+
+void con_clear_rows(uint32_t bg, int rows);
 
 extern volatile uint32_t *con_fb;
 

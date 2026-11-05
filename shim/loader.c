@@ -138,10 +138,17 @@ const char *loader_boot(uintptr_t dtb)
 
 	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
 	con_hex("JUMP", entry_pa);
+	(void)entry_pa;
+	con_hex2("LAND", "0=", *(volatile uint32_t *)(entry_pa + 0x1c64),
+		"4=", *(volatile uint32_t *)(entry_pa + 0x1c68));
+	con_hex2("STB", "0=", *(volatile uint32_t *)(entry_pa + 0x400),
+		"4=", *(volatile uint32_t *)(entry_pa + 0x404));
 	con_str("XNU", "jumping (fbcon clears screen)");
 
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
-	((xnu_entry_t)entry_pa)(ba_pa);
+	/* XNU expects iBoot's handoff: EL1, MMU off, x0 = boot_args. realme lk
+	 * enters the shim at EL2, so drop to EL1 before jumping. */
+	enter_el1(entry_pa, ba_pa);
 	return "xnu returned";
 }

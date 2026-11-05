@@ -19,6 +19,11 @@
 #define WDT_MODE_KEY		0x22000000U
 #define WDT_MODE_EN		(1U << 0)
 
+/* DRAM is preserved across a warm reset: the kernel's binary-patched
+ * checkpoint stubs write a progress number here; on the next boot the shim
+ * prints the last one reached. */
+#define CKPT_MAGIC		0xc256bf00UL	/* tail of the boot_args page: provably writable DRAM */
+
 #define FDT_BEGIN_NODE		1
 #define FDT_END_NODE		2
 #define FDT_PROP		3
@@ -44,9 +49,9 @@ void exc_handler(uint64_t slot, uint64_t *regs)
 	con_str("PANIC", "exception");
 	con_hex2("SLOT", "n=", slot, "cpu=", rsr("mpidr_el1"));
 	con_str("STAGE", stage);
-	con_hex("ESR", rsr("esr_el1"));
-	con_hex("ELR", rsr("elr_el1"));
-	con_hex("FAR", rsr("far_el1"));
+	con_hex("ESR", rsr("esr_el2"));
+	con_hex("ELR", rsr("elr_el2"));
+	con_hex("FAR", rsr("far_el2"));
 	con_hex("X30", regs[29]);
 	halt();
 }
@@ -112,15 +117,21 @@ void shim_main(uint64_t dtb)
 	uint64_t fb = videolfb_base(dtb);
 	if (fb)
 		con_fb = (volatile uint32_t *)fb;
-	con_clear(RED);
+	/* Clear only the text area: kernel checkpoint bands (rows 700+) survive
+	 * a warm reset, so a reset loop still shows how far the kernel got. */
+	con_clear_rows(BLACK, 600);
 	con_str("SHIM", "athens: xnu loader");
 	con_hex2("EL", "el=", rsr("CurrentEL") >> 2, "wdt=", rd32(TOPRGU_WDT_MODE));
 	con_hex("DTB", dtb);
 	con_hex("LK FB", fb);
+	con_hex("CKPT", rd32(CKPT_MAGIC));	/* last kernel checkpoint (survives reset) */
+	con_hex("SENT", rd32(CKPT_MAGIC + 4));	/* sentinel: stays 0xDEAD if kernel never wrote */
 	if (fb != FB_BASE)
 		con_str("WARN", "LK fb differs from FB_BASE; kernel fbcon must match");
 	con_skip();
 
+	wr32(CKPT_MAGIC, 0);	/* reset for this attempt */
+	wr32(CKPT_MAGIC + 4, 0xdead);
 	const char *why = loader_boot(dtb);
 	con_str("LOADER", why);
 	halt();

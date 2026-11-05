@@ -5,8 +5,9 @@ recovery/
 # third-party/Apple sources fetched for reading
 research/
 shim/out/
-xnu/out/
+xnu/out*/
 xnu/out-*/
 __pycache__/
 .state
 hwparam.json
+logs/

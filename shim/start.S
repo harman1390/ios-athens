@@ -25,8 +25,13 @@ _start:
 	adr	x1, _stack_top
 	mov	sp, x1
 	adr	x1, vectors
+	mrs	x2, CurrentEL
+	cmp	x2, #(2 << 2)
+	b.eq	1f
 	msr	vbar_el1, x1
-	isb
+	b	2f
+1:	msr	vbar_el2, x1
+2:	isb
 	/* zero .bss */
 	adr	x1, _bss_start
 	adr	x2, _bss_end
@@ -125,4 +130,27 @@ exc_common:
 	ldr	x28, [sp, #224]
 	add	sp, sp, #(30 * 8)
 	ldp	x29, x30, [sp], #16
+	eret
+
+/*
+ * enter_el1(entry_pa, boot_args_pa): iBoot-style handoff. XNU expects to
+ * start at EL1 with the MMU off; realme lk enters the shim at EL2. Drop
+ * to EL1h with a clean hypervisor state, then eret into the kernel entry.
+ */
+	.globl enter_el1
+enter_el1:
+	mov	x9, x0			/* kernel entry */
+	mov	x10, x1			/* boot_args -> x0 */
+	msr	hstr_el2, xzr		/* no hypervisor sysreg traps */
+	msr	cptr_el2, xzr		/* no FP/SIMD traps */
+	msr	cnthctl_el2, xzr
+	mov	x1, #(1 << 31)		/* HCR_EL2.RW: EL1 is AArch64 */
+	msr	hcr_el2, x1
+	mov	x1, #0x3c5		/* SPSR: EL1h, DAIF masked */
+	msr	spsr_el2, x1
+	msr	elr_el2, x9
+	mov	x1, sp			/* share the shim stack */
+	msr	sp_el1, x1
+	mov	x0, x10
+	isb
 	eret

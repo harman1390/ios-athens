@@ -26,6 +26,19 @@ void con_clear(uint32_t bg)
 	row = 0;
 }
 
+void con_clear_rows(uint32_t bg, int rows)
+{
+	if (rows > FB_H)
+		rows = FB_H;
+	for (int y = 0; y < rows; y++) {
+		volatile uint32_t *line = con_fb + y * (FB_STRIDE / 4);
+		for (int x = 0; x < FB_W; x++)
+			line[x] = bg;
+	}
+	con_bg = bg;
+	row = 0;
+}
+
 static void put_char(int col, char ch, uint32_t fg)
 {
 	if (ch < 0x20 || ch > 0x7e)
