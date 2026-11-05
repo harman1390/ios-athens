@@ -169,12 +169,12 @@ def viva_devices(ph, phandle, gic_ph, ecid):
             ('reg', io(0x1000d000, 0x1000)),
         ], [node('pmic', [
             ph(),
-            ('compatible', cstr('mediatek,mt6366-pmic')),
+            ('compatible', cstr('mediatek,mt6359-pmic')),
             ('interrupt-parent', u32(eint_ph)),
             ('interrupts', u32(144, IRQ_LEVEL_HIGH)),
         ], [node('keys', [
             ph(),
-            ('compatible', cstr('mediatek,mt6366-keys')),
+            ('compatible', cstr('mediatek,mt6359-keys')),
             ('keymap', u32(0, HID_CSMR_POWER, 1, HID_CSMR_VOLUME_UP)),
         ])])]),
         # GPIO (gpio@10005000): iokit/Kernel/arm/VivaIO.cpp. Only these pins can be driven:
@@ -284,7 +284,7 @@ def athens_devices(ph, phandle, gic_ph, ecid):
         # driver matching extended to mt6853 by the athens patch series.
         node('keypad', [
             ph(),
-            ('compatible', cstr('mediatek,mt6853-keypad')),
+            ('compatible', cstr('mediatek,mt6781-keypad')),
             ('reg', io(0x10010000, 0x1000)),
             ('interrupt-parent', u32(gic_ph)),
             ('interrupts', spi(0x4a, IRQ_EDGE_RISING)),
@@ -294,20 +294,20 @@ def athens_devices(ph, phandle, gic_ph, ecid):
         # interrupt controller under the GIC; children use <EINT flags>.
         node('eint', [
             ('AAPL,phandle', u32(eint_ph)),
-            ('compatible', cstr('mediatek,mt6853-eint')),
+            ('compatible', cstr('mediatek,mt6781-eint')),
             ('reg', io(0x1000b000, 0x1000)),
             ('interrupt-controller', b''),
             ('#interrupt-cells', u32(2)),
             ('interrupt-parent', u32(gic_ph)),
             ('interrupts', spi(0xd4, IRQ_LEVEL_HIGH)),
         ]),
-        # PMIC wrapper (pwrap@10026000 "mediatek,mt6853-pwrap"): bus for the
+        # PMIC wrapper (pwrap@10026000 "mediatek,mt6781-pwrap"): bus for the
         # MT6359 main PMIC (interrupt = pio EINT 118 level, dts main_pmic) and
         # its key inputs (PWRKEY = power, HOMEKEY = volume up; register layout
         # differs from viva's MT6366 — see drivers/misc/mediatek/pmic/mt6359).
         node('pwrap', [
             ph(),
-            ('compatible', cstr('mediatek,mt6853-pwrap')),
+            ('compatible', cstr('mediatek,mt6781-pwrap')),
             ('reg', io(0x10026000, 0x1000)),
         ], [node('pmic', [
             ph(),
@@ -331,7 +331,7 @@ def athens_devices(ph, phandle, gic_ph, ecid):
         # GPIO (pio/pinctrl@10005000): only pins that must be driven go here.
         node('gpio', [
             ph(),
-            ('compatible', cstr('mediatek,mt6853-gpio')),
+            ('compatible', cstr('mediatek,mt6781-gpio')),
             ('reg', io(0x10005000, 0x1000)),
             ('output-pins', u32(15)),  # touch reset (cust_mt6853_touch dtsi)
         ]),
@@ -340,7 +340,7 @@ def athens_devices(ph, phandle, gic_ph, ecid):
         # IMP_IIC_WRAP gate are MEASURE items (clk-mt6853).
         node('i2c0', [
             ph(),
-            ('compatible', cstr('mediatek,mt6853-i2c')),
+            ('compatible', cstr('mediatek,mt6781-i2c')),
             ('reg', io(0x11e00000, 0x1000) + io(0x10217080, 0x80)),
             ('interrupt-parent', u32(gic_ph)),
             ('interrupts', spi(0x70, IRQ_LEVEL_HIGH)),
@@ -356,7 +356,7 @@ def athens_devices(ph, phandle, gic_ph, ecid):
             # (reg-coor/reg-pid) comes from the vendor goodix cfg blob.
             node('touch', [
                 ph(),
-                ('compatible', cstr('goodix,gt9886')),
+                ('compatible', cstr('goodix,gt9896s')),
                 ('i2c-address', u32(0x5d)),
                 ('interrupt-parent', u32(eint_ph)),
                 ('interrupts', u32(14, IRQ_EDGE_FALLING)),
