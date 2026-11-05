@@ -89,9 +89,14 @@ copy "$work/appos/root" "$work/root/private/preboot/Cryptexes/App"
 # Shared cache where dyld looks at ignition level 1: hard links, no extra space.
 dsc=private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld
 sudo mkdir -p "$work/root/System/Library/Caches/com.apple.dyld"
-for f in "$work/root/$dsc"/*; do
-	sudo ln "$f" "$work/root/System/Library/Caches/com.apple.dyld/${f##*/}"
-done
+if sudo test -d "$work/root/$dsc"; then
+	for f in "$work/root/$dsc"/*; do
+		sudo ln "$f" "$work/root/System/Library/Caches/com.apple.dyld/${f##*/}"
+	done
+else
+	echo "WARN: no dyld cache dir at $dsc; Cryptexes/OS tree:"
+	sudo find "$work/root/private/preboot/Cryptexes/OS" -maxdepth 4 -type d | head -30
+fi
 
 # dyld does not search the cryptexes at ignition level 1: hard-link every
 # cryptex file that has no counterpart in the OS root (libobjc-trampolines,
