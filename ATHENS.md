@@ -13,8 +13,14 @@ identity/storage decisions). Device runbook: `docs/athens-flash.md`.
 | What | Value | Source / status |
 | --- | --- | --- |
 | Boot | LK (realme); `fastboot boot` expected ignored → flash `boot` (non-A/B) | likely; MEASURE Phase 1 |
-| Kernel format | gzip Image (probably; verify — drop gzip step if raw accepted) | MEASURE |
+| Kernel format | **gzip Image** (stock boot.img kernel starts `1f 8b`) | measured 2026-11-06 |
+| Security | SBC + DAA on; **Kamakiri BROM bypass works** (mtkclient full access) | measured 2026-11-06 |
+| UFS LUNs | **LU0 = 0xee5800000 (~59.6 GiB, carries GPT+userdata)**; LU1/LU2 = 4 MiB each (preloader) | measured `printgpt` |
+| `userdata` | offset 0x272800000, length **0xc71ff8000 ≈ 49.8 GiB** → `ufslun=0` | measured `printgpt` |
+| `super` | offset 0x71800000, length 0x1e5000000 (~7.5 GiB) — left intact | measured `printgpt` |
+| `boot` | offset 0x6cf00000, 32 MiB; partition data = first bytes of each 128 MiB backup dump | measured |
 | boot.img | header v2, page 2048, DTB inside, cmdline `bootopt=64S3,32N2,64N2` (keep it) | BoardConfig.mk |
+| boot addrs | dtb_addr 0x4bc80000; kernel@2048, ramdisk@5791744, dtbo/dtb@6694912 | boot.img header |
 | Entry | EL1, MMU off, `x0` = DTB | same as viva; verify |
 | Watchdog | toprgu 0x10007000, `WDT_MODE = (mode & ~1 & 0xffffff) \| 0x22000000` | mt6853.dts + viva |
 | Panel | 1080×2400 IPS, 120 Hz, DSI video mode expected | spec; fb fmt MEASURE |
@@ -77,6 +83,26 @@ fallback. `ATHENS_CMDLINE` replaces the whole command line.
 9. ⬜ Identity: serial/model/region/MLB/UDID in Settings → About (mkadt ATHENS_IDENTITY)
 10. ⬜ Storage fills userdata (~50+ GiB visible in Settings)
 11. ⬜ (stretch) Metal on Mali-G57 MC3 via viva-gpu; Wi-Fi via connac work
+
+## Handoff (2026-11-06, Phase 0 partial — device session 1)
+
+Done on the phone: BROM entry confirmed (power off, Vol±, plug); Kamakiri
+bypass + xflash DA works; `printgpt` captured (see facts table);
+21-partition backup in `backup/` (gitignored): recovery, misc, para, expdb,
+frp, vbmeta{,_system,_vendor}, nvcfg, persist, seccfg, proinfo, nvram, lk,
+lk2, boot, logo, dtbo, tee1, tee2, spmfw — each file is the 128 MiB DA read;
+real data starts at offset 0 (sizes in the mtkclient log: boot 32 MiB, lk
+5 MiB, vbmeta small). Stock `boot.img` unpacked to `dtb/boot_unpacked/`
+(dtb, kernel, ramdisk): kernel is gzip, dtb_addr 0x4bc80000.
+
+The boot dtb matches the published mt6853.dts: mt6359 PMIC + mt6360
+companion, ufshci@11270000, mali@13000000, i2c0@11e00000, spi4@11018000,
+generic `/touch` node only — **no populated gt98xx chip node and no
+atag,videolfb in the static dtb** (lk injects those at runtime).
+
+Still needed from device: **live FDT** (`adb shell su -c 'cat /sys/firmware/fdt'`
+under stock Android or TWRP) for the RAM map/reserved regions, atag videolfb
+address+pitch, and the populated touch node; lk behavior on `fastboot boot`.
 
 ## Handoff (2026-11-05, initial scaffold)
 
