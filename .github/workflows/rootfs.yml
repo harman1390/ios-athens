@@ -73,3 +73,4 @@ jobs:
             ios16-root.img
             research/ipsw-x/d22ap.adt
           retention-days: 7
+# rebuilt index bump
