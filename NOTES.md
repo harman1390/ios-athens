@@ -1,5 +1,37 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ATHENS HANDOFF (RMX2117, MT6853) - read first <<<
+
+**MILESTONE: XNU-8796 fully boots on RMX2117** (verified via the UFS sweetlog
+ring, `logs/athens-log.bin` pulled from recovery). Kernel reaches root-mount:
+- 8/8 CPUs up via PSCI CPU_ON, GIC/timer/SGI OK
+- AppleCLCD 1080x2400 stride 4320 on fb surface **0x78816000** (ovl L1; the
+  shim/LK fb is 0x77e20000 pitch 4352 - two different layers)
+- Touch (GT9896s), MT6359 keys, battery all live; UFS reads work
+- Root fails: `hfs_ValidateHFSPlusVolumeHeader: unknown Volume Signature`
+  on Android userdata data -> needs real iOS HFS+ root
+
+Key session findings:
+- **realme lk enters the shim at EL2** (not EL1 like Xiaomi's). Shim now
+  installs `vbar_el2` vectors (start.S) and drops to EL1 via `enter_el1`
+  before jumping into XNU - the iBoot contract.
+- Kernel early fb writes are **cache-hidden** without `dc cvac` (the DSI
+  scans DRAM, not L1) - this is why XNU looked dead while fully running.
+- `sweetlog` writes the console ring to the LAST 1025 4K-blocks of userdata;
+  pull via recovery: `adb exec-out "dd if=/dev/block/sdc59 bs=4096
+  skip=$((<bytes>/4096 - 1025)) count=1025" > log.bin` (sdc59 = userdata
+  49.8GiB on LUN0). Must NOT pass `sweetlog=0` in cmdline.
+- The phone "freezes" on the shim text only visually - kernel runs fine.
+  The kernel panic/mount-loop writes to its own fb surface + the log ring.
+- phys_base 0xC0000000 is FREE System RAM (verified via /proc/iomem).
+- Build: kernel artifact from GH Actions run 42094290101 (macos-15) +
+  mkpayload + shim/build-athens.sh (NDK 28.2 clang) -> fastboot flash boot.
+
+Next: build iOS 16.7.16 HFS+ rootfs (rootfs.yml CI or tools/mkiosroot.sh),
+write to userdata LUN0 (DESTRUCTIVE - user must confirm), boot to GUI.
+Synthetic identity in mkadt.py --athens: serial G6TX00ATH3N5, MQA62HN/A.
+Tools: athens-bands.py/athens-ckpt.py = fb/DRAM checkpoint injectors.
+
 ## Agent handoff / active work (2026-10-15, latest)
 
 ### >>> UPDATE 2026-10-18 (read first, then the 10-17 handoff below) <<<
