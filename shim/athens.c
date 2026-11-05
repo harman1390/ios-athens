@@ -44,12 +44,24 @@ static void __attribute__((noreturn)) halt(void)
 
 void exc_handler(uint64_t slot, uint64_t *regs)
 {
+	uint64_t esr = rsr("esr_el2");
+	/* EC 0x18: MSR/MRS/sysreg trapped from EL1. XNU writes some regs that
+	 * only exist (or are trap-configured) at EL2; skip the instruction
+	 * and let the kernel continue. */
+	if ((esr >> 26) == 0x18) {
+		uint64_t elr = rsr("elr_el2");
+		con_str("SKIP", "sysreg trap");
+		con_hex("at", elr);
+		con_hex("esr", esr);
+		__asm__ volatile("msr elr_el2, %0" :: "r"(elr + 4));
+		return;
+	}
 	con_clear(BLUE);
 	/* slot & 3: 0 sync, 1 irq, 2 fiq, 3 serror (no string table: it would need relocations) */
 	con_str("PANIC", "exception");
 	con_hex2("SLOT", "n=", slot, "cpu=", rsr("mpidr_el1"));
 	con_str("STAGE", stage);
-	con_hex("ESR", rsr("esr_el2"));
+	con_hex("ESR", esr);
 	con_hex("ELR", rsr("elr_el2"));
 	con_hex("FAR", rsr("far_el2"));
 	con_hex("X30", regs[29]);
