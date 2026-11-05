@@ -94,8 +94,9 @@ if sudo test -d "$work/root/$dsc"; then
 		sudo ln "$f" "$work/root/System/Library/Caches/com.apple.dyld/${f##*/}"
 	done
 else
-	echo "WARN: no dyld cache dir at $dsc; Cryptexes/OS tree:"
-	sudo find "$work/root/private/preboot/Cryptexes/OS" -maxdepth 4 -type d | head -30
+	echo "WARN: no dyld cache dir at $dsc; cryptex roots:"
+	sudo find "$work/root/private/preboot/Cryptexes" -maxdepth 2 | head -40 || true
+	sudo find "$work/root/private/preboot/Cryptexes" -name 'com.apple.dyld' -type d 2>/dev/null || true
 fi
 
 # dyld does not search the cryptexes at ignition level 1: hard-link every

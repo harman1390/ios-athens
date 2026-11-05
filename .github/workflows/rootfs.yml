@@ -57,9 +57,11 @@ jobs:
       - name: Build the iOS root image
         run: |
           # mount each dmg via apfs-fuse and copy into one journaled case-sensitive HFS+ volume
+          ls -la research/ipsw-x/*.dmg
           OS_DMG=$(ls research/ipsw-x/*.dmg | head -1)
           SYS_DMG=$(ls research/ipsw-x/*.dmg | sed -n 2p)
           APP_DMG=$(ls research/ipsw-x/*.dmg | sed -n 3p)
+          echo "OS_DMG=$OS_DMG SYS_DMG=$SYS_DMG APP_DMG=$APP_DMG"
           tools/mkiosroot.sh "$OS_DMG" "$SYS_DMG" "$APP_DMG" ios16-root.img "${{ inputs.rootfs_size }}"
           sudo fsck.hfsplus -fy ios16-root.img
           sudo mkdir -p /mnt/iosroot
