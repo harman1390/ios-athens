@@ -37,11 +37,11 @@ done
 echo "stage $STAGE: $CMDLINE"
 
 mkdir -p shim/out
-python3 tools/mkadt.py shim/out/athens.adt "${ADT_FLAGS[@]}"
-python3 tools/mkpayload.py "$KERNEL" shim/out/athens.adt shim/out/athens-payload.bin --cmdline "$CMDLINE"
+python tools/mkadt.py shim/out/athens.adt "${ADT_FLAGS[@]}"
+python tools/mkpayload.py "$KERNEL" shim/out/athens.adt shim/out/athens-payload.bin --cmdline "$CMDLINE"
 # LK loads the ramdisk and DTB at fixed offsets; the payload must fit below the
 # DTB load address. MEASURE both from the phone's LK log / live boot (viva's
 # were ramdisk 0x47c80000, DTB 0x4bc80000 = 64 MiB of room).
-size=$(stat -f %z shim/out/athens-payload.bin 2>/dev/null || stat -c %s shim/out/athens-payload.bin)
+size=$(python -c "import os;print(os.path.getsize('shim/out/athens-payload.bin'))")
 [ "$size" -lt $((0x4bc80000 - 0x47c80000)) ] || { echo "error: payload ($size bytes) may overrun LK's DTB" >&2; exit 1; }
 shim/build-athens.sh "$STOCK" "$PWD/shim/out/athens-payload.bin"

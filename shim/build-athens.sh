@@ -15,13 +15,13 @@ for f in start.S athens.c console.c fdt.c loader.c; do
 done
 # LK puts the Image wherever it likes and nothing relocates it: no absolute
 # pointers may appear in the C objects (start.o's image_size is the exception).
-python3 ../tools/viva-check-abs.py out/athens/athens.o out/athens/console.o out/athens/fdt.o out/athens/loader.o
+python ../tools/viva-check-abs.py out/athens/athens.o out/athens/console.o out/athens/fdt.o out/athens/loader.o
 ld.lld -T shim.ld --build-id=none -N "${OBJS[@]}" -o out/athens/shim.elf
 ld.lld -T shim.ld --build-id=none -N "${OBJS[@]}" --oformat=binary -o out/athens/Image
-size=$(python3 ../tools/viva-check-abs.py --symbol _end out/athens/shim.elf)
-python3 -c "f=open('out/athens/Image','r+b'); f.truncate($size)"
+size=$(python ../tools/viva-check-abs.py --symbol _end out/athens/shim.elf)
+python -c "f=open('out/athens/Image','r+b'); f.truncate($size)"
 # MediaTek LK only boots a gzip kernel (viva proved it; verify on realme LK in
 # Phase 1 — if a raw Image is needed, drop this step).
 gzip -9 -n -c out/athens/Image > out/athens/Image.gz
-python3 ../tools/viva-bootimg.py repack "$STOCK" out/athens/Image.gz out/athens-boot.img ${2:+--ramdisk "$2"}
+python ../tools/viva-bootimg.py repack "$STOCK" out/athens/Image.gz out/athens-boot.img ${2:+--ramdisk "$2"}
 ls -l out/athens/Image out/athens/Image.gz out/athens-boot.img
