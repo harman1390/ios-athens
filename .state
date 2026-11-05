@@ -1,1 +1,0 @@
-{"flashmode": "XFLASH", "patched": true, "hwcode": 2454, "meid": "0e040a1c542fc9685600d5fbdffb912e", "socid": "d98dc45bbab2a0d2a2f86a14631c6d9eff2d9611fdb124f9c33a0511c49ed505", "flashtype": "ufs", "flashsize": 63979913216, "target_config": {"sbc": true, "sla": false, "daa": true, "epp": false, "cert": false, "memread": true, "memwrite": true, "cmdC8": true}}
