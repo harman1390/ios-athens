@@ -41,8 +41,8 @@ jobs:
           for f in $(python3 - <<'EOF'
           import plistlib
           m = plistlib.load(open('research/ipsw-x/BuildManifest.plist','rb'))
-          for p in m['buildIdentities'][0]['manifest'].values():
-              n = p['info'].get('Path','')
+          for p in m['BuildIdentities'][0]['Manifest'].values():
+              n = (p.get('Info') or {}).get('Path','')
               if n.endswith('.dmg'): print(n)
           EOF
           ); do python3 tools/remotezip.py "${{ inputs.ipsw_url }}" "$f" research/ipsw-x/; done
