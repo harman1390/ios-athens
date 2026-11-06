@@ -1,5 +1,5 @@
 --- a/bsd/dev/sweet_ufs.c	2026-11-06 15:02:38.110604700 +0530
-+++ b/bsd/dev/sweet_ufs.c	2026-11-06 15:03:42.731683900 +0530
++++ b/bsd/dev/sweet_ufs.c	2026-11-06 15:28:56.405351500 +0530
 @@ -312,7 +312,7 @@
  	}
  	if (memcmp(b, "EFI PART", 8) != 0) {
@@ -36,6 +36,15 @@
  	}
  	if (ufs_rd(REG_UTRLDBR)) {
  		printf("SWEET UFS: requests outstanding from the bootloader\n");
+@@ -557,7 +557,7 @@
+ 	if (((su.dma_pa + DMA_SIZE - 1) >> 32) && !(ufs_rd(REG_CAP) & CAP_64AS)) {
+ 		printf("SWEET UFS: DMA memory at 0x%llx but the host has no 64-bit addressing\n",
+ 		    su.dma_pa);
+-		return ENXIO;
++		return 69;
+ 	}
+ 	ufs_wr(REG_IE, 0);                      /* polled operation */
+ 	ufs_wr(REG_IS, ufs_rd(REG_IS));
 @@ -784,7 +784,7 @@
  	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
  	    size < 2 * sizeof(uintptr_t)) {
@@ -45,6 +54,15 @@
  	}
  	PE_parse_boot_argn("ufsroot", want, sizeof(want));
  	uint32_t rw = 0;
+@@ -797,7 +797,7 @@
+ 
+ 	su.regs = ml_io_map(reg[0], reg[1]);
+ 	/* A host without 64-bit addressing gets DMA memory below 4 GiB. */
+-	ppnum_t max_pnum = (ufs_rd(REG_CAP) & CAP_64AS) ? 0 : (ppnum_t)(atop_64(1ULL << 32) - 1);
++	ppnum_t max_pnum = (ppnum_t)(atop_64(1ULL << 32) - 1); /* always <4GiB: CAP read can lie early */
+ 	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, max_pnum, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+ 		printf("SWEET UFS: no contiguous DMA memory\n");
 @@ -831,7 +831,7 @@
  			break;
  		}
