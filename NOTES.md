@@ -504,3 +504,8 @@ nodes were likely absent. Changed to touch /dev/null|zero|console as
 REAL files (open() succeeds regardless) + mknod attempt kept. If this
 still panics, the lookup isn't reaching rootfs -> kernel-side VFS fix
 (create /dev/null post-mount) is next.
+
+**Dual /dev/null fix in flight**: kernel patch 0162 adds devfs_make_node for
+null/zero/console in sweet-ufs (covers devfs-mounted-but-nodes-missing);
+image rebuild seeds real /dev/null file (covers devfs-not-mounted).
+Kernel run 42260613587 (~9min), image run 42260249664 (~2.5h).
