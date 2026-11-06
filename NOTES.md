@@ -463,3 +463,28 @@ What it took today (in order): 0058 HID services (Apple IOHIDFamily-1915 user cl
      cpu_init, before arm_vm_init.
   5. panic hook at top of panic_trap_to_debugger: va_copy + _doprnt(fmt, &copy, sweet_early_putc, 16).
   Verify with tools/xnu-cc.py (compile+symbols) and patch-order simulation before the single CI run.
+
+## ATHENS (RMX2117) — rootfs deployed, launchd spawn reached (2026-11-06)
+
+**Kernel**: fully working on hardware — 8/8 CPUs PSCI, GIC, timer, AppleCLCD
+(ovl1 surface, console to it via 0160 + EL2 trap-skip emulation in shim),
+touch, MT6359 PMIC keys + battery, UFS host.
+
+**Rootfs**: ios16-root.simg (iPhone X 16.7.16, 4 DMGs merged) flashed to
+userdata/sdc59. Last sparse chunk failed -> repaired via recovery dd
+(sha256-verified, tail 283 MB at block 12513632).
+
+**Boot chain so far**: kernel boots -> mounts HFS+ root -> spawns launchd
+(pid 1) -> panic `initproc failed to start: failed to reserve stdin
+descriptor: /dev/null: 2` (ENOENT). devfs can't mount without a /dev dir
+on the rootfs; mkiosroot.sh now seeds /dev + real device nodes.
+
+**Kernel bugs found+fixed**: realme lk enters at EL2 (shim now erets to EL1),
+early fb writes need `dc cvac`, secondary CPUs trap MSR/MRS to EL2 (shim
+emulates/skip via new exc path), UFS DMA>4G -> constrained <4G always,
+`/sweet-ufs` ADT node was missing (mkadt needed --athens-ufs; regenerating
+the adt without it silently dropped the node), UFS ENXIO sites now tagged
+61-69 for diagnosis.
+
+**Pending**: rootfs CI run 42204859640 rebuilds image w/ /dev; flash +
+boot to verify launchd proceeds. Then Setup Hello gate -> home screen.
