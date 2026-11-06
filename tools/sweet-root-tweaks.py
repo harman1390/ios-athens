@@ -64,11 +64,17 @@ def launchd(root):
         if '_PanicOnCrash' in job:
             job['_PanicOnCrasX'] = job.pop('_PanicOnCrash')
             renamed += 1
-    removed = [k for k, j in jobs.items() if j.get('Label') == 'com.apple.CommCenter']
+    # daemons that cannot run on this port (no baseband, no SEP) and crash hard
+    # enough to panic boot; drop them like CommCenter.
+    drop_labels = {
+        'com.apple.CommCenter',
+        'com.apple.sepul',
+    }
+    removed = [k for k, j in jobs.items() if j.get('Label') in drop_labels]
     for k in removed:
         del jobs[k]
     save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
-    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} CommCenter jobs removed')
+    print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} jobs removed')
 
 
 def containers(root):

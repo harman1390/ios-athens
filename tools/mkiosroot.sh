@@ -94,6 +94,15 @@ for n in null zero console; do
 	sudo touch "$work/root/dev/$n"
 	sudo chmod 666 "$work/root/dev/$n"
 done
+
+# sepul (Secure Enclave helper) cannot run on this port: no SEP hardware, and
+# its binary parses malformed under dyld ignition, panicking boot as a
+# mandatory task. Overwrite it with a valid no-op Mach-O so the spawn parses
+# and exits cleanly instead of dying in dyld.
+stub=$(find "$work/root" -type f \( -name 'sysstatuscheck' -o -name 'true' \) 2>/dev/null | head -1)
+while IFS= read -r sep; do
+	[ -n "$stub" ] && sudo cp "$stub" "$sep" && echo "stubbed $sep (with $stub)" >&2
+done < <(sudo find "$work/root" -type f -name 'sepul' 2>/dev/null)
 # prefer real device nodes where the fs supports them (devfs numbers on Darwin)
 sudo mknod -m 666 "$work/root/dev/null" c 3 2 2>/dev/null || true
 sudo mknod -m 666 "$work/root/dev/zero" c 3 3 2>/dev/null || true
