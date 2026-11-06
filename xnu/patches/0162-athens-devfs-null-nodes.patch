@@ -1,0 +1,14 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -850,6 +850,11 @@
+ 	su.bdev = makedev(su.bmajor, 0);
+ 	devfs_make_node(su.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "ufsroot0");
+ 	devfs_make_node(makedev(su.cmajor, 0), DEVFS_CHAR, UID_ROOT, GID_OPERATOR, 0640, "rufsroot0");
++	/* launchd's ignition open("/dev/null") fails ENOENT when devfs's default
++	 * nodes are not populated yet; create them here alongside ufsroot0. */
++	devfs_make_node(makedev(3, 2), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "null");
++	devfs_make_node(makedev(3, 3), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "zero");
++	devfs_make_node(makedev(0, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0600, "console");
+ 	/* Only now, with the partition bounds known, can writes be allowed. */
+ 	su.writable = (rw != 0);
+ 	su.ready = true;
