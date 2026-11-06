@@ -86,13 +86,17 @@ copy "$work/os/root" "$work/root"
 copy "$work/sysos/root" "$work/root/private/preboot/Cryptexes/OS"
 copy "$work/appos/root" "$work/root/private/preboot/Cryptexes/App"
 
-# launchd's dyld ignition opens /dev/null during initproc spawn; it resolves
-# through devfs which mounts at /dev. If /dev is absent devfs cannot attach,
-# and if devfs fails the real nodes below still serve the open.
+# launchd's dyld ignition opens /dev/null during initproc spawn; the open just
+# needs a resolvable vnode. devfs supplies it if it mounts at /dev; if devfs is
+# absent a real file still lets open() succeed so spawn can proceed.
 sudo mkdir -p "$work/root/dev"
-sudo mknod -m 666 "$work/root/dev/null" c 3 2 || true
-sudo mknod -m 666 "$work/root/dev/zero" c 3 3 || true
-sudo mknod -m 600 "$work/root/dev/console" c 0 0 || true
+for n in null zero console; do
+	sudo touch "$work/root/dev/$n"
+	sudo chmod 666 "$work/root/dev/$n"
+done
+# prefer real device nodes where the fs supports them (devfs numbers on Darwin)
+sudo mknod -m 666 "$work/root/dev/null" c 3 2 2>/dev/null || true
+sudo mknod -m 666 "$work/root/dev/zero" c 3 3 2>/dev/null || true
 sudo chown 0:0 "$work/root/dev" "$work/root/dev/"* 2>/dev/null || true
 
 # Shared cache where dyld looks at ignition level 1: hard links, no extra space.
