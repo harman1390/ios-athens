@@ -509,3 +509,13 @@ still panics, the lookup isn't reaching rootfs -> kernel-side VFS fix
 null/zero/console in sweet-ufs (covers devfs-mounted-but-nodes-missing);
 image rebuild seeds real /dev/null file (covers devfs-not-mounted).
 Kernel run 42260613587 (~9min), image run 42260249664 (~2.5h).
+
+**/dev/null RESOLVED**: kernel patch 0162 (devfs_make_node null/zero/console)
++ image real-file /dev/null cleared the stdin-reservation panic. launchd now
+runs into real userspace. NEW blocker: pid 4 "sepul" panics parsing its own
+Mach-O — "malformed load command #13 of 32 ... size too large, handshake
+structure not initialized". SEP daemon binary is corrupt/incompatible.
+Next: drop sepul (and any SEP-dependent jobs) from launchd.plist like
+CommCenter, or fix the binary in the image.
+Kernel run 42260613587, image run 42260249664 both applied; boot img has
+ufslun=2 + devfs nodes; userdata has /dev real-file fix.
