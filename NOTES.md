@@ -494,3 +494,13 @@ rootfs_size=52G -> image 52 GiB > ~49.8 GiB userdata -> fastboot "size span
 overflow". Re-triggered with rootfs_size=48G (the 48 GiB that fit before).
 mkiosroot.sh now seeds /dev + real null/zero/console nodes. Boot after flash
 should clear the "reserve stdin descriptor" panic -> Setup Hello.
+
+**/dev/null panic deep-dive (run 42260249664)**: /dev + real mknod device
+nodes still panicked "reserve stdin descriptor: /dev/null: ENOENT".
+Diagnosis: devfs is NOT mounting at /dev (if it were, devfs's own null
+would resolve), so the open hits rootfs /dev -> needs /dev/null there.
+mknod on Linux hfsplus doesn't reliably write device records, so the
+nodes were likely absent. Changed to touch /dev/null|zero|console as
+REAL files (open() succeeds regardless) + mknod attempt kept. If this
+still panics, the lookup isn't reaching rootfs -> kernel-side VFS fix
+(create /dev/null post-mount) is next.
