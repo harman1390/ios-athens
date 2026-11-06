@@ -519,3 +519,10 @@ Next: drop sepul (and any SEP-dependent jobs) from launchd.plist like
 CommCenter, or fix the binary in the image.
 Kernel run 42260613587, image run 42260249664 both applied; boot img has
 ufslun=2 + devfs nodes; userdata has /dev real-file fix.
+
+**sepul fix (run 42305185694)**: sepul panicked on malformed Mach-O (dataless
+cryptex binary / no SEP). Two-pronged: (1) removed com.apple.sepul from
+launchd.plist, (2) stubbed the binary with a valid no-op in mkiosroot.sh
+(find -name sepul -> cp sysstatuscheck/true). If it now panics on the NEXT
+cryptex binary, the dataless-placeholder problem is systemic and needs
+broad materialization, not per-binary stubs.
