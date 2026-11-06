@@ -488,3 +488,9 @@ the adt without it silently dropped the node), UFS ENXIO sites now tagged
 
 **Pending**: rootfs CI run 42204859640 rebuilds image w/ /dev; flash +
 boot to verify launchd proceeds. Then Setup Hello gate -> home screen.
+
+**Update (run 42235617514)**: first /dev rebuild (42205129956) used default
+rootfs_size=52G -> image 52 GiB > ~49.8 GiB userdata -> fastboot "size span
+overflow". Re-triggered with rootfs_size=48G (the 48 GiB that fit before).
+mkiosroot.sh now seeds /dev + real null/zero/console nodes. Boot after flash
+should clear the "reserve stdin descriptor" panic -> Setup Hello.
