@@ -48,13 +48,14 @@ index 0000000..0000000
 +bool
 +AppleSEPManager::start(IOService *provider)
 +{
-+	OSPtr<IORegistryEntry> armio = IORegistryEntry::fromPath(
++	IORegistryEntry *armio = IORegistryEntry::fromPath(
 +	    "IODeviceTree:/arm-io", gIODTPlane);
 +	if (armio != NULL) {
 +		setName("sep");
-+		if (!attachToParent(armio.get(), gIODTPlane)) {
++		if (!attachToParent(armio, gIODTPlane)) {
 +			IOLog("SWEET SEP: attachToParent(arm-io) failed\n");
 +		}
++		armio->release();
 +	}
 +	if (!IOService::start(provider)) {
 +		return false;
