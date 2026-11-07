@@ -69,10 +69,17 @@ def launchd(root):
     drop_labels = {
         'com.apple.CommCenter',
         'com.apple.sepul',
+        'com.apple.seputil',
     }
     removed = [k for k, j in jobs.items() if j.get('Label') in drop_labels]
     for k in removed:
         del jobs[k]
+    # dump every job label so we can see the real names of SEP/security tasks
+    # without needing the plist extracted from the device image.
+    for k in sorted(jobs):
+        j = jobs[k]
+        print('launchd job:', j.get('Label'), '|', k,
+              '| MandatoryService' if isinstance(j, dict) and j.get('MandatoryService') else '')
     save(path, plist, st.st_uid, st.st_gid, st.st_mode & 0o7777)
     print(f'launchd.plist: {renamed} _PanicOnCrash renamed, {len(removed)} jobs removed')
 
