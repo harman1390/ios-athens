@@ -20,7 +20,7 @@
      "   {"
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetSEP.cpp
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,118 @@
 +/*
 + * Built-in SEP (Secure Enclave) stub for SWEET: answers the AppleSEPControl
 + * user client that launchd's data-protection boot tasks (sepul, seputil)
