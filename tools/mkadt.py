@@ -60,7 +60,14 @@ VIVA_UFS, VIVA_UFS_SIZE = 0x11270000, 0x4000
 # source (android_kernel_realme_mt6853, mt6853.dts); addresses marked MEASURE
 # must be confirmed from the phone's live FDT / atag before flashing (Phase 0
 # in ATHENS.md).
-ATHENS_PHYS_BASE, ATHENS_MEM_SIZE = 0xc0000000, 0x1be000000 - 0xc0000000  # MEASURE live FDT
+# Live-FDT reserved-memory (TWRP /proc/device-tree, 2026-11-08): every mblock
+# carve-out sits below 0xc0000000 or above 0x1be000000 EXCEPT
+# mblock-17-DPM-reserved 0xffe60000-0xffffffff (the DRAM power-management MCU
+# workspace, still active under XNU). The window must end at 0xffe60000 or the
+# DPM firmware scribbles on kernel pages - the "stray writer" behind the
+# changing pmap/zone panics. viva's window needed no such cut because all of
+# its carve-outs stayed below 0xc0000000.
+ATHENS_PHYS_BASE, ATHENS_MEM_SIZE = 0xc0000000, 0xffe60000 - 0xc0000000  # verified live FDT
 ATHENS_GICD, ATHENS_GICD_SIZE = 0x0c000000, 0x40000          # dts
 ATHENS_GICR, ATHENS_GICR_SIZE = 0x0c040000, 0x200000         # dts
 ATHENS_FB, ATHENS_FB_STRIDE = 0x77e20000, 1088 * 4           # atag,videolfb measured 2026-11-06; pitch MEASURE

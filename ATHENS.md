@@ -26,7 +26,7 @@ identity/storage decisions). Device runbook: `docs/athens-flash.md`.
 | Panel | NT36672C JDI 1080×2400 120 Hz **DSI video mode** (videolfb blob name) OR NT35595 Truly cmd-mode (lcmname prop) — two panel variants, runtime tells which | measured live FDT |
 | Framebuffer | presented surface at **0x78816000** (AppleCLCD 1080x2400 stride 4320); OVL1 L0 also at 0x77e20000 | verified kernel log |
 | RAM | **6 GiB, 0x40000000–0x1c0000000** (memory/reg) + reserved@1401x000 carve-outs | measured live FDT |
-| XNU RAM | provisional 0xc0000000–0x1be000000 (viva-style high window) | verify against live reserved-memory |
+| XNU RAM | **0xc0000000–0xffe60000** — must NOT include mblock-17-DPM-reserved 0xffe60000–0xffffffff (only fixed carve-out inside the old viva-style window; stray-writer source). High bank 0x100000000–0x1bfff000 is free for a future second range | verified live FDT 2026-11-08 |
 | GICv3 | GICD 0x0c000000 (0x40000), GICR 0x0c040000 (0x200000), INTPOL 0x0c53d668 | mt6853.dts |
 | Timer | 13 MHz, virtual timer PPI 11 = INTID 27 | mt6853.dts |
 | CPUs | 6× A55 MPIDR 0x000–0x500, 2× A76 0x600/0x700, PSCI CPU_ON | mt6853.dts |

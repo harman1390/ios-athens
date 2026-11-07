@@ -1,6 +1,37 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
-## >>> ATHENS HANDOFF (RMX2117, MT6853) - read first <<<
+## >>> ATHENS HANDOFF 2026-11-08 ~03:15 (RMX2117, MT6853) - read first <<<
+
+**DPM OVERLAP FOUND + FIXED (the "stray writer" hunt):** the earlier note
+below that RULED OUT co-processor overlap was WRONG - it claimed all
+live-FDT carve-outs were <0xc0000000 or >0x1be000000, but
+**mblock-17-DPM-reserved = 0xffe60000-0xffffffff sits INSIDE the XNU
+window** 0xc0000000-0x1be000000 (verified again via TWRP
+/proc/device-tree/reserved-memory; every other fixed mblock is below
+0xc0000000 or at/above 0x1bffff000). DPM = MediaTek DRAM/power-management
+MCU workspace, stays active - the only bus-master reservation in kernel
+RAM, and viva needed no such cut (all its carve-outs <0xc0000000).
+That is a physical stray writer into whatever page the VM hands out in
+the last ~600MB of the window -> explains ALL FIVE changing panics
+(task_id_token off:8, kalloc.12288 off:64, pmap PTE garbage, pmap.c:4090
+"invalid pte", pmap.c:6313 "over-write of pte"). The earlier athens-1g
+test (dram 0xc0000000-0xfff00000) still overlapped DPM by 640KB AND put
+the panic log at 0xfff00000 inside it - inconclusive, not a refutation.
+FIX: mkadt ATHENS_MEM_SIZE now ends the window at 0xffe60000 (usable
+0xc0000000-0xffd60000 ~1GiB, panic log 0xffd60000-0xffe60000). Side
+benefit: all kernel RAM is <4GiB so the UFS bounce can never go >32-bit.
+Built `shim/out/athens-boot-dpmfix.img` = same kernel
+(kout/kernel.development.sweet, quarantine+panic-dump instrumentation)
++ same cmdline (cpus=8, ufsrw=1, sweetlog=0) + new ADT. Byte-identical
+layout to the proven image (kernel slot = kernel.development.sweet.gz
+6522248, payload ramdisk at 0x639000). FLASHED to sdc52 via TWRP dd
+(md5 258d766e verified on-partition). NEXT: reboot, watch for panics.
+If a panic still occurs the 0166/0167 instrumentation may now catch a
+CPU-side writer (SWEETPAN record at sdc59 tail offset 0);
+if clean - DPM was the stray writer, then look at re-adding the
+0x100000000-0x1bfff000 bank (~1.9GiB) as a second dram range later.
+
+## ATHENS HANDOFF (RMX2117, MT6853) - earlier milestone notes
 
 **MILESTONE: XNU-8796 fully boots on RMX2117** (verified via the UFS sweetlog
 ring, `logs/athens-log.bin` pulled from recovery). Kernel reaches root-mount:
