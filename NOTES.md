@@ -38,6 +38,29 @@ CPU-side writer (SWEETPAN record at sdc59 tail offset 0);
 if clean - DPM was the stray writer, then look at re-adding the
 0x100000000-0x1bfff000 bank (~1.9GiB) as a second dram range later.
 
+**UPDATE ~04:00:** DPM fix did NOT stop corruption - panic recurred
+(task_id_token element-modified-after-free again, 48B of high-entropy
+data that is neither kernel text nor rootfs content -> NOT a file-data
+leak; the "ARM64-looking" bytes were a red herring). No SWEETPAN and no
+ring update in the sdc59 tail -> panic fired while su.ready/writable was
+false or the polled panic write failed (probably pre-UFS). So: writer
+still unknown; DPM exclusion was correct hygiene but not the culprit.
+Remaining suspect classes: kernel-side wild VA write, another in-window
+bus-master, cache/attribute hazard. Upstream ios-viva runs the SAME xnu
+base+patches to a working GUI -> corruption is athens-specific.
+New tooling this session: (a) shim panic_scan prints surviving panic
+text from the pram regions (0xffd60000 new / 0x1bdf00000 old) on the
+next boot's shim screen - build shim locally with NDK 28.2 clang
+(Sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/windows-x86_64/bin);
+(b) patch 0168 (CI 42419740405) accumulates the panic console
+transcript while panic_active() and rewrites a SWEETPAN record at the
+tail - all panics post-UFS-init become pullable.
+WORKING boot-img recipe (verified): `viva-bootimg.py repack
+backup/boot.img shim/out/athens/Image.gz OUT --ramdisk PAYLOAD`;
+payload = `mkpayload.py kout/kernel.development.sweet shim/out/athens.adt
+... --cmdline "..."`. Flash via `fastboot flash boot` (works) or TWRP
+adb push+`dd of=/dev/block/sdc52`.
+
 ## ATHENS HANDOFF (RMX2117, MT6853) - earlier milestone notes
 
 **MILESTONE: XNU-8796 fully boots on RMX2117** (verified via the UFS sweetlog
