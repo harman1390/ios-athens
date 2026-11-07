@@ -1,0 +1,50 @@
+--- a/osfmk/kern/task_ident.c
++++ b/osfmk/kern/task_ident.c
+@@ -76,6 +76,32 @@ tidt_reference(task_id_token_t token)
+ 	os_ref_retain(&token->tidt_refs);
+ }
+ 
++/* SWEET: quarantine freed tokens with a canary instead of zfree; re-validate
++ * the whole quarantine on each release so a stray write to a freed token
++ * panics within one release of the write, exposing the writer's context. */
++#define TIDT_QMAX 512
++#define TIDT_CANARY 0xC3
++static task_id_token_t tidt_quarantine[TIDT_QMAX];
++static volatile uint32_t tidt_qcount;
++
++static void
++tidt_validate_quarantine(void)
++{
++	uint32_t n = tidt_qcount;
++	for (uint32_t i = 0; i < n; i++) {
++		const uint8_t *p = (const uint8_t *)tidt_quarantine[i];
++		if (!p) {
++			continue;
++		}
++		for (size_t j = 0; j < sizeof(struct task_id_token); j++) {
++			if (p[j] != TIDT_CANARY) {
++				panic("SWEET: freed task_id_token %p modified after free "
++				    "at +%zu (=0x%02x) - stray writer caught", p, j, p[j]);
++			}
++		}
++	}
++}
++
+ static void
+ tidt_release(task_id_token_t token)
+ {
+@@ -113,7 +139,13 @@ tidt_release(task_id_token_t token)
+ 	}
+ 
+-	zfree(task_id_token_zone, token);
++	tidt_validate_quarantine();
++	if (tidt_qcount < TIDT_QMAX) {
++		memset(token, TIDT_CANARY, sizeof(*token));
++		tidt_quarantine[tidt_qcount++] = token;
++	} else {
++		zfree(task_id_token_zone, token);
++	}
+ }
+ 
+ void
+ task_id_token_release(task_id_token_t token)
