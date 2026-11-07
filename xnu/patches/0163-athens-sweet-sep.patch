@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..0000000
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetSEP.cpp
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,136 @@
 +/*
 + * Built-in SEP (Secure Enclave) stub for SWEET: publishes an
 + * AppleSEPManager service + AppleSEPUserClient that launchd's
@@ -45,7 +45,9 @@ index 0000000..0000000
 +bool
 +AppleSEPManager::start(IOService *provider)
 +{
++	IOLog("SWEET SEP: start() called provider=%p\n", provider);
 +	if (!IOService::start(provider)) {
++		IOLog("SWEET SEP: IOService::start failed\n");
 +		return false;
 +	}
 +	setProperty(kIOUserClientClassKey, "AppleSEPUserClient");

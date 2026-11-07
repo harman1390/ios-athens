@@ -1,0 +1,23 @@
+--- a/osfmk/kern/task_ident.c
++++ b/osfmk/kern/task_ident.c
+@@ -335,6 +335,10 @@ convert_task_id_token_to_port(
+ 		return IP_NULL;
+ 	}
+ 
++	/* SWEET: catch writers on freed tokens (task_id_token off:8 UAF).
++	 * A live token always has tidt_refs>0; ZC_ZFREE_CLEARMEM zeroes it. */
++	assert(os_ref_get_count_raw(&token->tidt_refs) > 0);
++
+ 	zone_require(task_id_token_zone, token);
+ 
+ 	kr = ipc_kobject_make_send_lazy_alloc_port(&token->port,
+@@ -353,6 +357,9 @@ task_id_token_set_port(
+ 	ipc_port_t port)
+ {
+ 	assert(token && port && (ip_kotype(port) == IKOT_TASK_FATAL));
++
++	/* SWEET: token must be live when its port is attached. */
++	assert(os_ref_get_count_raw(&token->tidt_refs) > 0);
+ 	token->port = port;
+ }
+ #endif /* CONFIG_PROC_RESOURCE_LIMITS */
