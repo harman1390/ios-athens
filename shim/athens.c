@@ -86,6 +86,38 @@ static int streq(const char *a, const char *b)
 	return *a == *b;
 }
 
+/* The kernel's embedded panic/debug log lives at panic_base (dram top, 1 MiB)
+ * and its plain-text kprintf/panic strings survive a warm reset. Dump the
+ * printable runs from the current and the previous panic_base so a panic we
+ * could not photograph can still be read on the next boot. */
+static void panic_scan(void)
+{
+	static const uint64_t regions[] = { 0xffd60000UL, 0x1bdf00000UL };
+	char line[80];
+	for (unsigned r = 0; r < sizeof(regions) / sizeof(regions[0]); r++) {
+		const uint8_t *base = (const uint8_t *)regions[r];
+		unsigned shown = 0;
+		for (uint64_t off = 0; off < 0x100000 && shown < 24; ) {
+			uint64_t start = off;
+			while (off < 0x100000 && base[off] >= 0x20 && base[off] < 0x7f)
+				off++;
+			uint64_t len = off - start;
+			off++;
+			if (len < 24)
+				continue;
+			unsigned i = 0;
+			for (unsigned h = 0; h < 8; h++)
+				line[i++] = "0123456789abcdef"[(regions[r] >> (28 - h * 4)) & 0xf];
+			line[i++] = ':';
+			for (uint64_t j = 0; j < len && i < sizeof(line) - 1 && j < 66; j++)
+				line[i++] = (char)base[start + j];
+			line[i] = 0;
+			con_str("PRAM", line);
+			shown++;
+		}
+	}
+}
+
 /* fb_base from LK's /chosen/atag,videolfb (raw LE struct, maybe only 4-byte aligned). */
 static uint64_t videolfb_base(uintptr_t dtb)
 {
@@ -140,6 +172,7 @@ void shim_main(uint64_t dtb)
 	con_hex("SENT", rd32(CKPT_MAGIC + 4));	/* sentinel: stays 0xDEAD if kernel never wrote */
 	if (fb != FB_BASE)
 		con_str("WARN", "LK fb differs from FB_BASE; kernel fbcon must match");
+	panic_scan();
 	con_skip();
 
 	wr32(CKPT_MAGIC, 0);	/* reset for this attempt */
