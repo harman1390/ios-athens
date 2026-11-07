@@ -553,3 +553,19 @@ seputil matches AppleSEPControl (sep.yaml: xnu_name, AppleSEPManager
 kext, sepd endpoint 0, A7-IOP mailbox).
 Persistent log ring: last ~4 MB region of sdc59 works via
 `dd bs=1M skip=50500` + grep SWEET.
+
+**Kernel panic shift (SweetSEP boot)**: seputil task-exit panic became a
+kernel UAF: `[data.kalloc.16384] element modified after free` detected in
+_hfc_btree_open_ext during posix_spawn->exec_mach_imgact->_binary_match
+(backtrace symbolized vs kernel.development.sweet). NOT caused by
+SweetSEP — same signature on the skipped-patch boot. Corrupted element =
+16 KiB buffer = HFS btree node size. Candidate causes: (a) HFS node
+buffer lifecycle bug in hfs-627 on Linux-mkfs btree, (b) pre-existing
+heap corruptor detected at btree alloc, (c) journal replay writing into
+freed nodes. UFS DMA ruled out (single static bounce buffer, never
+freed). DISCRIMINATOR: factory image (42361811996) = clean journal+btree.
+If UAF persists on clean image -> kernel driver bug; if gone -> old
+userdata's btree corrupted by unclean rw panics. Persistent ring didn't
+capture this boot (panic kills flusher).
+SweetSEP patch 0163 confirmed in kernel (strings+personality present);
+seputil still printed "handshake structure not initialized".
