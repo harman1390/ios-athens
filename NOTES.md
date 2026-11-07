@@ -22,10 +22,17 @@ FIX: mkadt ATHENS_MEM_SIZE now ends the window at 0xffe60000 (usable
 benefit: all kernel RAM is <4GiB so the UFS bounce can never go >32-bit.
 Built `shim/out/athens-boot-dpmfix.img` = same kernel
 (kout/kernel.development.sweet, quarantine+panic-dump instrumentation)
-+ same cmdline (cpus=8, ufsrw=1, sweetlog=0) + new ADT. Byte-identical
-layout to the proven image (kernel slot = kernel.development.sweet.gz
-6522248, payload ramdisk at 0x639000). FLASHED to sdc52 via TWRP dd
-(md5 258d766e verified on-partition). NEXT: reboot, watch for panics.
++ same cmdline (cpus=8, ufsrw=1, sweetlog=0) + new ADT.
+BOOT-IMAGE FORMAT WARNING (verified): the working recipe is
+kernel slot = shim `out/athens/Image.gz` (4597 B) + ramdisk = SWEETXNU
+payload. The big `shim/out/athens-boot.img` in the tree has the RAW
+GZIPPED XNU MACH-O (kernel.development.sweet.gz) in the kernel slot -
+LK jumps to it and dies: "stuck on realme logo", XNU never starts.
+Same for athens-boot1g.img (raw Mach-O). The panic photos therefore
+came from a shim-based image (e.g. athens-boot1cpu.img). The dud was
+sitting flashed on sdc52. FLASHED correct image to `boot` via fastboot
+(fastboot flash boot works; only the userdata sparse chunks fail).
+NEXT: watch for panics.
 If a panic still occurs the 0166/0167 instrumentation may now catch a
 CPU-side writer (SWEETPAN record at sdc59 tail offset 0);
 if clean - DPM was the stray writer, then look at re-adding the
