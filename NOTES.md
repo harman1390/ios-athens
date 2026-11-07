@@ -569,3 +569,31 @@ userdata's btree corrupted by unclean rw panics. Persistent ring didn't
 capture this boot (panic kills flusher).
 SweetSEP patch 0163 confirmed in kernel (strings+personality present);
 seputil still printed "handshake structure not initialized".
+
+**seputil root cause identified (factory image boot):** panic `seputil[4]
+exited -- exit reason namespace 0 subcode 0x9 description: file does not
+start with MH_MAGIC(_64): 0x7a43019D 0x7a43019C` + "handshake structure
+not initialized" (the latter is KDP debugger noise, unrelated). Facts:
+- /usr/libexec/seputil IS a valid Mach-O (203584 bytes, cffaedfe) via
+  hard-link iNode - binary fine, exec works.
+- dyld cache + all 42 sub-caches valid ("dyld_v1 arm64").
+- "file does not start with MH_MAGIC" NOT in kernel binary or seputil -
+  it is userspace dyld's fileset validator (dyld_kernel_fixups.h is
+  shared kernel/dyld code).
+- seputil strings: wants AppleSEPManager service
+  (com.apple.driver.AppleSEPManager), AppleSEPUserClient, entitlement
+  com.apple.private.applesepmanager.allow, checks
+  IODeviceTree:/arm-io/sep, get_firmware_path, loads SEP fw img4.
+- My stub registered WRONG NAME (AppleSEPControl) -> seputil never
+  connected -> fell into firmware-load path -> hit a non-Mach-O file.
+- No file in the image starts with 0x7a43019d/9c (scanned all regular
+  files + all 179k iNode data forks) - likely an uninitialized/missing
+  firmware-path buffer or a file outside the volume.
+- kalloc.16384 UAF did NOT recur on clean factory image -> was old
+  userdata btree corruption.
+FIX: patch 0163 rewritten - AppleSEPManager attaches to
+IODeviceTree:/arm-io as "sep" (satisfies fromPath lookup), registers
+AppleSEPManager service + AppleSEPUserClient (initWithTask logs open
+type), logs every selector. Kernel CI 42386132566.
+NEXT: if seputil connects, log shows sel/args -> implement real
+handshake; else check whether arm-io attach works (attachToParent log).
