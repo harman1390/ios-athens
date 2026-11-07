@@ -638,3 +638,26 @@ code. Kernel CI 42400552881. Boot it -> panic will say
 SUSPECT (unverified): UFS host left in bad state (requests outstanding
 from previous panic'd boot) or flaky TUR; or ufslun=0 missing the right
 LUN after reflash (measured LUN0 2026-11-06, GPT confirmed on sdc).
+
+**UFS root cause SOLVED (factual):** recovery sysfs showed sdc = SCSI
+0:0:0:2 = UFS LUN 2. My ufslun=0 cmdline scanned the wrong LUN ->
+panic 63 (no GPT on LUN 0). Boot WITHOUT ufslun scans all -> finds
+GPT on LUN 2 -> userdata mounted rw. Correct arg: ufslun=2 or omit.
+**task_id_token UAF panic:** after UFS fix, boot reached userspace and
+panicked [task_id_token] element modified after free (off:8, val:
+0x17c1970217cb6c64, sz:40). off:8 = token->port. Writers:
+task_id_token_set_port (creation only) + lazy alloc in
+convert_task_id_token_to_port (exception path EXCEPTION_IDENTITY_
+PROTECTED fires on task fault). A dying task's token freed on one
+thread while convert writes port on another = race. assert patch 0165
+(os_ref_get_count_raw>0) panics at the WRITER for a real backtrace.
+**AppleSEPManager never registered:** class+personality both in kernel,
+identical to working AppleKeyStore pattern, but no SWEET SEP: line.
+start() either not invoked or IOService::start returned false silently.
+0163 now logs start() entry + failure. Kernel CI 42403347459.
+MISTAKES MADE (guessing): ufslun=0 (wrong LUN), attachToParent(arm-io)
+(DT graft couldnt even run - UFS resolves before services), reading
+KDP "handshake structure not initialized" as a SEP error (its debugger
+noise). LESSON: verify LUNs/partitions from recovery sysfs before
+cmdline args; verify every panic string's source file before treating
+it as the real fault.
