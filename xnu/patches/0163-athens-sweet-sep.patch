@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..0000000
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetSEP.cpp
-@@ -0,0 +1,146 @@
+@@ -0,0 +1,134 @@
 +/*
 + * Built-in SEP (Secure Enclave) stub for SWEET: publishes an
 + * AppleSEPManager service + AppleSEPUserClient that launchd's
@@ -17,10 +17,10 @@ index 0000000..0000000
 + * IOServiceGetMatchingService("AppleSEPManager"), opens an
 + * AppleSEPUserClient and handshakes via IOConnectCall*.
 + *
-+ * This pass registers the service on the arm-io DT node and logs EVERY
-+ * selector/argument so the real handshake protocol is observed from the
-+ * console, not guessed. Selectors return success with plausible data;
-+ * iterate on the log.
++ * This pass registers AppleSEPManager on IOResources (safe, like
++ * AppleKeyStore - no DT attach) and logs EVERY selector/argument so the
++ * real handshake protocol is observed from the console, not guessed.
++ * Selectors return success with plausible data; iterate on the log.
 + */
 +#include <pexpert/arm64/board_config.h>
 +
@@ -30,9 +30,6 @@ index 0000000..0000000
 +#include <IOKit/IOKitKeys.h>
 +#include <IOKit/IOLib.h>
 +#include <IOKit/IOMemoryDescriptor.h>
-+#include <IOKit/IODeviceTreeSupport.h>
-+#include <IOKit/IORegistryEntry.h>
-+#include <libkern/c++/OSPtr.h>
 +#include <libkern/c++/OSString.h>
 +#include <sys/proc.h>
 +
@@ -48,15 +45,6 @@ index 0000000..0000000
 +bool
 +AppleSEPManager::start(IOService *provider)
 +{
-+	IORegistryEntry *armio = IORegistryEntry::fromPath(
-+	    "IODeviceTree:/arm-io", gIODTPlane);
-+	if (armio != NULL) {
-+		setName("sep");
-+		if (!attachToParent(armio, gIODTPlane)) {
-+			IOLog("SWEET SEP: attachToParent(arm-io) failed\n");
-+		}
-+		armio->release();
-+	}
 +	if (!IOService::start(provider)) {
 +		return false;
 +	}
