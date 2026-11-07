@@ -1,20 +1,26 @@
 diff --git a/iokit/Kernel/arm/SweetSEP.cpp b/iokit/Kernel/arm/SweetSEP.cpp
 new file mode 100644
-index 0000000..60ddb37
+index 0000000..0000000
 --- /dev/null
 +++ b/iokit/Kernel/arm/SweetSEP.cpp
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,145 @@
 +/*
-+ * Built-in SEP (Secure Enclave) stub for SWEET: answers the AppleSEPControl
-+ * user client that launchd's data-protection boot tasks (sepul, seputil)
-+ * open and handshake through, so they initialize instead of exiting and
-+ * panicking a mandatory task.
++ * Built-in SEP (Secure Enclave) stub for SWEET: publishes an
++ * AppleSEPManager service + AppleSEPUserClient that launchd's
++ * data-protection boot tasks (seputil, keybagd) open and handshake
++ * through, so they initialize instead of exiting and panicking a
++ * mandatory task.
 + *
-+ * Apple's AppleSEPManager kext (closed) publishes AppleSEPControl; userspace
-+ * does IOServiceMatching("AppleSEPControl") -> open -> handshake selectors.
-+ * This first pass registers the service and logs EVERY selector/argument so
-+ * the real handshake protocol is observed from the console, not guessed.
-+ * Selectors return success with plausible data; iterate on the log.
++ * Apple's closed AppleSEPManager kext attaches at IODeviceTree:/arm-io/sep
++ * and publishes the AppleSEPManager service; seputil does
++ * IORegistryEntryFromPath("IODeviceTree:/arm-io/sep") and/or
++ * IOServiceGetMatchingService("AppleSEPManager"), opens an
++ * AppleSEPUserClient and handshakes via IOConnectCall*.
++ *
++ * This pass registers the service on the arm-io DT node and logs EVERY
++ * selector/argument so the real handshake protocol is observed from the
++ * console, not guessed. Selectors return success with plausible data;
++ * iterate on the log.
 + */
 +#include <pexpert/arm64/board_config.h>
 +
@@ -24,44 +30,67 @@ index 0000000..60ddb37
 +#include <IOKit/IOKitKeys.h>
 +#include <IOKit/IOLib.h>
 +#include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IODeviceTreeSupport.h>
++#include <IOKit/IORegistryEntry.h>
++#include <libkern/c++/OSPtr.h>
 +#include <libkern/c++/OSString.h>
 +#include <sys/proc.h>
 +
-+class AppleSEPControl : public IOService {
-+	OSDeclareDefaultStructors(AppleSEPControl);
++class AppleSEPManager : public IOService {
++	OSDeclareDefaultStructors(AppleSEPManager);
 +
 +public:
 +	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
 +};
 +
-+OSDefineMetaClassAndStructors(AppleSEPControl, IOService);
++OSDefineMetaClassAndStructors(AppleSEPManager, IOService);
 +
 +bool
-+AppleSEPControl::start(IOService *provider)
++AppleSEPManager::start(IOService *provider)
 +{
++	OSPtr<IORegistryEntry> armio = IORegistryEntry::fromPath(
++	    "IODeviceTree:/arm-io", gIODTPlane);
++	if (armio != NULL) {
++		setName("sep");
++		if (!attachToParent(armio.get(), gIODTPlane)) {
++			IOLog("SWEET SEP: attachToParent(arm-io) failed\n");
++		}
++	}
 +	if (!IOService::start(provider)) {
 +		return false;
 +	}
-+	setProperty(kIOUserClientClassKey, "SweetSEPUserClient");
++	setProperty(kIOUserClientClassKey, "AppleSEPUserClient");
 +	registerService();
-+	IOLog("SWEET SEP: AppleSEPControl registered (stub)\n");
++	IOLog("SWEET SEP: AppleSEPManager registered (stub)\n");
 +	return true;
 +}
 +
-+class SweetSEPUserClient : public IOUserClient {
-+	OSDeclareDefaultStructors(SweetSEPUserClient);
++class AppleSEPUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(AppleSEPUserClient);
 +
 +public:
++	bool initWithTask(task_t owningTask, void *securityToken,
++	    uint32_t type) APPLE_KEXT_OVERRIDE;
 +	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
 +	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
 +	    IOExternalMethodDispatch *dispatch, OSObject *target,
 +	    void *reference) APPLE_KEXT_OVERRIDE;
 +};
 +
-+OSDefineMetaClassAndStructors(SweetSEPUserClient, IOUserClient);
++OSDefineMetaClassAndStructors(AppleSEPUserClient, IOUserClient);
++
++bool
++AppleSEPUserClient::initWithTask(task_t owningTask, void *securityToken,
++    uint32_t type)
++{
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	IOLog("SWEET SEP: %s open type %u\n", name, type);
++	return IOUserClient::initWithTask(owningTask, securityToken, type);
++}
 +
 +IOReturn
-+SweetSEPUserClient::clientClose(void)
++AppleSEPUserClient::clientClose(void)
 +{
 +	terminate();
 +	return kIOReturnSuccess;
@@ -87,9 +116,8 @@ index 0000000..60ddb37
 +}
 +
 +IOReturn
-+SweetSEPUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
-+    __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target,
-+    __unused void *reference)
++AppleSEPUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++    IOExternalMethodDispatch *dispatch, OSObject *target, void *reference)
 +{
 +	IOReturn ret = kIOReturnSuccess;
 +	uint32_t in_scalars = args->scalarInputCount;
@@ -105,9 +133,8 @@ index 0000000..60ddb37
 +	IOLog("SWEET SEP: %s sel %u arg0 %llu in %u/%u out %u/%u\n", name, selector,
 +	    arg0, in_scalars, in_struct, out_scalars, out_struct);
 +
-+	/* Answer the handshake/negotiate-ish selectors with a plausible
-+	 * initialized handshake block so seputil's "handshake structure not
-+	 * initialized" check passes; everything else success/unsupported. */
++	/* Answer with a plausible initialized block so seputil's handshake
++	 * checks pass; everything else success/unsupported, all logged. */
 +	switch (selector) {
 +	default:
 +		if (out_struct > 0) {
@@ -122,6 +149,7 @@ index 0000000..60ddb37
 +	return ret;
 +}
 +#endif /* SWEET */
+
 diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 index 85699ae..65382a2 100644
 --- a/iokit/KernelConfigTables.cpp
@@ -130,9 +158,9 @@ index 85699ae..65382a2 100644
      "     'IOMatchCategory' = AppleKeyStore;"
      "   },"
      "   {"
-+    "     'IOClass'         = AppleSEPControl;"
++    "     'IOClass'         = AppleSEPManager;"
 +    "     'IOProviderClass' = IOResources;"
-+    "     'IOMatchCategory' = AppleSEPControl;"
++    "     'IOMatchCategory' = AppleSEPManager;"
 +    "   },"
 +    "   {"
      "     'IOClass'         = IOWatchdog;"
