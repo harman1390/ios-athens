@@ -1,0 +1,15 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -831,7 +831,10 @@
+ 		if (!lun_error) {
+ 			break;
+ 		}
+ 		if (lun == lun_last) {
+-			error = 66;
++			/* Preserve the real per-LUN error (62 host, 63 no GPT, 64
++			 * bad entries, 65 bad bounds, ENOENT missing part, or the
++			 * scsi/transport error) instead of masking it with 66. */
++			error = lun_error;
+ 		}
+ 	}
+ 	lck_mtx_unlock(&sweet_ufs_lock);
