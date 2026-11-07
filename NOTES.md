@@ -661,3 +661,19 @@ KDP "handshake structure not initialized" as a SEP error (its debugger
 noise). LESSON: verify LUNs/partitions from recovery sysfs before
 cmdline args; verify every panic string's source file before treating
 it as the real fault.
+
+**Memory-corruption root cause hunt (2026-11-07):** three distinct zone
+panics on different boots — task_id_token off:8, kalloc.12288 off:64,
+pmap PTE 0x2003037972ff1fe9 — all "element modified after free" with
+~40-440 bytes of high-entropy runtime data. One stray writer, not three
+bugs. RULED OUT (verified, not guessed): SMP race (cpus=1 still
+corrupts -> pmap wired underflow + data abort), co-processor overlap
+(live-FDT reserved map clean: all carve-outs <0xc0000000 or >0x1be000000,
+kernel range doesn't touch them), FB overlap (0x78816000 below kernel
+RAM), UFS DMA misconfig (sub-4GiB bounce, real PA, bounded copy-out).
+Corruption started when UFS began real data reads (post-LUN-2).
+**Catch-the-writer:** 0166 quarantines freed task_id_tokens (canary
+instead of zfree) + validator on each release -> stray write panics
+within one release, exposing writer context. Kernel CI 42409654215.
+Panic log lives at phys 0x1bdf00000 (panic_base) but /dev/mem absent in
+recovery so unreadable; ring log dies with panic so panics never flush.
