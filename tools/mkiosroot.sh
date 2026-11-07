@@ -95,12 +95,15 @@ for n in null zero console; do
 	sudo chmod 666 "$work/root/dev/$n"
 done
 
-# sepul (Secure Enclave helper) cannot run on this port: no SEP hardware, and
-# its binary parses malformed under dyld ignition, panicking boot as a
-# mandatory task. Overwrite it with a valid no-op Mach-O so the spawn parses
-# and exits cleanly instead of dying in dyld.
+# The "data-protection" launchd boot tasks handshake the Secure Enclave via
+# AppleSEPUserClient; with no SEP hardware they exit non-zero and the mandatory
+# task panics launchd. Overwrite the whole SEP boot-task binary family with a
+# valid Mach-O that exits 0 so the tasks report success (patch the contract,
+# don't disable them). A real kernel SEP stub comes later for SEP features.
 stub=$(sudo find "$work/root" -type f \( -name 'sysstatuscheck' -o -name 'true' \) 2>/dev/null | head -n1 || true)
-sudo find "$work/root" -type f -name 'sepul' 2>/dev/null | while IFS= read -r sep; do
+sudo find "$work/root" -type f \( -name 'sepul' -o -name 'seputil' -o -name 'sepfwupdate' \
+	-o -name 'seprestore*' -o -name 'sepmigration*' -o -name 'sepd*' -o -name 'sep_rom*' \) 2>/dev/null \
+	| while IFS= read -r sep; do
 	if [ -n "$stub" ]; then sudo cp "$stub" "$sep" && echo "stubbed $sep (with $stub)" >&2; fi
 done
 # prefer real device nodes where the fs supports them (devfs numbers on Darwin)
