@@ -615,3 +615,26 @@ use `adb push` to /tmp then `adb exec-out dd`.
 NEXT: if seputil connects (SWEET SEP: sel lines in log), implement real
 handshake; the log ring only holds ~4MB and often goes stale - pull
 /dev/block/sdc59 last 1025*4096 bytes after panic.
+
+**ufsroot0 panic - real cause unknown, instrumented:** kernel 42396684096
+(AppleSEPManager WITHOUT arm-io attach) panicked SAME:
+`IOPfindBSDRoot: SWEET UFS root ufsroot0 unavailable: 66`.
+CORRECTION to prior note: the DT attach could NOT cause this - UFS root
+resolution (IOFindBSDRoot -> sweet_ufs_rootdev) runs BEFORE IOKit service
+matching. The UFS failure started independently around the factory
+userdata reflash.
+FACTS:
+- GPT on LUN0 verified INTACT from recovery: userdata = part 58,
+  LBA 2566144-15615991 (13049848 blocks, ~49.8GiB). EFI PART magic ok.
+- Error 66 = sweet_ufs.c loop-exhaustion mask; real per-LUN error was
+  62(host not ready)/63(no GPT)/64(bad entries)/65(bad bounds)/
+  ENOENT/scsi-error - hidden by `error = 66`.
+- sweet_log_start() runs AFTER ufs_init succeeds, so a UFS failure
+  never flushes the ring -> ring shows stale old-boot data.
+- The SWEET UFS: LUN 0: no (XX) printf goes to framebuffer only.
+FIX: patch 0164 makes `error = lun_error` so the panic shows the real
+code. Kernel CI 42400552881. Boot it -> panic will say
+"unavailable: 62|63|64|65|2|scsi-code" -> tells which stage fails.
+SUSPECT (unverified): UFS host left in bad state (requests outstanding
+from previous panic'd boot) or flaky TUR; or ufslun=0 missing the right
+LUN after reflash (measured LUN0 2026-11-06, GPT confirmed on sdc).
