@@ -538,3 +538,18 @@ report success. DEEPER patch (hw-capability, not stub) = kernel-side built-in
 AppleSEP driver+user client answering the handshake, modeled on SweetKeyStore
 (patch 0038); needs seputil's handshake selector protocol (log-and-iterate).
 Run 42361275377 (stub + launchd label dump) in flight.
+
+**FACTORY-OS PIVOT (user directive)**: goal is a daily driver -> stock
+rootfs (factory=true skips sweet-root-tweaks + all binary stubs), kernel
+supplies all hw capability, fixes only from verified research.
+Current userdata image: run-42305909620 image (seputil plist-drop; binary
+intact). Factory img build: 42361811996.
+Kernel SweetSEP (patch 0163): built-in AppleSEPControl IOService +
+logging user client (modeled on SweetKeyStore). First build skipped the
+patch as corrupt (hunk count off by 2) -> boot still panicked
+kalloc.16384 use-after-free (a pre-existing kernel bug on seputil's
+teardown path, NOT the stub). Fixed count; rebuild 42363930829.
+seputil matches AppleSEPControl (sep.yaml: xnu_name, AppleSEPManager
+kext, sepd endpoint 0, A7-IOP mailbox).
+Persistent log ring: last ~4 MB region of sdc59 works via
+`dd bs=1M skip=50500` + grep SWEET.
