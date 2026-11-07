@@ -597,3 +597,21 @@ AppleSEPManager service + AppleSEPUserClient (initWithTask logs open
 type), logs every selector. Kernel CI 42386132566.
 NEXT: if seputil connects, log shows sel/args -> implement real
 handshake; else check whether arm-io attach works (attachToParent log).
+
+**AppleSEPManager arm-io attach broke UFS (panic):** kernel CI 42387138633
+(with attachToParent(arm-io) under IODeviceTree:/arm-io) PANICKED:
+`IOPfindBSDRoot: SWEET UFS root ufsroot0 unavailable: 66 @IOKitBSDInit.cpp:770`.
+The DT attach corrupted the arm-io node tree so the UFS driver could not
+find its provider -> no ufsroot0. The UFS driver's discovery happens via
+the real DT; grafting a service onto arm-io reordered/invalidated it.
+FIX: drop the DT attach entirely - register AppleSEPManager on IOResources
+(like AppleKeyStore). seputil's IOServiceGetMatchingService("AppleSEPManager")
+finds it by name; the IODeviceTree:/arm-io/sep path lookup is a secondary
+check that may still fail but the connection is the important part.
+Kernel CI 42396684096.
+ALSO: phone flashed via adb dd (recovery) - fastboot flash unreliable.
+boot = /dev/block/sdc52. `adb exec-in dd of=...` stdin streaming failed;
+use `adb push` to /tmp then `adb exec-out dd`.
+NEXT: if seputil connects (SWEET SEP: sel lines in log), implement real
+handshake; the log ring only holds ~4MB and often goes stale - pull
+/dev/block/sdc59 last 1025*4096 bytes after panic.
