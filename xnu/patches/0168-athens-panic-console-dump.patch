@@ -1,0 +1,60 @@
+Persist the whole panic console transcript to the partition log tail, not
+just the zalloc_uaf element. While panic_active() every _cnputs appends to a
+static buffer and rewrites the SWEETPAN record, so pmap/assert panics leave
+their string + backtrace readable from recovery instead of only ~10 screen
+lines.
+
+diff -u a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -1,6 +1,28 @@
+ 	return ufs_write_blocks(base, 1 + (uint32_t)((len + UFS_BLOCK - 1) / UFS_BLOCK));
+ }
+ 
++/* SWEET: while panicking, accumulate the console transcript into a static
++ * buffer and rewrite the panic record with the growing text on every write.
++ * Called from _cnputs (panic context, interrupts off); ufs_write_blocks is
++ * polled so this runs with the other CPUs quiesced. Self-guarded: no-op
++ * outside panic and before the UFS host/partition are up. */
++extern int panic_active(void);
++#define SWEET_PANIC_TEXT_SIZE (256u << 10)
++static char sweet_panic_text[SWEET_PANIC_TEXT_SIZE];
++static size_t sweet_panic_len;
++
++void
++sweet_panic_log_append(const char *c, int size)
++{
++	if (!panic_active() || size <= 0) {
++		return;
++	}
++	size_t n = (size_t)size;
++	if (n > sizeof(sweet_panic_text) - sweet_panic_len) {
++		n = sizeof(sweet_panic_text) - sweet_panic_len;
++	}
++	if (n) {
++		memcpy(sweet_panic_text + sweet_panic_len, c, n);
++		sweet_panic_len += n;
++		sweet_ufs_panic_write("console-panic", sweet_panic_text,
++		    sweet_panic_len);
++	}
++}
++
+ struct sweet_log_header {
+ 	char magic[8];
+ 	uint32_t version, size;
+diff -u a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -1,4 +1,5 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
++extern void sweet_panic_log_append(const char *c, int size);  /* bsd/dev/sweet_ufs.c */
+ extern void sweet_log_append(const char *c, int size);  /* bsd/dev/sweet_ufs.c */
+ #endif
+ 
+@@ -1,6 +1,7 @@
+ #if defined(ARM64_BOARD_CONFIG_SWEET)
+ 	sweet_log_append(c, size);
++	sweet_panic_log_append(c, size);
+ #endif
+ 
+ 	if (disableConsoleOutput) {
