@@ -1,0 +1,141 @@
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -11,3 +11,4 @@
+ 
+ iokit/Kernel/arm/SweetCPU.cpp                                    optional iokitcpp
+ iokit/Kernel/arm/SweetEntitlements.cpp                           optional iokitcpp
++iokit/Kernel/arm/SweetSEP.cpp                                    optional iokitcpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -47,6 +47,11 @@
+     "     'IONameMatch'     = 'qcom,kryo470';"
+     "     'IOProbeScore'    = 10000:32;"
+     "   },"
++    "   {"
++    "     'IOClass'         = AppleSEPControl;"
++    "     'IOProviderClass' = IOResources;"
++    "     'IOMatchCategory' = AppleSEPControl;"
++    "   },"
+ #endif
+     "   {"
+--- /dev/null
++++ b/iokit/Kernel/arm/SweetSEP.cpp
+@@ -0,0 +1,120 @@
++/*
++ * Built-in SEP (Secure Enclave) stub for SWEET: answers the AppleSEPControl
++ * user client that launchd's data-protection boot tasks (sepul, seputil)
++ * open and handshake through, so they initialize instead of exiting and
++ * panicking a mandatory task.
++ *
++ * Apple's AppleSEPManager kext (closed) publishes AppleSEPControl; userspace
++ * does IOServiceMatching("AppleSEPControl") -> open -> handshake selectors.
++ * This first pass registers the service and logs EVERY selector/argument so
++ * the real handshake protocol is observed from the console, not guessed.
++ * Selectors return success with plausible data; iterate on the log.
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(SWEET)
++#include <IOKit/IOService.h>
++#include <IOKit/IOUserClient.h>
++#include <IOKit/IOKitKeys.h>
++#include <IOKit/IOLib.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <libkern/c++/OSString.h>
++#include <sys/proc.h>
++
++class AppleSEPControl : public IOService {
++	OSDeclareDefaultStructors(AppleSEPControl);
++
++public:
++	bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(AppleSEPControl, IOService);
++
++bool
++AppleSEPControl::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	setProperty(kIOUserClientClassKey, "SweetSEPUserClient");
++	registerService();
++	IOLog("SWEET SEP: AppleSEPControl registered (stub)\n");
++	return true;
++}
++
++class SweetSEPUserClient : public IOUserClient {
++	OSDeclareDefaultStructors(SweetSEPUserClient);
++
++public:
++	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++	    IOExternalMethodDispatch *dispatch, OSObject *target,
++	    void *reference) APPLE_KEXT_OVERRIDE;
++};
++
++OSDefineMetaClassAndStructors(SweetSEPUserClient, IOUserClient);
++
++IOReturn
++SweetSEPUserClient::clientClose(void)
++{
++	terminate();
++	return kIOReturnSuccess;
++}
++
++static IOReturn
++sweet_sep_struct_out(IOExternalMethodArguments *args, const void *buf, uint32_t len)
++{
++	if (args->structureOutputDescriptor != NULL) {
++		if (len > args->structureOutputDescriptor->getLength()) {
++			return kIOReturnNoSpace;
++		}
++		args->structureOutputDescriptor->writeBytes(0, buf, len);
++		args->structureOutputDescriptorSize = len;
++		return kIOReturnSuccess;
++	}
++	if (args->structureOutput == NULL || len > args->structureOutputSize) {
++		return kIOReturnNoSpace;
++	}
++	memcpy(args->structureOutput, buf, len);
++	args->structureOutputSize = len;
++	return kIOReturnSuccess;
++}
++
++IOReturn
++SweetSEPUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments *args,
++    __unused IOExternalMethodDispatch *dispatch, __unused OSObject *target,
++    __unused void *reference)
++{
++	IOReturn ret = kIOReturnSuccess;
++	uint32_t in_scalars = args->scalarInputCount;
++	uint32_t in_struct = args->structureInputDescriptor != NULL ?
++	    (uint32_t)args->structureInputDescriptor->getLength() : args->structureInputSize;
++	uint32_t out_scalars = args->scalarOutputCount;
++	uint32_t out_struct = args->structureOutputDescriptor != NULL ?
++	    (uint32_t)args->structureOutputDescriptor->getLength() : args->structureOutputSize;
++	uint64_t arg0 = in_scalars > 0 ? args->scalarInput[0] : 0;
++
++	char name[32];
++	proc_selfname(name, sizeof(name));
++	IOLog("SWEET SEP: %s sel %u arg0 %llu in %u/%u out %u/%u\n", name, selector,
++	    arg0, in_scalars, in_struct, out_scalars, out_struct);
++
++	/* Answer the handshake/negotiate-ish selectors with a plausible
++	 * initialized handshake block so seputil's "handshake structure not
++	 * initialized" check passes; everything else success/unsupported. */
++	switch (selector) {
++	default:
++		if (out_struct > 0) {
++			static const uint8_t hs[64] = { 0 };
++			ret = sweet_sep_struct_out(args, hs, out_struct < 64 ? out_struct : 64);
++		} else if (out_scalars > 0) {
++			args->scalarOutput[0] = 0;
++			args->scalarOutputCount = 1;
++		}
++		break;
++	}
++	return ret;
++}
++#endif /* SWEET */
