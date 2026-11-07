@@ -18,9 +18,9 @@ KERNEL=${1:?usage: athens-mkboot.sh KERNEL STOCK_BOOT_IMG [nostorage|ufs-ro|ufs-
 STOCK=${2:?usage: athens-mkboot.sh KERNEL STOCK_BOOT_IMG [nostorage|ufs-ro|ufs-rw]}
 STAGE=${3:-ufs-ro}
 
-# ufslun=0: on athens the GPT/userdata live on LU0 (measured 2026-11-06;
+# athens userdata/GPT is on UFS LUN 2 (verified: sdc = SCSI 0:0:0:2).
 # viva's were on LUN 2).
-BASE='debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 wdt=-1 wdt_test=no_user_checkin sweetkeys=0 sweettouch=0 sweetusb=0 sweetusblog=0 sweetlog=0 ufslun=0 sweetfb_noconsole=1'
+BASE='debug=0xc serial=3 cpus=1 keepsyms=1 -enable_kprintf_spam -noprogress rd=ufsroot0 wdt=-1 wdt_test=no_user_checkin sweetkeys=0 sweettouch=0 sweetusb=0 sweetusblog=0 sweetlog=0 sweetfb_noconsole=1'
 case $STAGE in
 nostorage) ADT_FLAGS=(--athens); CMDLINE=$BASE ;;
 ufs-ro) ADT_FLAGS=(--athens --athens-ufs); CMDLINE=$BASE ;;
