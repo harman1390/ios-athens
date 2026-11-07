@@ -526,3 +526,15 @@ launchd.plist, (2) stubbed the binary with a valid no-op in mkiosroot.sh
 (find -name sepul -> cp sysstatuscheck/true). If it now panics on the NEXT
 cryptex binary, the dataless-placeholder problem is systemic and needs
 broad materialization, not per-binary stubs.
+
+**sepul->seputil mechanism (researched, not guessed)**: both are launchd
+"data-protection" BOOT TASKS (not launchd.plist jobs) that handshake the SEP
+via AppleSEPUserClient. No SEP hw -> handshake fails -> mandatory task exits
+-> panic. vphone research confirms: "Boot task failed: data-protection -
+exit(60)", "IOUC AppleSEPUserClient failed MACF in seputil".
+Fix committed: stub the whole SEP binary family (sepul,seputil,sepfwupdate,
+seprestore,sepmigration,sepd*,sep_rom*) to a valid exit-0 Mach-O so tasks
+report success. DEEPER patch (hw-capability, not stub) = kernel-side built-in
+AppleSEP driver+user client answering the handshake, modeled on SweetKeyStore
+(patch 0038); needs seputil's handshake selector protocol (log-and-iterate).
+Run 42361275377 (stub + launchd label dump) in flight.
