@@ -8,7 +8,10 @@ on:
         required: true
       rootfs_size:
         description: HFS+ volume size, e.g. 52G. Must fit inside "userdata" minus the log-ring tail
-        default: "52G"
+        default: "48G"
+      factory:
+        description: Stock OS (skip all daemon/rootfs tweaks; fixes live in the kernel). true for the daily-driver image.
+        default: "true"
 
 jobs:
   rootfs:
@@ -65,9 +68,11 @@ jobs:
           tools/mkiosroot.sh "$OS_DMG" "$SYS_DMG" "$APP_DMG" ios16-root.img "${{ inputs.rootfs_size }}"
           sudo fsck.hfsplus -fy ios16-root.img
           sudo mkdir -p /mnt/iosroot
-          sudo mount -t hfsplus -o loop,force ios16-root.img /mnt/iosroot
-          sudo python3 tools/sweet-root-tweaks.py /mnt/iosroot
-          sudo umount /mnt/iosroot
+          if [ "${{ inputs.factory }}" != "true" ]; then
+            sudo mount -t hfsplus -o loop,force ios16-root.img /mnt/iosroot
+            sudo python3 tools/sweet-root-tweaks.py /mnt/iosroot
+            sudo umount /mnt/iosroot
+          fi
 
       - name: Sparse + upload
         run: img2simg ios16-root.img ios16-root.simg

@@ -86,30 +86,10 @@ copy "$work/os/root" "$work/root"
 copy "$work/sysos/root" "$work/root/private/preboot/Cryptexes/OS"
 copy "$work/appos/root" "$work/root/private/preboot/Cryptexes/App"
 
-# launchd's dyld ignition opens /dev/null during initproc spawn; the open just
-# needs a resolvable vnode. devfs supplies it if it mounts at /dev; if devfs is
-# absent a real file still lets open() succeed so spawn can proceed.
+# Factory/stock root: keep Apple's files untouched. /dev exists in iOS already;
+# the kernel supplies devfs null/zero/console (patch 0162). SEP boot tasks
+# (sepul/seputil/data-protection) are fixed at the kernel level, not here.
 sudo mkdir -p "$work/root/dev"
-for n in null zero console; do
-	sudo touch "$work/root/dev/$n"
-	sudo chmod 666 "$work/root/dev/$n"
-done
-
-# The "data-protection" launchd boot tasks handshake the Secure Enclave via
-# AppleSEPUserClient; with no SEP hardware they exit non-zero and the mandatory
-# task panics launchd. Overwrite the whole SEP boot-task binary family with a
-# valid Mach-O that exits 0 so the tasks report success (patch the contract,
-# don't disable them). A real kernel SEP stub comes later for SEP features.
-stub=$(sudo find "$work/root" -type f \( -name 'sysstatuscheck' -o -name 'true' \) 2>/dev/null | head -n1 || true)
-sudo find "$work/root" -type f \( -name 'sepul' -o -name 'seputil' -o -name 'sepfwupdate' \
-	-o -name 'seprestore*' -o -name 'sepmigration*' -o -name 'sepd*' -o -name 'sep_rom*' \) 2>/dev/null \
-	| while IFS= read -r sep; do
-	if [ -n "$stub" ]; then sudo cp "$stub" "$sep" && echo "stubbed $sep (with $stub)" >&2; fi
-done
-# prefer real device nodes where the fs supports them (devfs numbers on Darwin)
-sudo mknod -m 666 "$work/root/dev/null" c 3 2 2>/dev/null || true
-sudo mknod -m 666 "$work/root/dev/zero" c 3 3 2>/dev/null || true
-sudo chown 0:0 "$work/root/dev" "$work/root/dev/"* 2>/dev/null || true
 
 # Shared cache where dyld looks at ignition level 1: hard links, no extra space.
 dsc=private/preboot/Cryptexes/OS/System/Library/Caches/com.apple.dyld
