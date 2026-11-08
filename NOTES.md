@@ -58,6 +58,24 @@ logs/ (scrub-tail's SWEETPAN element was overwritten by the console-
 panic transcript record), so the 64-byte-stride check couldn't be done
 locally - 0171 makes the next dump self-describing anyway.
 
+**diag3 RESULT (22:5x): STRAY WRITER STILL ACTIVE, new victim.** Boot
+reached SpringBoard/BTServer (~45s in) then panicked: "Kernel data abort"
+at `_task_importance_update_owner_info+0x28`, `str w0,[x21,#0x94]` where
+x21 = task->iie (+0x468) = 0x0a22d28a7f48fe30 - a wild value. Task VA
+0xfffffe166736d900 is in the GEN0 zone range: a LIVE task structure was
+overwritten, not a freed element. The value decodes as two plausibly-
+packed pointer u32s (0x7f48fe30->VA 0xfffffe1fd23f8c00,
+0x0a22d28a->0xfffffe0288b4a280) = queue-link-like data, same family as
+the pnum rows. NOT caught by: no zalloc UAF fired (sweetuaf never ran,
+so the watchpoint never armed), no alloc assert tripped, no canary hit.
+Meaning: the writer hits pages owned by live objects too, evades the
+freed-element detector, and is not going through the checked handout
+paths. Options for the next image: (a) mkpayload --pad 0x800000
+differential - if corrupted PAs/fields move with the carve, bootstrap-
+relative; (b) quarantine+watch a freed element's whole 16K page at free
+time for one-shot writers; (c) arm a watchpoint on the next task's iie
+field preemptively. Tail: logs/diag3-tail.bin, panic: logs/diag3-panic.txt.
+
 **FLASHED to boot (sdc52 via fastboot, rebooted): `shim/out/athens-boot-diag3.img`**
 = shim 6aa2977-lineage Image.gz (scrub build, out/athens/Image.gz 20:56)
 + kernel `xnu/out-diag3` (CI 42503594133, verify_strings gate PASSED - all
