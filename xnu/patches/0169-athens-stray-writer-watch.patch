@@ -24,7 +24,7 @@ index 0271605..52cd5a1 100644
  bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 7c5e3f5..0f2e7f4 100644
+index 62dbc63..2a2de17 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -56,6 +56,7 @@ extern void sweet_keys_init(void);
@@ -242,10 +242,10 @@ index 0000000..7ca0978
 +}
 +#endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
-index a8e8627..c96281d 100644
+index a8e8627..5352878 100644
 --- a/osfmk/kern/zalloc.c
 +++ b/osfmk/kern/zalloc.c
-@@ -3095,6 +3095,28 @@ zalloc_uaf_panic(zone_t z, uintptr_t elem, size_t size)
+@@ -3095,6 +3095,27 @@ zalloc_uaf_panic(zone_t z, uintptr_t elem, size_t size)
  	snprintf(sweet_panic_zone, sizeof(sweet_panic_zone), "%s%s off:%d sz:%d",
  	    zone_heap_name(z), zone_name(z), first_offs, esize);
  	sweet_ufs_panic_write(sweet_panic_zone, (const void *)elem, size);
@@ -259,8 +259,7 @@ index a8e8627..c96281d 100644
 +	    sizeof(sweet_panic_zone) - strlen(sweet_panic_zone),
 +	    " pa:0x%llx", uaf_pa);
 +	sweet_ufs_panic_write(sweet_panic_zone, (const void *)elem, size);
-+	printf("SWEET UAF: [%s%s] elem %p pa 0x%llx
-+",
++	printf("SWEET UAF: [%s%s] elem %p pa 0x%llx\n",
 +	    zone_heap_name(z), zone_name(z), (void *)elem, uaf_pa);
 +	static int sweetuaf = -1;
 +	if (sweetuaf < 0) {

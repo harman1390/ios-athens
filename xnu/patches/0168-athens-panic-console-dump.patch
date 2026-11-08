@@ -5,10 +5,10 @@ their string + backtrace readable from recovery instead of only ~10 screen
 lines.
 
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 3927e7a..7c5e3f5 100644
+index 3927e7a..62dbc63 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -962,6 +962,34 @@ sweet_ufs_panic_write(const char *tag, const void *data, size_t len)
+@@ -962,6 +962,33 @@ sweet_ufs_panic_write(const char *tag, const void *data, size_t len)
  	return ufs_write_blocks(base, 1 + (uint32_t)((len + UFS_BLOCK - 1) / UFS_BLOCK));
  }
  
@@ -17,7 +17,6 @@ index 3927e7a..7c5e3f5 100644
 + * Called from _cnputs (panic context, interrupts off); ufs_write_blocks is
 + * polled so this runs with the other CPUs quiesced. Self-guarded: no-op
 + * outside panic and before the UFS host/partition are up. */
-+extern int panic_active(void);
 +#define SWEET_PANIC_TEXT_SIZE (256u << 10)
 +static char sweet_panic_text[SWEET_PANIC_TEXT_SIZE];
 +static size_t sweet_panic_len;
