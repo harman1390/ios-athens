@@ -51,6 +51,10 @@ jobs:
           # libfirehose_kernel is built arm64e-only; the SWEET kernel is plain arm64
           sed -i '' 's/ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"/ARCHS="x86_64 arm64e arm64" VALID_ARCHS="x86_64 arm64e arm64"/' dxb/build.sh
           grep -c 'VALID_ARCHS="x86_64 arm64e arm64"' dxb/build.sh
+          # KDK.dmg downloads keep truncating at the 900 s cap -> hdiutil "image
+          # not recognized". Retry with resume and no total time cap instead.
+          sed -i '' 's|curl --progress-bar --max-time 900 --connect-timeout 60 -L -o /tmp/KDK.dmg|curl --progress-bar --retry 5 --retry-all-errors --connect-timeout 60 -C - -o /tmp/KDK.dmg|' dxb/build.sh
+          grep -c 'retry-all-errors' dxb/build.sh
           ls dxb/patches
 
       - name: Deps
