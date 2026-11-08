@@ -1,0 +1,181 @@
+Assert at allocation time instead of detection time. Every zone panic so
+far fired long after the stray write; these checks panic at the point a
+page is handed to a new owner while an old owner can still see it.
+
+* osfmk/arm/pmap/pmap.c pmap_next_page() - panic if the returned PA is
+  below BootArgs->topOfKernelData (inside the kernel/ADT/boot_args/
+  ramdisk carve), at or past avail_end (out of the managed window, which
+  covers the panic-log region above dram-size), or out of sequence
+  (first_avail is strictly increasing; a repeat means a page can be
+  handed out twice).
+* osfmk/vm/vm_resident.c - SWEET_CHECK_HANDOUT(mem) at every
+  vm_page_grab_options() return: panic if the page's vmp_q_state is not
+  VM_PAGE_NOT_ON_Q or vmp_wire_count is nonzero at handout.
+  sweet_check_zone_pages() verifies each page a zone just obtained is
+  wired and on no VM queue.
+* osfmk/kern/zalloc.c - call sweet_check_zone_pages() after the
+  kmem_alloc in zone_fill_initially() and zone_allocate_va_locked().
+
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 584ee38..bd5be94 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -2647,6 +2647,29 @@ pmap_next_page(
+ 		first_avail += PAGE_SIZE;
+ 		assert(avail_page_count > 0);
+ 		--avail_page_count;
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		{
++			static pmap_paddr_t sweet_pool_next;
++			pmap_paddr_t pa = (pmap_paddr_t)ptoa(*pnum);
++
++			/* SWEET corruption hunt: the bootstrap pool carves
++			 * strictly upward from topOfKernelData. A PA below
++			 * it lands in the kernel/ADT/boot_args/ramdisk
++			 * carve; a gap in the sequence means first_avail
++			 * was reset and pages can be handed out twice. */
++			if (__improbable(pa < BootArgs->topOfKernelData ||
++			    pa + PAGE_SIZE > avail_end ||
++			    (sweet_pool_next && pa != sweet_pool_next))) {
++				panic("SWEET pmap_next_page: pa 0x%llx outside bootstrap pool "
++				    "(topOfKernelData 0x%llx avail_end 0x%llx expected 0x%llx)",
++				    (unsigned long long)pa,
++				    (unsigned long long)BootArgs->topOfKernelData,
++				    (unsigned long long)avail_end,
++				    (unsigned long long)sweet_pool_next);
++			}
++			sweet_pool_next = pa + PAGE_SIZE;
++		}
++#endif
+ 		return TRUE;
+ 	}
+ 	assert(avail_page_count == 0);
+diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+index b108eda..472935d 100644
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -3068,6 +3068,7 @@ zalloc_skip_zero_check(void)
+ 
+ extern int sweet_ufs_panic_write(const char *tag, const void *data, size_t len);
+ extern void sweet_layout_dump(uint64_t elem_pa);  /* osfmk/vm/vm_resident.c */
++extern void sweet_check_zone_pages(vm_offset_t addr, uint32_t npages); /* ditto */
+ __abortlike
+ static void
+ zalloc_uaf_panic(zone_t z, uintptr_t elem, size_t size)
+@@ -4185,6 +4186,11 @@ zone_fill_initially(zone_t zone, vm_size_t nelems)
+ 		    kmaflags, VM_KERN_MEMORY_ZONE);
+ 	}
+ 
++	/* SWEET: every page entering a zone must be wired and off all VM
++	 * queues - a page still on a free queue gets its links rewritten
++	 * into zone memory (the corruption signature). */
++	sweet_check_zone_pages(addr, pages);
++
+ 	zone_meta_populate(addr, ptoa(pages));
+ 	zcram(zone, addr, pages, 0);
+ }
+@@ -4481,6 +4487,12 @@ zone_allocate_va_locked(zone_t z, zalloc_flags_t flags)
+ 		    ptoa(pages + guards), kmaflags, VM_KERN_MEMORY_ZONE);
+ 	}
+ 
++	if (kr == KERN_SUCCESS) {
++		/* SWEET: pages handed to a zone must not still be on a VM
++		 * queue - see sweet_check_zone_pages. */
++		sweet_check_zone_pages(addr, pages + guards);
++	}
++
+ 	if (kr != KERN_SUCCESS) {
+ 		uint64_t zone_size = 0;
+ 		zone_t zone_largest = zone_find_largest(&zone_size);
+diff --git a/osfmk/vm/vm_resident.c b/osfmk/vm/vm_resident.c
+index 2666be8..e73660a 100644
+--- a/osfmk/vm/vm_resident.c
++++ b/osfmk/vm/vm_resident.c
+@@ -1042,6 +1042,47 @@ sweet_layout_dump(uint64_t elem_pa)
+ 		}
+ 	}
+ }
++
++/* Assert at the point a page leaves the allocator, not at detection
++ * time: a page handed out while still queue-linked or wired is the
++ * double-allocation case - the other owner keeps writing VM bookkeeping
++ * into memory the new owner believes is private. */
++#define SWEET_CHECK_HANDOUT(m)                                              \
++	MACRO_BEGIN                                                         \
++	if (__improbable((m) != VM_PAGE_NULL &&                           \
++	    ((m)->vmp_q_state != VM_PAGE_NOT_ON_Q ||                      \
++	     (m)->vmp_wire_count != 0))) {                                \
++		panic("SWEET vm_page_grab: %p (pn 0x%x) handed out with " \
++		    "qs %u wire %u - page still owned",                 \
++		    (m), VM_PAGE_GET_PHYS_PAGE(m), (m)->vmp_q_state,      \
++		    (m)->vmp_wire_count);                               \
++	}                                                                 \
++	MACRO_END
++
++/* Same assert at the zone boundary: every page a zone just obtained
++ * must be wired and on no VM queue. If it is still linked into a free
++ * queue, the VM will keep writing queue links into zone memory. */
++void
++sweet_check_zone_pages(vm_offset_t addr, uint32_t npages)
++{
++	for (uint32_t i = 0; i < npages; i++, addr += PAGE_SIZE) {
++		ppnum_t pn = pmap_find_phys(kernel_pmap, addr);
++		if (!pn) {
++			continue;   /* guard pages may stay unmapped */
++		}
++		if (pn < vm_first_phys_ppnum ||
++		    pn - vm_first_phys_ppnum >= vm_pages_count) {
++			continue;
++		}
++		vm_page_t m = &vm_pages[pn - vm_first_phys_ppnum];
++		if (__improbable(m->vmp_q_state != VM_PAGE_NOT_ON_Q &&
++		    m->vmp_q_state != VM_PAGE_IS_WIRED)) {
++			panic("SWEET zone pages: va %p pn 0x%x handed to zone "
++			    "while qs %u wire %u - still on a VM queue",
++			    (void *)addr, pn, m->vmp_q_state, m->vmp_wire_count);
++		}
++	}
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+ 
+ __startup_func
+@@ -3320,6 +3361,9 @@ restart:
+ 				vm_page_assign_special_state(mem, VM_PAGE_SPECIAL_Q_BG);
+ 			}
+ 		}
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		SWEET_CHECK_HANDOUT(mem);
++#endif
+ 		return mem;
+ 	}
+ 	enable_preemption();
+@@ -3350,6 +3394,9 @@ restart:
+ 	    vm_page_free_count <= vm_page_free_target &&
+ 	    (mem = vm_get_delayed_page(grab_options)) != NULL)) {
+ 		assert(!mem->vmp_realtime);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		SWEET_CHECK_HANDOUT(mem);
++#endif
+ 		return mem;
+ 	}
+ 
+@@ -3385,6 +3432,9 @@ restart:
+ 				VM_DEBUG_EVENT(vm_page_grab, VM_PAGE_GRAB, DBG_FUNC_NONE, grab_options, 0, 0, 0);
+ 
+ 				assert(!mem->vmp_realtime);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++				SWEET_CHECK_HANDOUT(mem);
++#endif
+ 				return mem;
+ 			}
+ 		}
+@@ -3553,6 +3603,9 @@ restart:
+ 			}
+ 		}
+ 	}
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	SWEET_CHECK_HANDOUT(mem);
++#endif
+ 	return mem;
+ }
+ 

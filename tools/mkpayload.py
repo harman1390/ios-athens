@@ -140,7 +140,7 @@ def adt_dram(adt_blob):
             struct.unpack('<Q', chosen.prop('dram-size'))[0])
 
 
-def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
+def build(kernel_path, adt_path, cmdline, ramdisk_path=None, pad=0):
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
     nfix = apply_chained_fixups(buf, m)
@@ -167,6 +167,14 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None):
         pieces.append((rd_va, rd_size, image))
         adt_blob = add_ramdisk_to_adt(adt_blob, rd_pa, rd_size)
         ramdisk = (hex(rd_pa), hex(rd_size))
+
+    # --pad N: push kernel_end (and with it the ADT, boot_args and
+    # topOfKernelData = the start of the free pool) up by N bytes, leaving
+    # an unused gap below. Differential for the corruption hunt: if the
+    # corrupted PAs move with the pad the writer is carve-relative; if
+    # they stay put it is tied to a fixed address.
+    assert pad % PAGE == 0, '--pad must be 16K-aligned'
+    kernel_end += pad
 
     hdr_size = SEG_TABLE + 32 * len(pieces)
     out = bytearray(hdr_size)
@@ -198,8 +206,10 @@ if __name__ == '__main__':
     ap.add_argument('kernel'); ap.add_argument('adt'); ap.add_argument('out')
     ap.add_argument('--cmdline', default='debug=0xc serial=3 cpus=1 keepsyms=1')
     ap.add_argument('--ramdisk', help='root image for md0 (boot with rd=md0)')
+    ap.add_argument('--pad', type=lambda s: int(s, 0), default=0,
+                    help='shift topOfKernelData up by N bytes (16K-aligned)')
     a = ap.parse_args()
-    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk)
+    blob, info = build(a.kernel, a.adt, a.cmdline, a.ramdisk, a.pad)
     open(a.out, 'wb').write(blob)
     for k, v in info.items():
         if k != 'segs':

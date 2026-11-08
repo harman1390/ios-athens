@@ -1,5 +1,72 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ATHENS HANDOFF 2026-11-08 ~23:xx - EXTERNAL-REVIEW PLAN IMPLEMENTED (read first) <<<
+
+The four-point plan (mem-layout dump / watchpoint / alloc asserts /
+topOfKernelData differential) is now patches 0171/0172/0173 + a new
+mkpayload flag. All verified to apply in order on xnu-8796.141.3 + all
+earlier patches (scratch apply-tree at logs/xnu-src, gitignored).
+
+- **0170 was dead code on device - twice.** First commit was malformed;
+  the "fix" still had context lines missing their leading space
+  ("corrupt patch at line 23"), and it called vm_page_lookup(uaf_pn)
+  which takes (vm_object, offset) not a pnum. 'vmp qs' confirmed ABSENT
+  in xnu/out-diag2 kernel. The committed rewrite (68f0226) now uses
+  vm_page_array_beginning_addr[uaf_pn - vm_first_phys_ppnum] - correct.
+- **0171 mem-layout dump:** sweet_layout_snapshot() records the vm_pages
+  array's PA runs at vm_page_bootstrap (array is steal-memory VA space,
+  NOT physmap -> kvtophys can't translate it; each PA via
+  pmap_find_phys). sweet_layout_dump() prints gPhysBase/gVirtBase/
+  gPhysSize/real_phys_size, mem_size/max_mem/max_mem_actual/sane_size,
+  first_avail/avail_start/avail_end/real_avail_end, vm_first/last_phys,
+  vm_first_phys_ppnum, all BootArgs fields (topOfKernelData,
+  memSizeActual, ADT PA+len), sizeof(vm_page)=64, the array PA runs, and
+  for a corrupted element PA the verdict: inside array / below
+  topOfKernelData carve / at-or-past avail_end. Runs once at boot (lands
+  in the ring) + every UAF hit.
+- **0172 alloc asserts:** pmap_next_page panics if PA <
+  topOfKernelData (kernel/ADT/boot_args/ramdisk carve), >= avail_end
+  (covers panic-log region above dram-size), or out of the strictly
+  increasing sequence (double-handout). SWEET_CHECK_HANDOUT at all 4
+  vm_page_grab_options returns: panic if q_state != NOT_ON_Q or wire != 0.
+  sweet_check_zone_pages: every page a zone obtains must be wired and on
+  no VM queue - called from zone_fill_initially + zone_allocate_va_locked.
+- **0173 hardware watchpoint:** on each sweetuaf=1 hit, DBGWVR1 on the
+  first corrupted granule's element VA + DBGWVR2 on its physmap alias
+  (8-byte store watchpoints, EL1, OSLAR unlocked, MDSCR MDE|KDE; WVR0
+  stays reserved for the sweet_watch canary). IMPORTANT: stock sleh
+  ESR_EC_WATCHPT_MATCH_EL1 calls arm_debug_set(NULL) and silently
+  RESUMES - it would swallow the hit and disarm the watchpoint. Patched
+  to panic_with_thread_kernel_state -> panic register dump = writer's
+  PC/LR. Shim already has 'msr mdcr_el2, xzr' (TDE/TDA clear), so EL2
+  does not trap debug regs. DAIF is printed at arm time: if PSTATE.D is
+  masked the watchpoint never fires (then it's MDCR/DAIF work next).
+  Single 8-byte granule at the corrupted offset, not a whole-page MASK:
+  zfree legitimately writes elem[0], so a page MASK would false-trip.
+- **mkpayload.py --pad N:** bumps kernel_end (=> ADT pa, boot_args,
+  topOfKernelData, free-pool start) by N, 16K-aligned, no payload bytes
+  added (gap stays inside the carve). Verified: --pad 0x800000 moves
+  kernel_end 0x8568000 -> 0x8d68000. If corrupted PAs shift by the pad
+  the writer is carve-relative; if they stay put it is a fixed address.
+
+Source facts checked against xnu-8796.141.3 (banner matches the running
+kernel): vm_pages[] entries are 64 bytes (VM_PAGE_PACKED_PTR_ALIGNMENT);
+packed queue links are u32 = index|0x80000000 for array elements or
+VM_PACK_POINTER for other pointers - consistent with the 0xd3NN1bXX
+rows being VM bookkeeping links. The rows-136-248 dump is NOT saved in
+logs/ (scrub-tail's SWEETPAN element was overwritten by the console-
+panic transcript record), so the 64-byte-stride check couldn't be done
+locally - 0171 makes the next dump self-describing anyway.
+
+**NEXT IMAGE:** kernel = baseline + diag (drop_patches "0161 0164 0165",
+keeping 0166-0168 + 0170 + new 0171/0172/0173) + scrub shim + bare ADT
++ cmdline adds `sweetuaf=1 sweetwatch=1 zlog1=vm_objects -zc`. Outcomes:
+SWEET LAYOUT verdict says inside-array = overlap proven;
+pmap_next_page/HANDOUT/zone-pages panic names the double-allocation
+path; watchpoint panic's saved state IS the writer's PC; a UAF hit with
+no watchpoint trip means the writer used a third VA alias or is a bus
+master.
+
 ## >>> ATHENS HANDOFF 2026-11-08 ~16:10 - CLEAN BASELINE (read first) <<<
 
 User asked to restart the corruption hunt from a clean baseline (iOS root on

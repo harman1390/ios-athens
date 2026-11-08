@@ -1,0 +1,78 @@
+Catch the writer's PC with hardware watchpoints on the corrupted
+element itself.
+
+* osfmk/kern/zalloc.c - on each sweetuaf=1 hit, arm DBGWVR1_EL1 on the
+  first corrupted granule's element VA and DBGWVR2_EL1 on its physmap
+  alias (8-byte store watchpoints, EL1, OSLAR unlocked, MDSCR MDE|KDE;
+  WVR0 stays reserved for sweet_watch's canary). Prints DAIF so we know
+  if PSTATE.D would mask the exception.
+* osfmk/arm64/sleh.c - stock ESR_EC_WATCHPT_MATCH_EL1 handling calls
+  arm_debug_set(NULL) and silently resumes - a kernel watchpoint hit
+  would be swallowed and disarmed. On SWEET, panic_with_thread_kernel_state
+  instead: the dump gives the stray writer's PC/LR.
+
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 24f1abc..c114c14 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -808,8 +808,17 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
+ 		 * abort.  Turn off watchpoints and keep going; we'll turn them back on in return_from_exception..
+ 		 */
+ 		if (FSC_DEBUG_FAULT == ISS_SSDE_FSC(esr)) {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++			/* The athens corruption hunt arms EL1 store watchpoints
++			 * on corrupted zone elements (0173): the hit identifies
++			 * the stray writer, so panic with its saved state
++			 * instead of disarming and resuming. */
++			panic_with_thread_kernel_state(
++				"SWEET: EL1 watchpoint hit - stray writer state", state);
++#else
+ 			arm_debug_set(NULL);
+ 			break; /* return to first level handler */
++#endif
+ 		}
+ 		panic("Unsupported Class %u event code. state=%p class=%u esr=%u far=%p",
+ 		    class, state, class, esr, (void *)far);
+diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+index 472935d..e0c0471 100644
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -3133,6 +3133,38 @@ zalloc_uaf_panic(zone_t z, uintptr_t elem, size_t size)
+ 		PE_parse_boot_argn("sweetuaf", &sweetuaf, sizeof(sweetuaf));
+ 	}
+ 	if (sweetuaf == 1) {
++		/* SWEET: hardware store-watchpoints on the corrupted granule,
++		 * armed on both the zone element VA and its physmap alias.
++		 * Whoever writes into this element next trips the
++		 * comparator; the ESR_EC_WATCHPT_MATCH_EL1 hunk in
++		 * 0173-athens-uaf-watchpoint turns the hit into a panic
++		 * with the writer's saved state (stock sleh would just
++		 * disarm and resume). WVR0 is reserved for sweet_watch's
++		 * canary, so use pairs 1 and 2. */
++		if (first_offs != ~0u) {
++			extern unsigned long gPhysBase, gVirtBase, real_phys_size;
++			uint64_t gva = (uint64_t)(elem + first_offs);
++			uint64_t gpa = uaf_pa + ((gva & PAGE_MASK));
++			uint64_t daif, mdscr, pva = 0;
++			uint64_t wcr = 0x1ull | (0x2ull << 3) |
++			    (0xffull << 5) | (0x1ull << 14);
++			__asm__ volatile("msr OSLAR_EL1, %0" :: "r"(0ull));
++			__asm__ volatile("mrs %0, MDSCR_EL1" : "=r"(mdscr));
++			mdscr |= (1ull << 13) | (1ull << 15); /* KDE | MDE */
++			__asm__ volatile("msr MDSCR_EL1, %0" :: "r"(mdscr));
++			__asm__ volatile("msr DBGWVR1_EL1, %0" :: "r"(gva));
++			__asm__ volatile("msr DBGWCR1_EL1, %0" :: "r"(wcr));
++			if (gpa >= gPhysBase && gpa < gPhysBase + real_phys_size) {
++				pva = gpa - gPhysBase + gVirtBase;
++				__asm__ volatile("msr DBGWVR2_EL1, %0" :: "r"(pva));
++				__asm__ volatile("msr DBGWCR2_EL1, %0" :: "r"(wcr));
++			}
++			__asm__ volatile("mrs %0, DAIF" : "=r"(daif));
++			__asm__ volatile("msr DAIFClr, #8");
++			printf("SWEET UAF: watchpoint armed elem+0x%x va 0x%llx "
++			    "physmap 0x%llx daif 0x%llx\n",
++			    first_offs, gva, pva, daif);
++		}
+ 		memset((void *)elem, 0, size);
+ 		return;
+ 	}

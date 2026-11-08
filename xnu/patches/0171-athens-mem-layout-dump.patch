@@ -1,0 +1,190 @@
+Memory-layout dump for the overlap question: is a corrupted zone element
+physically inside a VM-owned structure?
+
+* osfmk/vm/vm_resident.c - sweet_layout_snapshot() walks the vm_pages
+  array once at vm_page_bootstrap and records its PA runs (the array
+  lives in pmap_steal_freeable_memory VA space, not the physmap, so
+  kvtophys cannot translate it - each page's PA comes from
+  pmap_find_phys). sweet_layout_dump(elem_pa) prints gPhysBase/gVirtBase/
+  gPhysSize/real_phys_size, mem_size/max_mem/max_mem_actual/sane_size,
+  first_avail/avail_start/avail_end/real_avail_end, vm_first/last_phys,
+  vm_first_phys_ppnum, all of BootArgs (incl. topOfKernelData,
+  memSizeActual, ADT PA/size), the vm_pages VA+PA runs and
+  sizeof(vm_page), and a verdict for the element PA (inside the array /
+  below topOfKernelData / at-or-past avail_end). Called once at the end
+  of vm_page_bootstrap (baseline lands in the sweetlog ring).
+* osfmk/kern/zalloc.c - zalloc_uaf_panic calls sweet_layout_dump(uaf_pa)
+  on every hit, next to the 0170 vm_page state line.
+
+diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+index bcc059e..b108eda 100644
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -3067,6 +3067,7 @@ zalloc_skip_zero_check(void)
+ }
+ 
+ extern int sweet_ufs_panic_write(const char *tag, const void *data, size_t len);
++extern void sweet_layout_dump(uint64_t elem_pa);  /* osfmk/vm/vm_resident.c */
+ __abortlike
+ static void
+ zalloc_uaf_panic(zone_t z, uintptr_t elem, size_t size)
+@@ -3122,6 +3123,9 @@ zalloc_uaf_panic(zone_t z, uintptr_t elem, size_t size)
+ 			    uaf_p->vmp_on_specialq);
+ 		}
+ 	}
++	/* Full memory layout + verdict on this element's PA (vm_pages array
++	 * overlap, below-pool carve, past window end). */
++	sweet_layout_dump(uaf_pa);
+ 	static int sweetuaf = -1;
+ 	if (sweetuaf < 0) {
+ 		sweetuaf = 0;
+diff --git a/osfmk/vm/vm_resident.c b/osfmk/vm/vm_resident.c
+index 6394730..2666be8 100644
+--- a/osfmk/vm/vm_resident.c
++++ b/osfmk/vm/vm_resident.c
+@@ -916,6 +916,132 @@ vm_init_before_launchd()
+  *	Each page cell is initialized and placed on the free list.
+  *	Returns the range of available kernel virtual memory.
+  */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * SWEET athens corruption hunt: the panic-time memory layout dump.
++ *
++ * Corrupted zone elements keep turning up full of VM bookkeeping data
++ * (packed pnum/pointer rows). The question is whether the corrupted page
++ * physically overlaps a VM-owned structure (double allocation) or was
++ * written through a wrong pointer. This records the physical span of the
++ * vm_pages array and prints every bootstrap memory-layout global once at
++ * boot and again on each zone-UAF hit, together with a verdict for the
++ * corrupted element's PA.
++ *
++ * The vm_pages array lives in pmap_steal_freeable_memory() VA space, NOT
++ * the physmap, so kvtophys() cannot translate it; each page's PA comes
++ * from pmap_find_phys(). Runs are snapshotted here at boot so the panic
++ * path needs no page table walk.
++ */
++extern unsigned long            gPhysBase, gVirtBase, gPhysSize, real_phys_size;
++extern vm_offset_t              mem_size;
++extern uint64_t                 max_mem, max_mem_actual, sane_size;
++extern vm_offset_t              first_avail;
++extern pmap_paddr_t             avail_start, avail_end, real_avail_end;
++extern pmap_paddr_t             vm_first_phys, vm_last_phys;
++extern boot_args                *BootArgs;
++
++#define SWEET_VMPA_MAX_RUNS 8
++static struct {
++	pmap_paddr_t    lo, hi;
++} sweet_vmpa_runs[SWEET_VMPA_MAX_RUNS];
++static unsigned int sweet_vmpa_nruns;
++
++static void
++sweet_layout_snapshot(void)
++{
++	vm_offset_t va = (vm_offset_t)vm_page_array_beginning_addr;
++	vm_offset_t end = (vm_offset_t)vm_page_array_ending_addr;
++	pmap_paddr_t run_lo = 0, run_hi = 0;
++	ppnum_t last = 0;
++	bool have = false;
++
++	for (; va < end; va += PAGE_SIZE) {
++		ppnum_t pn = pmap_find_phys(kernel_pmap, va);
++		if (pn && have && pn == last + 1) {
++			run_hi = ptoa_64(pn) + PAGE_SIZE;
++		} else {
++			if (have && sweet_vmpa_nruns < SWEET_VMPA_MAX_RUNS) {
++				sweet_vmpa_runs[sweet_vmpa_nruns].lo = run_lo;
++				sweet_vmpa_runs[sweet_vmpa_nruns].hi = run_hi;
++				sweet_vmpa_nruns++;
++			}
++			if (pn) {
++				run_lo = ptoa_64(pn);
++				run_hi = run_lo + PAGE_SIZE;
++			}
++			have = (pn != 0);
++		}
++		last = pn;
++	}
++	if (have && sweet_vmpa_nruns < SWEET_VMPA_MAX_RUNS) {
++		sweet_vmpa_runs[sweet_vmpa_nruns].lo = run_lo;
++		sweet_vmpa_runs[sweet_vmpa_nruns].hi = run_hi;
++		sweet_vmpa_nruns++;
++	}
++}
++
++static bool
++sweet_pa_in_vmpages(pmap_paddr_t pa)
++{
++	for (unsigned int i = 0; i < sweet_vmpa_nruns; i++) {
++		if (pa >= sweet_vmpa_runs[i].lo && pa < sweet_vmpa_runs[i].hi) {
++			return true;
++		}
++	}
++	return false;
++}
++
++void
++sweet_layout_dump(uint64_t elem_pa)
++{
++	printf("SWEET LAYOUT: gPhysBase 0x%lx gVirtBase 0x%lx gPhysSize 0x%lx real_phys_size 0x%lx\n",
++	    gPhysBase, gVirtBase, gPhysSize, real_phys_size);
++	printf("SWEET LAYOUT: mem_size 0x%lx max_mem 0x%llx max_mem_actual 0x%llx sane_size 0x%llx\n",
++	    mem_size, max_mem, max_mem_actual, sane_size);
++	printf("SWEET LAYOUT: first_avail 0x%lx avail_start 0x%llx avail_end 0x%llx real_avail_end 0x%llx\n",
++	    first_avail, (unsigned long long)avail_start,
++	    (unsigned long long)avail_end, (unsigned long long)real_avail_end);
++	printf("SWEET LAYOUT: vm_first_phys 0x%llx vm_last_phys 0x%llx vm_first_phys_ppnum 0x%x\n",
++	    (unsigned long long)vm_first_phys, (unsigned long long)vm_last_phys,
++	    vm_first_phys_ppnum);
++	if (BootArgs) {
++		printf("SWEET LAYOUT: boot_args physBase 0x%llx virtBase 0x%llx memSize 0x%llx "
++		    "memSizeActual 0x%llx topOfKernelData 0x%llx dtP %p dtLen %u\n",
++		    BootArgs->physBase, BootArgs->virtBase, BootArgs->memSize,
++		    BootArgs->memSizeActual, BootArgs->topOfKernelData,
++		    BootArgs->deviceTreeP, BootArgs->deviceTreeLength);
++	}
++	printf("SWEET LAYOUT: vm_pages va %p..%p count %u sizeof(vm_page) %zu, %u pa runs:\n",
++	    (void *)vm_page_array_beginning_addr, (void *)vm_page_array_ending_addr,
++	    vm_pages_count, sizeof(struct vm_page), sweet_vmpa_nruns);
++	for (unsigned int i = 0; i < sweet_vmpa_nruns; i++) {
++		printf("SWEET LAYOUT:   pa 0x%llx..0x%llx\n",
++		    (unsigned long long)sweet_vmpa_runs[i].lo,
++		    (unsigned long long)sweet_vmpa_runs[i].hi);
++	}
++	if (elem_pa) {
++		ppnum_t pn = atop_64(elem_pa);
++		printf("SWEET LAYOUT: elem pa 0x%llx: in vm_pages array %d, "
++		    "below topOfKernelData %d, at/past avail_end %d\n",
++		    elem_pa, sweet_pa_in_vmpages(elem_pa),
++		    BootArgs && elem_pa < BootArgs->topOfKernelData,
++		    elem_pa >= avail_end);
++		if (pn >= vm_first_phys_ppnum &&
++		    pn - vm_first_phys_ppnum < vm_pages_count) {
++			vm_page_t m = &vm_pages[pn - vm_first_phys_ppnum];
++			printf("SWEET LAYOUT: elem vmp qs:%u wire:%u busy:%u fict:%u "
++			    "priv:%u gobbled:%u onspec:%u\n",
++			    m->vmp_q_state, m->vmp_wire_count, m->vmp_busy,
++			    m->vmp_fictitious, m->vmp_private, m->vmp_gobbled,
++			    m->vmp_on_specialq);
++		} else {
++			printf("SWEET LAYOUT: elem pn 0x%x outside managed range\n", pn);
++		}
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
++
+ __startup_func
+ void
+ vm_page_bootstrap(
+@@ -1218,6 +1346,12 @@ vm_page_bootstrap(
+ 	printf("vm_page_bootstrap: %d free pages, %d wired pages, (up to %d of which are delayed free)\n",
+ 	    vm_page_free_count, vm_page_wire_count, vm_delayed_count);
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* Baseline for the corruption hunt: layout + vm_pages array PA runs. */
++	sweet_layout_snapshot();
++	sweet_layout_dump(0);
++#endif
++
+ 	kernel_debug_string_early("vm_page_bootstrap complete");
+ }
+ 
