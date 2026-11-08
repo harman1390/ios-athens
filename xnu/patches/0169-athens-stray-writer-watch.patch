@@ -20,7 +20,7 @@ DPM exclusion (0168 window) did not stop it. This patch adds:
 diff -u a/bsd/conf/files b/bsd/conf/files
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -1,3 +1,4 @@
+@@ -1,2 +1,3 @@
 +bsd/dev/sweet_watch.c			standard
  bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
@@ -32,7 +32,7 @@ diff -u a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  extern void viva_usb_probe(void);
 +extern void sweet_watch_start(void);
  
-@@ -1,5 +1,7 @@
+@@ -1,4 +1,6 @@
  	sweet_usb_probe();
 +	/* Stray-writer tripwire: canary pages + scanner (bsd/dev/sweet_watch.c). */
 +	sweet_watch_start();
@@ -42,7 +42,7 @@ diff -u a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
 diff -u a/bsd/dev/sweet_watch.c b/bsd/dev/sweet_watch.c
 --- /dev/null
 +++ b/bsd/dev/sweet_watch.c
-@@ -0,0 +1,169 @@
+@@ -0,0 +1,191 @@
 +/*
 + * SWEET stray-writer watch (the "element modified after free" hunt).
 + *
@@ -237,7 +237,7 @@ diff -u a/bsd/dev/sweet_watch.c b/bsd/dev/sweet_watch.c
 diff -u a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
 --- a/osfmk/kern/zalloc.c
 +++ b/osfmk/kern/zalloc.c
-@@ -1,4 +1,24 @@
+@@ -1,2 +1,22 @@
  	sweet_ufs_panic_write(sweet_panic_zone, (const void *)elem, size);
 +	/* SWEET: the corrupted element's physical address is the writer's
 +	 * fingerprint - clustered PAs implicate a bus-master window, uniform
