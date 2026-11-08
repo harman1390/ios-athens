@@ -58,8 +58,10 @@ logs/ (scrub-tail's SWEETPAN element was overwritten by the console-
 panic transcript record), so the 64-byte-stride check couldn't be done
 locally - 0171 makes the next dump self-describing anyway.
 
-**NEXT IMAGE:** kernel = CI 42503044361 (drop_patches "0161 0164 0165",
-verify_strings gate on, keeping 0166-0168 + 0170 + new 0171/0172/0173)
+**NEXT IMAGE:** kernel = CI 42503594133 (drop_patches are FULL FILENAMES:
+"0161-athens-ufs-diag.patch 0164-athens-ufs-err.patch
+0165-athens-tidt-assert.patch"; 42503044361 failed on bare numbers.
+verify_strings gate on; keeps 0166-0168 + 0170 + new 0171/0172/0173)
 + scrub shim + bare ADT
 + cmdline adds `sweetuaf=1 sweetwatch=1 zlog1=vm_objects -zc`. Outcomes:
 SWEET LAYOUT verdict says inside-array = overlap proven;
