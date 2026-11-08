@@ -1,0 +1,21 @@
+diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -3108,6 +3108,15 @@
+ 	printf("SWEET UAF: [%s%s] elem %p pa 0x%llx\n",
+ 	    zone_heap_name(z), zone_name(z), (void *)elem, uaf_pa);
++	/* The corrupted element's own page: which queue owns it now?
++	 * On a free list while zalloc owns it = double-allocation; owned
++	 * elsewhere = a wild VA wrote to it. */
++	if (uaf_pn) {
++		vm_page_t uaf_p = vm_page_lookup(uaf_pn);
++		if (uaf_p) {
++			printf("SWEET UAF: vmp qs:%u wire:%u busy:%u fict:%u priv:%u gobbled:%u onspec:%u\n",
++			    uaf_p->vmp_q_state, uaf_p->vmp_wire_count, uaf_p->vmp_busy,
++			    uaf_p->vmp_fictitious, uaf_p->vmp_private, uaf_p->vmp_gobbled,
++			    uaf_p->vmp_on_specialq);
++		}
++	}
+ 	static int sweetuaf = -1;
+ 	if (sweetuaf < 0) {
+ 		sweetuaf = 0;

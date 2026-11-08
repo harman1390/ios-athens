@@ -145,6 +145,14 @@ const char *loader_boot(uintptr_t dtb)
 		"4=", *(volatile uint32_t *)(entry_pa + 0x404));
 	con_str("XNU", "jumping (fbcon clears screen)");
 
+	/* Scrub the free pool: XNU hands out [top, phys_base+mem_size). If a
+	 * corrupted element still holds live-looking data after this, it was
+	 * written at runtime by a CPU or bus master - not stale DRAM/LK residue
+	 * and not a dropped write to never-written memory. */
+	con_str("SCRUB", "zeroing free pool");
+	zero64(top, p->phys_base + p->mem_size - top);
+	con_str("SCRUB", "done");
+
 	/* Everything was written with the MMU and caches off; drop any stale I-cache lines too. */
 	__asm__ volatile("dsb sy; ic iallu; dsb sy; isb" ::: "memory");
 	/* XNU expects iBoot's handoff: EL1, MMU off, x0 = boot_args. realme lk

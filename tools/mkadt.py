@@ -70,6 +70,7 @@ VIVA_UFS, VIVA_UFS_SIZE = 0x11270000, 0x4000
 # changing pmap/zone panics. viva's window needed no such cut because all of
 # its carve-outs stayed below 0xc0000000.
 ATHENS_PHYS_BASE, ATHENS_MEM_SIZE = 0xc0000000, 0xffe60000 - 0xc0000000  # verified live FDT
+# --athens-mem BASE SIZE overrides the window (DRAM-bisection tests).
 ATHENS_GICD, ATHENS_GICD_SIZE = 0x0c000000, 0x40000          # dts
 ATHENS_GICR, ATHENS_GICR_SIZE = 0x0c040000, 0x200000         # dts
 ATHENS_FB, ATHENS_FB_STRIDE = 0x77e20000, 1088 * 4           # atag,videolfb measured 2026-11-06; pitch MEASURE
@@ -612,6 +613,9 @@ if __name__ == '__main__':
                  viva='--viva' in sys.argv, viva_ufs='--ufs' in sys.argv,
                  athens='--athens' in sys.argv, athens_ufs='--athens-ufs' in sys.argv,
                  athens_bare='--athens-bare' in sys.argv)
+if '--athens-mem' in sys.argv:
+    i = sys.argv.index('--athens-mem')
+    ATHENS_PHYS_BASE, ATHENS_MEM_SIZE = int(sys.argv[i+1], 0), int(sys.argv[i+2], 0)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

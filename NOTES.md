@@ -55,7 +55,23 @@ NEXT BUILD: baseline + diag kept (0166 quarantine, 0167 panic-dump,
 "0161 0164 0165". Boot-arg sweetuaf=1 continues after each hit to
 collect more PAs. The element PA pattern answers CPU-vs-busmaster.
 
-**FLASHED `shim/out/athens-boot-diag1.img`** (16:39, TWRP dd, md5 verified) =
+**2026-11-08 late - CORRUPTION DECODED:** corrupted element u32s
+(0xd3NN1bXX) match packed_pnum = (pnum<<6)|attrs: each points at a PA
+inside the XNU window -> the "foreign data" is VM page-queue/freelist
+link data -> DOUBLE-ALLOCATION suspect #1: a page handed to zones while
+still live on a VM page queue (pmap keeps writing links into it).
+Evidence for: all panic types are VM-structure corruption; 128 wired
+canary pages NEVER hit across boots (writer targets pages by role, not
+random); top-half window (0xe0000000-0xffe60000) panicked identically
+(compressed-PTE extra-bits @pmap.c:4077, pulled via SWEETPAN).
+Audit: 0011 physmap is VA-aperture only, UFS bounce bounded,
+mkpayload/mkadt topOfKernelData carve consistent -> no ownership bug
+found in patches by reading. NEXT: panic-time patch: translate the
+corrupted PA to its vm_page and dump queue/refcnt/flags (live on a
+free list = double-alloc proven; owned elsewhere = wild VA write).
+Images: athens-boot-diag1.img (flashed), -top.img (flashed+panicked),
+-bot.img built not booted.
+
 diag kernel `xnu/out-diag2` (SWEETWATCH/SWEET UAF/PA + SWEETPAN/console-panic
 strings confirmed in binary) + same bare ADT + same cmdline +
 `sweetuaf=1 sweetwatch=1` (survive hits, collect PAs + canary hits).
