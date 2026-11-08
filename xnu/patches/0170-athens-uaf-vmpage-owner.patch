@@ -1,7 +1,7 @@
 diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
 --- a/osfmk/kern/zalloc.c
 +++ b/osfmk/kern/zalloc.c
-@@ -3108,6 +3108,15 @@
+@@ -3108,6 +3108,18 @@
  	printf("SWEET UAF: [%s%s] elem %p pa 0x%llx\n",
  	    zone_heap_name(z), zone_name(z), (void *)elem, uaf_pa);
 +	/* The corrupted element's own page: which queue owns it now?
