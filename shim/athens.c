@@ -173,6 +173,15 @@ void shim_main(uint64_t dtb)
 	if (fb != FB_BASE)
 		con_str("WARN", "LK fb differs from FB_BASE; kernel fbcon must match");
 	panic_scan();
+	/* Persist the panic regions to the userdata tail before XNU runs: the
+	 * kernel's own panic writes have never once landed, so this is the only
+	 * channel that survives a pre-UFS panic. */
+	{
+		extern int ufsdump(const uint64_t *, const uint32_t *, unsigned);
+		static const uint64_t srcs[] = { 0xffd60000UL, 0x1bdf00000UL, CKPT_MAGIC & ~0xfffUL };
+		static const uint32_t blocks[] = { 32, 32, 1 };
+		con_hex("UFSDUMP", ufsdump(srcs, blocks, 3));
+	}
 	con_skip();
 
 	wr32(CKPT_MAGIC, 0);	/* reset for this attempt */

@@ -8,7 +8,7 @@ STOCK=${1:?usage: build-athens.sh STOCK_BOOT_IMG [PAYLOAD]}
 CFLAGS="--target=aarch64-none-elf -O2 -ffreestanding -nostdlib -fno-pic -mgeneral-regs-only -mstrict-align -fno-stack-protector -Wall -Wextra -DATHENS"
 mkdir -p out/athens
 OBJS=()
-for f in start.S athens.c console.c fdt.c loader.c; do
+for f in start.S athens.c console.c fdt.c loader.c ufsdump.c; do
 	o=out/athens/${f%.*}.o
 	clang $CFLAGS -c $f -o $o
 	OBJS+=($o)
