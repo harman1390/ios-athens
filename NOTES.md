@@ -1,5 +1,60 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ATHENS HANDOFF 2026-11-08 ~16:10 - CLEAN BASELINE (read first) <<<
+
+User asked to restart the corruption hunt from a clean baseline (iOS root on
+userdata is the untouched factory install, HFSX, mounted before by XNU).
+**FLASHED to boot (sdc52, read-back md5 OK): `shim/out/athens-boot-base1.img`**
+= shim 6aa2977 + kernel `xnu/out-baseline` (CI 42471544567: all patches
+EXCEPT 0161 0164 0165 0166 0167 0168 0169, via the new workflow input
+`drop_patches`) + `shim/out/athens-bare.adt` (`mkadt --athens --athens-ufs
+--athens-bare`: no keypad/eint/pwrap/gpio/i2c0/touch/gpu/wlan nodes).
+cmdline: `cpus=1`, root READ-ONLY (no rootrw), `ufsrw=1` only for the log
+ring (`ufslogsecs=2`, sweetlog on), vivacpufreq/gpu/wlan=0, sweet drivers 0,
+console visible. Previous image backed up: `logs/boot-now.img`.
+
+Found this session (observations):
+- Panic photo = zalloc UAF in "vm objects" (pid 70). Symbolicated (slide 0):
+  user fault -> hfs_vnop_pagein -> cluster_io -> sweet_ufs_strategy ->
+  buf_map/vm_upl_map -> vm_object_allocate = detection point only.
+- Corrupt element bytes are in NO firmware image and NOT in the 48 GiB root
+  image (logs/scan_root.py) -> not misdirected disk DMA.
+- XNU has no invalidate-without-clean cache ops (only dc csw/cisw).
+- The userdata tail ring had been unchanged since 02:58 (every later boot
+  ran a kernel without 0167/0168; CI had been failing: 3cda772 dropped `-L`
+  from the KDK curl -> hdiutil "image not recognized"; fixed 072bf36).
+- **Shim bug: boot_args.Video.v_baseAddr was the provisional 0x7bc10000 =
+  inside mblock-10-tee-reserved (0x7a700000-0x7fc00000)**: XNU's video
+  console wrote ~10 MiB into TEE memory. Fixed to 0x77e20000 (6aa2977).
+- Shim never touched SCTLR_EL2 although LK enters at EL2; now cleans+
+  invalidates caches by set/way, turns EL2 MMU/D-cache off, gives CPU0 the
+  same EL2 state as the 0065 secondaries (CNTVOFF 0, CNTHCTL 3, ...). The
+  shim screen now shows SCTLR2/HCR2/CNTVOFF as LK left them - RECORD THEM.
+- shim ufsdump DUMP_LBA pointed INSIDE the HFS volume (512B-LBA/8 mistake);
+  it never wrote (block still zero), now out of the build.
+- Live FDT also has dynamic `reserve-memory-dram_r1_dummy_read` (1 page,
+  alloc-range 0xc0000000-0xffe60000) - DRAMC rank-1 dummy read; untested
+  suspect, test later by moving the window to the high bank.
+
+NEXT: boot base1, photograph shim screen (SCTLR2 etc.) and any panic; pull
+the ring from TWRP (tools/sweet-log-pull.sh logic, last 1025 blocks of
+sdc59). If clean: add back one variable per boot (cpus=8, rootrw, ADT
+devices, 0166-0168) to find what reintroduces corruption.
+
+**base1 RESULT (16:4x): STILL PANICS** - "[vm objects]: element modified
+after free", pid 56 xpcproxy, tid 253. Boot got FAR (ring `logs/base1.txt`:
+root mounted RO, launchd -> xpcproxy spawns). So corruption survives:
+1 CPU, bare ADT (no viva driver binds at all), RO root, clean EL2
+handoff, fixed fb. Ruled out: SMP, MT6781 drivers, TEE fb writes,
+EL2 asymmetry, root writes, misdirected disk DMA.
+Dump rows 136-248 = STRUCTURED table: u32s 0xd3NN1bXX (NN counts up
+04->1f, XX counts down) - pointers into ~0xd3xxxxxx INSIDE the XNU
+window; a descriptor table or address list, not noise, not file data.
+NEXT BUILD: baseline + diag kept (0166 quarantine, 0167 panic-dump,
+0168 panic-console, 0169 watch+UAF-PA) = CI 42473734969, drop_patches
+"0161 0164 0165". Boot-arg sweetuaf=1 continues after each hit to
+collect more PAs. The element PA pattern answers CPU-vs-busmaster.
+
 ## >>> ATHENS HANDOFF 2026-11-08 ~03:15 (RMX2117, MT6853) - read first <<<
 
 **DPM OVERLAP FOUND + FIXED (the "stray writer" hunt):** the earlier note
@@ -60,35 +115,6 @@ backup/boot.img shim/out/athens/Image.gz OUT --ramdisk PAYLOAD`;
 payload = `mkpayload.py kout/kernel.development.sweet shim/out/athens.adt
 ... --cmdline "..."`. Flash via `fastboot flash boot` (works) or TWRP
 adb push+`dd of=/dev/block/sdc52`.
-
-**UPDATE ~13:45 (panic photo analysis + patch 0169):** the on-screen panic is
-`zalloc_uaf_panic` = "[%s%s]: element modified after free" (reads "audit
-led" on the panel font). Zone = "vm objects", esize 256, elem
-0xffffffe10013d500, off:0 val 0x86472804062717c2. Panicked task pid 70
-"slee" (kernel task), cpu 7. The panic'd element has MANY nonzero qwords
-(dump rows ~off 0..240) = a bulk foreign write, NOT a lone freelist link.
-logs/athens-panic4.bin == panic5.bin = same boot's ring (mount-retry loop,
-errno 19, no panic text, NO SWEETPAN) - the panicking kernel predates 0167
-(kernel in the boot images has 0166's "stray writer" string but no
-"SWEETPAN"/"console-panic"; the panic5 ring's "SWEET TOUCH: mt6853 spi4"
-string is in NO local kernel/patch - that kernel came from the other
-build tree; local image cmdlines have sweettouch=0).
-New patch **0169** (xnu/patches/0169-athens-stray-writer-watch.patch, NOT
-CI-verified yet):
-- `bsd/dev/sweet_watch.c`: 128 wired canary pages (sweetwatch_n), tagged
-  pattern, re-verified every ~100 ms after a PHYSICAL cache flush
-  (non-coherent writers can't hide behind a stale line). On mismatch:
-  VA+PA+dump printed (PA distribution = fingerprint: clustered = device
-  window, uniform = wild CPU pointer), ARM64 store watchpoint armed on the
-  corrupted granule (catches a cyclic CPU writer with a backtrace; a bus
-  master never trips it = the CPU-vs-DMA answer). sweetwatch=0/1/2
-  (off/report/panic-on-first-hit, default 1).
-- `zalloc_uaf_panic` prints the element's PHYSICAL address (pmap_find_phys)
-  + appends pa to the SWEETPAN tag; `sweetuaf=1` re-zeroes and continues
-  to collect many hits per boot.
-NEXT: build 0169 via CI, boot, watch for SWEETWATCH hits / SWEET UAF pa.
-If PAs cluster in a band, identify which MT6853 master owns it (SCP/SSPM,
-modem ccci, GCE, APDMA, connac) and extend the ADT exclusion.
 
 ## ATHENS HANDOFF (RMX2117, MT6853) - earlier milestone notes
 
