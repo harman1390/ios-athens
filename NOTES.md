@@ -73,6 +73,12 @@ ring - transcript overwrote them). Single pad run can't discriminate by
 PA (victim moved again - third different victim class: task field, zone
 element, PTE table), but the corrupted content is always allocator
 bookkeeping.
+- STRUCTURE: all 26 rows satisfy hi32 + record_offset = 0x84d1e0be -
+  the hi32 is a SELF-RELATIVE back-link (distance to a fixed anchor),
+  not independent pointers -> one live structure, not scribble.
+- dwarfdump 0x48-byte-type hunt: no match in kernel DWARF output so far
+  (empty result - may need different parsing) - still open. zp cookie
+  check needs the cookies printed at runtime (next build).
 - Tail: logs/pad8m-tail.bin, panic: logs/pad8m-panic.txt.
 
 **FLASHED (sdc52): `shim/out/athens-boot-pad8m.img`** = same diag3 kernel
