@@ -18,6 +18,9 @@ on:
       drop_patches:
         description: patch file names to leave out (space separated), e.g. a clean baseline
         default: ""
+      verify_strings:
+        description: comma-separated strings that MUST appear in the built kernel binary (patch-skip gate)
+        default: ""
   push:
     branches: [main, athens, viva]
     paths:
@@ -125,6 +128,25 @@ jobs:
           cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
           ls -la out
           (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
+
+      - name: Verify expected strings in the kernel binary
+        if: ${{ inputs.verify_strings != '' }}
+        run: |
+          # Patch-skip gate: dxb keeps going when a patch fails to apply, so a
+          # malformed patch ships a kernel without its instrumentation. Each
+          # comma-separated string must appear in the binary or the job fails.
+          k=$(ls out/kernel.*.sweet 2>/dev/null | head -1)
+          [ -n "$k" ] || { echo "no kernel binary to check"; exit 1; }
+          fail=0
+          tr ',' '\n' <<< "${{ inputs.verify_strings }}" | while IFS= read -r s; do
+            [ -z "$s" ] && continue
+            if grep -aqF "$s" "$k"; then
+              echo "found: $s"
+            else
+              echo "MISSING: $s"
+              exit 1
+            fi
+          done
 
       - name: vivad (phone helper for the USB link, iOS arm64)
         if: always()
