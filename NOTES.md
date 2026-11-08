@@ -58,6 +58,16 @@ logs/ (scrub-tail's SWEETPAN element was overwritten by the console-
 panic transcript record), so the 64-byte-stride check couldn't be done
 locally - 0171 makes the next dump self-describing anyway.
 
+**FLASHED to boot (sdc52 via fastboot, rebooted): `shim/out/athens-boot-diag3.img`**
+= shim 6aa2977-lineage Image.gz (scrub build, out/athens/Image.gz 20:56)
++ kernel `xnu/out-diag3` (CI 42503594133, verify_strings gate PASSED - all
+7 markers in binary) + athens-bare.adt + base1 cmdline +
+`sweetuaf=1 sweetwatch=1 zlog1=vm_objects -zc`. NEXT: watch the boot -
+expected reads are SWEET LAYOUT block + verdict per UAF hit, vmp qs/wire,
+watchpoint armed line, then either a watchpoint panic (writer's PC/LR) or
+an alloc assert naming the double-allocation path. Pull sdc59 tail in
+recovery afterwards.
+
 **NEXT IMAGE:** kernel = CI 42503594133 (drop_patches are FULL FILENAMES:
 "0161-athens-ufs-diag.patch 0164-athens-ufs-err.patch
 0165-athens-tidt-assert.patch"; 42503044361 failed on bare numbers.
