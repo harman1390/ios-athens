@@ -58,6 +58,7 @@ logs/ (scrub-tail's SWEETPAN element was overwritten by the console-
 panic transcript record), so the 64-byte-stride check couldn't be done
 locally - 0171 makes the next dump self-describing anyway.
 
+**FLASHED (sdc52): athens-boot-diag4.img = 0174 kernel (CI 42506889691) + scrub shim + bare ADT + normal layout (no pad) + diag cmdline, sweettlbi ON. If corruption stops -> stale TLB.
 **0174 BUILT (stale-translation differential):** tlbi vmalle1is on every
 grab/zone-intake (sweettlbi=0 off) + MMFR0/MIDR/TCR/SCTLR in LAYOUT block.
 If corruption stops -> stale/aliased TLB. PVH check + SWEETPAN tag fields
