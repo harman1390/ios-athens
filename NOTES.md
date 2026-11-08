@@ -55,6 +55,14 @@ NEXT BUILD: baseline + diag kept (0166 quarantine, 0167 panic-dump,
 "0161 0164 0165". Boot-arg sweetuaf=1 continues after each hit to
 collect more PAs. The element PA pattern answers CPU-vs-busmaster.
 
+**FLASHED `shim/out/athens-boot-diag1.img`** (16:39, TWRP dd, md5 verified) =
+diag kernel `xnu/out-diag2` (SWEETWATCH/SWEET UAF/PA + SWEETPAN/console-panic
+strings confirmed in binary) + same bare ADT + same cmdline +
+`sweetuaf=1 sweetwatch=1` (survive hits, collect PAs + canary hits).
+Boot it, let it run ~10 min, then recovery + pull sdc59 tail:
+SWEET UAF lines have elem pa; SWEETWATCH lines have canary VA+PA+dump;
+SWEETPAN record = panic transcript at the tail if it panics.
+
 ## >>> ATHENS HANDOFF 2026-11-08 ~03:15 (RMX2117, MT6853) - read first <<<
 
 **DPM OVERLAP FOUND + FIXED (the "stray writer" hunt):** the earlier note
