@@ -58,6 +58,13 @@ logs/ (scrub-tail's SWEETPAN element was overwritten by the console-
 panic transcript record), so the 64-byte-stride check couldn't be done
 locally - 0171 makes the next dump self-describing anyway.
 
+**FLASHED (sdc52): `shim/out/athens-boot-pad8m.img`** = same diag3 kernel
++ bare ADT + same cmdline + mkpayload --pad 0x800000 (kernel_end
+0x85ac000->0x8dac000: ADT, boot_args, topOfKernelData and the whole free
+pool shift +8MiB; gap stays in the carve). DIFFERENTIAL: if the corrupted
+values move +8MiB the writer is carve-relative; fixed = fixed address.
+Compare against diag3's far/x21 (0x0a22d28a7f48fe30) and any UAF pa.
+
 **diag3 RESULT (22:5x): STRAY WRITER STILL ACTIVE, new victim.** Boot
 reached SpringBoard/BTServer (~45s in) then panicked: "Kernel data abort"
 at `_task_importance_update_owner_info+0x28`, `str w0,[x21,#0x94]` where
