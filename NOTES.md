@@ -70,7 +70,21 @@ found in patches by reading. NEXT: panic-time patch: translate the
 corrupted PA to its vm_page and dump queue/refcnt/flags (live on a
 free list = double-alloc proven; owned elsewhere = wild VA write).
 Images: athens-boot-diag1.img (flashed), -top.img (flashed+panicked),
--bot.img built not booted.
+-bot.img (flashed+panicked: compressed-PTE extra bits @4022, same class),
+athens-boot-scrub.img (flashed+panicked).
+
+**SCRUB RESULT (decisive):** shim zeroes the entire free pool
+[topOfKernelData, window end) before entering XNU; the panic STILL hit -
+"Invalid kernel stack pointer" with a kernel stack page full of the same
+structured table (0xd2NN/0xd3NN + 83e2...29ff3012 families). Written
+DURING the boot by a live CPU -> software bug confirmed, stale-DRAM and
+dropped-write theories dead. Both window halves panic identically ->
+window-agnostic. Content = VM page-list data -> double-allocation
+(page live on a VM queue while zones/pmap/stack own it) vs wild VA
+write is the last open question. Patch 0170 (CI 42499726527) dumps the
+corrupted page's own vm_page q_state/wire/flags at each UAF hit - its
+queue membership discriminates. NEXT: build -> payload+scrub shim ->
+flash -> boot -> pull tail -> read "SWEET UAF: vmp qs:.." lines.
 
 diag kernel `xnu/out-diag2` (SWEETWATCH/SWEET UAF/PA + SWEETPAN/console-panic
 strings confirmed in binary) + same bare ADT + same cmdline +
