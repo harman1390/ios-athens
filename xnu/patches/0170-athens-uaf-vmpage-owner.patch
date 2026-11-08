@@ -19,3 +19,4 @@ diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
  	static int sweetuaf = -1;
  	if (sweetuaf < 0) {
  		sweetuaf = 0;
+ 		PE_parse_boot_argn("sweetuaf", &sweetuaf, sizeof(sweetuaf));
