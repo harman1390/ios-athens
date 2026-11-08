@@ -58,6 +58,23 @@ logs/ (scrub-tail's SWEETPAN element was overwritten by the console-
 panic transcript record), so the 64-byte-stride check couldn't be done
 locally - 0171 makes the next dump self-describing anyway.
 
+**pad8m RESULT: different victim, same family.** kernel_end delta was
+exactly 0x800000 (0x85ac000->0x8dac000 - the 0x844000 in the earlier
+print compared the wrong baseline). Panic: pmap.c:4113 "invalid pte
+0xfffffdf05410c488 (=0x90a9800aa8c55001)" - compressed-PTE corruption,
+same class as top/bot runs. ALSO a stale SWEETPAN UAF record: zone
+"...92" off:448 sz:8192 (8K element). Surviving element bytes
+(tail 0x1500-0x3000) = a 0x48-STRIDE TABLE: qwords 0x84d1NNNN/0x2aac7243
+and 0xd3NNNN/0x109072c3, hi u32 counting DOWN by exactly 0x48/record,
+lo u32 constant per family - reads as a freelist/metadata array of
+72-byte records with back-links, lo word a packed pointer into the
+zone/iokit VA ranges. NOT inside-array verdict data (no UAF lines in
+ring - transcript overwrote them). Single pad run can't discriminate by
+PA (victim moved again - third different victim class: task field, zone
+element, PTE table), but the corrupted content is always allocator
+bookkeeping.
+- Tail: logs/pad8m-tail.bin, panic: logs/pad8m-panic.txt.
+
 **FLASHED (sdc52): `shim/out/athens-boot-pad8m.img`** = same diag3 kernel
 + bare ADT + same cmdline + mkpayload --pad 0x800000 (kernel_end
 0x85ac000->0x8dac000: ADT, boot_args, topOfKernelData and the whole free
