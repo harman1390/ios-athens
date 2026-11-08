@@ -24,6 +24,7 @@ _start:
 	msr	spsel, #1
 	adr	x1, _stack_top
 	mov	sp, x1
+	mov	x20, #0			/* SCTLR_EL2 at entry (0 when entered at EL1) */
 	adr	x1, vectors
 	mrs	x2, CurrentEL
 	cmp	x2, #(2 << 2)
@@ -31,6 +32,21 @@ _start:
 	msr	vbar_el1, x1
 	b	2f
 1:	msr	vbar_el2, x1
+	/* realme lk enters at EL2: the shim assumes MMU and D-cache off and
+	 * nothing of LK's left dirty in the caches over the XNU window. Write
+	 * back + drop every line, then turn the EL2 MMU/D-cache off. */
+	mrs	x20, sctlr_el2
+	bl	dcache_cisw_all
+	mov	x1, x20
+	bic	x1, x1, #(1 << 0)	/* M */
+	bic	x1, x1, #(1 << 2)	/* C */
+	msr	sctlr_el2, x1
+	isb
+	tlbi	alle2
+	dsb	sy
+	bl	dcache_cisw_all
+	ic	iallu
+	dsb	sy
 2:	isb
 	/* zero .bss */
 	adr	x1, _bss_start
@@ -40,6 +56,7 @@ _start:
 	str	xzr, [x1], #8
 	b	1b
 2:	mov	x0, x19
+	mov	x1, x20
 	bl	shim_main
 3:	wfe
 	b	3b
@@ -139,18 +156,80 @@ exc_common:
  */
 	.globl enter_el1
 enter_el1:
-	mov	x9, x0			/* kernel entry */
-	mov	x10, x1			/* boot_args -> x0 */
+	mov	x12, x0			/* kernel entry (dcache_cisw_all uses x0-x11) */
+	mov	x13, x1			/* boot_args -> x0 */
+	mov	x14, x30
+	bl	dcache_cisw_all
+	ic	iallu
+	dsb	sy
+	mov	x30, x14
+	/* Same EL2 state the secondaries get (xnu 0065 sweet_secondary_entry):
+	 * CPU0 must not differ from them in counter offset or timer traps. */
 	msr	hstr_el2, xzr		/* no hypervisor sysreg traps */
 	msr	cptr_el2, xzr		/* no FP/SIMD traps */
-	msr	cnthctl_el2, xzr
+	msr	mdcr_el2, xzr		/* no debug/PMU traps */
+	msr	vttbr_el2, xzr
+	mov	x1, #3			/* EL1PCTEN | EL1PCEN: physical counter/timer untrapped */
+	msr	cnthctl_el2, x1
+	msr	cntvoff_el2, xzr	/* virtual counter == physical on every CPU */
+	mrs	x1, ICC_SRE_EL2
+	orr	x1, x1, #1		/* SRE */
+	orr	x1, x1, #8		/* Enable: EL1 may use the GIC sysregs */
+	msr	ICC_SRE_EL2, x1
+	isb
+	ldr	x1, =0x30d00800		/* SCTLR_EL1 RES1 bits, M/C/I off, LE */
+	msr	sctlr_el1, x1
 	mov	x1, #(1 << 31)		/* HCR_EL2.RW: EL1 is AArch64 */
 	msr	hcr_el2, x1
 	mov	x1, #0x3c5		/* SPSR: EL1h, DAIF masked */
 	msr	spsr_el2, x1
-	msr	elr_el2, x9
+	msr	elr_el2, x12
 	mov	x1, sp			/* share the shim stack */
 	msr	sp_el1, x1
-	mov	x0, x10
+	mov	x0, x13
 	isb
 	eret
+
+/* Clean + invalidate all data/unified caches to the PoC by set/way
+ * (Linux __flush_dcache_all). Leaf, clobbers x0-x11. */
+	.globl dcache_cisw_all
+dcache_cisw_all:
+	dmb	sy
+	mrs	x0, clidr_el1
+	and	x3, x0, #0x7000000
+	lsr	x3, x3, #23		/* LoC * 2 */
+	cbz	x3, 5f
+	mov	x10, #0
+1:	add	x2, x10, x10, lsr #1	/* level * 3 */
+	lsr	x1, x0, x2
+	and	x1, x1, #7		/* cache type at this level */
+	cmp	x1, #2
+	b.lt	4f			/* no data cache */
+	msr	csselr_el1, x10
+	isb
+	mrs	x1, ccsidr_el1
+	and	x2, x1, #7
+	add	x2, x2, #4		/* log2(line bytes) */
+	mov	x4, #0x3ff
+	and	x4, x4, x1, lsr #3	/* max way */
+	clz	w5, w4
+	mov	x7, #0x7fff
+	and	x7, x7, x1, lsr #13	/* max set */
+2:	mov	x9, x4
+3:	lsl	x6, x9, x5
+	orr	x11, x10, x6
+	lsl	x6, x7, x2
+	orr	x11, x11, x6
+	dc	cisw, x11
+	subs	x9, x9, #1
+	b.ge	3b
+	subs	x7, x7, #1
+	b.ge	2b
+4:	add	x10, x10, #2
+	cmp	x3, x10
+	b.gt	1b
+5:	mov	x10, #0
+	msr	csselr_el1, x10
+	dsb	sy
+	isb
+	ret

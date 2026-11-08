@@ -5,10 +5,13 @@
  * init or its panic-time writes fail (every panic so far left the log tail
  * untouched). Polled SCSI on the host LK left running; WRITE(10) only.
  *
- * userdata = LUN 2, GPT first LBA 2566144 (512B) = block 320768 (4K),
- * 13049848 blocks. The kernel log tail = last 1025 blocks -> partition block
- * 13048823 = device LBA 13369591. We write 400 blocks inside that tail so the
- * recovery pull (last 1025 blocks) gets it without clashing with SWEETPAN.
+ * userdata = LUN 2 (4 KiB logical blocks), GPT first LBA 2566144 (Linux
+ * sdc59 start 20529152 x 512 B), 13049848 blocks. The kernel log tail = last
+ * 1025 blocks -> partition block 13048823 = device LBA 15614967. We write 400
+ * blocks inside that tail so the recovery pull (last 1025 blocks) gets it
+ * without clashing with SWEETPAN.
+ * (The first version used 13369591 = a 512-byte LBA divided by 8: that is
+ * partition block 10803847, INSIDE the HFS volume. Not built since.)
  */
 #include <stdint.h>
 #include "console.h"
@@ -29,7 +32,7 @@
 
 #define BLOCK		4096u
 #define LUN		2
-#define DUMP_LBA	(13369591u + 400u)
+#define DUMP_LBA	(15614967u + 400u)
 
 struct utrd {
 	uint32_t dw0, dw1, dw2, dw3;

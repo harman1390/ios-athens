@@ -7,13 +7,13 @@
 #define FB_H		2400
 #define FB_STRIDE	(1088 * 4)	/* a8r8g8b8, MTK pads the pitch to 1088 px */
 #elif defined(ATHENS)
-/* MEASURE: RMX2117's LK framebuffer (atag,videolfb) is unconfirmed; the athens
- * shim runs on whatever LK reports and prints it. Same MTK 1088-px pitch pad
- * assumed for now. */
-#define FB_BASE		0x7bc10000UL	/* provisional; MEASURE on the phone */
+/* RMX2117 LK framebuffer (atag,videolfb, OVL1 L0 pitch 0x1100), measured
+ * 2026-11-06. The old viva value 0x7bc10000 lies inside athens'
+ * mblock-10-tee-reserved (0x7a700000-0x7fc00000): never hand it to XNU. */
+#define FB_BASE		0x77e20000UL
 #define FB_W		1080
 #define FB_H		2400
-#define FB_STRIDE	(1088 * 4)	/* provisional; a8r8g8b8 */
+#define FB_STRIDE	(1088 * 4)	/* a8r8g8b8, MTK pads the pitch to 1088 px */
 #else
 #define FB_BASE		0x9c000000UL	/* reserved-memory cont_splash_region */
 #define FB_W		1080

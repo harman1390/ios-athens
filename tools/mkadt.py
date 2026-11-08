@@ -59,7 +59,9 @@ VIVA_UFS, VIVA_UFS_SIZE = 0x11270000, 0x4000
 # Dimensity 800U). Addresses marked dts come from realme's published kernel
 # source (android_kernel_realme_mt6853, mt6853.dts); addresses marked MEASURE
 # must be confirmed from the phone's live FDT / atag before flashing (Phase 0
-# in ATHENS.md).
+# in ATHENS.md). --athens-bare: no /arm-io device nodes (keypad, eint, pwrap,
+# gpio, i2c0/touch, gpu, wlan), so no viva (MT6781) driver binds on MT6853 -
+# the clean-baseline boot for the memory-corruption hunt.
 # Live-FDT reserved-memory (TWRP /proc/device-tree, 2026-11-08): every mblock
 # carve-out sits below 0xc0000000 or above 0x1be000000 EXCEPT
 # mblock-17-DPM-reserved 0xffe60000-0xffffffff (the DRAM power-management MCU
@@ -395,7 +397,7 @@ def athens_devices(ph, phandle, gic_ph, ecid):
 
 
 def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False,
-          athens=False, athens_ufs=False):
+          athens=False, athens_ufs=False, athens_bare=False):
     """qemu=True: same tree, but with QEMU virt's GIC addresses and CNTFRQ (tools/qemu-sweet.py).
     viva=True: Redmi Note 11 Pro 4G addresses. Without viva_ufs there is no UFS node, so the
     kernel never touches storage; with it the kernel drives the MediaTek host LK left running."""
@@ -536,7 +538,7 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False,
             ('canvas-width', u32(1125)),
             ('canvas-height', u32(2436)),
         ])] + ((viva_devices(ph, phandle, gic_ph, ecid) if viva else
-                athens_devices(ph, phandle, gic_ph, ecid) if athens else [])))
+                athens_devices(ph, phandle, gic_ph, ecid) if athens and not athens_bare else [])))
 
     fbcon = node('sweet-fbcon', [
         ph(),
@@ -608,7 +610,8 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False,
 if __name__ == '__main__':
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
                  viva='--viva' in sys.argv, viva_ufs='--ufs' in sys.argv,
-                 athens='--athens' in sys.argv, athens_ufs='--athens-ufs' in sys.argv)
+                 athens='--athens' in sys.argv, athens_ufs='--athens-ufs' in sys.argv,
+                 athens_bare='--athens-bare' in sys.argv)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:

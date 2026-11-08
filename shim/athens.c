@@ -152,7 +152,7 @@ static uint64_t videolfb_base(uintptr_t dtb)
 	return 0;
 }
 
-void shim_main(uint64_t dtb)
+void shim_main(uint64_t dtb, uint64_t sctlr_el2_entry)
 {
 	stage = "watchdog";
 	wr32(TOPRGU_WDT_MODE, (rd32(TOPRGU_WDT_MODE) & ~WDT_MODE_EN & 0x00ffffffU) | WDT_MODE_KEY);
@@ -167,21 +167,19 @@ void shim_main(uint64_t dtb)
 	con_str("SHIM", "athens: xnu loader");
 	con_hex2("EL", "el=", rsr("CurrentEL") >> 2, "wdt=", rd32(TOPRGU_WDT_MODE));
 	con_hex("DTB", dtb);
+	/* What LK handed over at EL2 (start.S already cleaned the caches and
+	 * turned the EL2 MMU/D-cache off): bit 0 M, bit 2 C. */
+	if ((rsr("CurrentEL") >> 2) == 2) {
+		con_hex("SCTLR2", sctlr_el2_entry);
+		con_hex("HCR2", rsr("hcr_el2"));
+		con_hex("CNTVOFF", rsr("cntvoff_el2"));
+	}
 	con_hex("LK FB", fb);
 	con_hex("CKPT", rd32(CKPT_MAGIC));	/* last kernel checkpoint (survives reset) */
 	con_hex("SENT", rd32(CKPT_MAGIC + 4));	/* sentinel: stays 0xDEAD if kernel never wrote */
 	if (fb != FB_BASE)
 		con_str("WARN", "LK fb differs from FB_BASE; kernel fbcon must match");
 	panic_scan();
-	/* Persist the panic regions to the userdata tail before XNU runs: the
-	 * kernel's own panic writes have never once landed, so this is the only
-	 * channel that survives a pre-UFS panic. */
-	{
-		extern int ufsdump(const uint64_t *, const uint32_t *, unsigned);
-		static const uint64_t srcs[] = { 0xffd60000UL, 0x1bdf00000UL, CKPT_MAGIC & ~0xfffUL };
-		static const uint32_t blocks[] = { 32, 32, 1 };
-		con_hex("UFSDUMP", ufsdump(srcs, blocks, 3));
-	}
 	con_skip();
 
 	wr32(CKPT_MAGIC, 0);	/* reset for this attempt */
