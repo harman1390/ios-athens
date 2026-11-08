@@ -61,6 +61,35 @@ payload = `mkpayload.py kout/kernel.development.sweet shim/out/athens.adt
 ... --cmdline "..."`. Flash via `fastboot flash boot` (works) or TWRP
 adb push+`dd of=/dev/block/sdc52`.
 
+**UPDATE ~13:45 (panic photo analysis + patch 0169):** the on-screen panic is
+`zalloc_uaf_panic` = "[%s%s]: element modified after free" (reads "audit
+led" on the panel font). Zone = "vm objects", esize 256, elem
+0xffffffe10013d500, off:0 val 0x86472804062717c2. Panicked task pid 70
+"slee" (kernel task), cpu 7. The panic'd element has MANY nonzero qwords
+(dump rows ~off 0..240) = a bulk foreign write, NOT a lone freelist link.
+logs/athens-panic4.bin == panic5.bin = same boot's ring (mount-retry loop,
+errno 19, no panic text, NO SWEETPAN) - the panicking kernel predates 0167
+(kernel in the boot images has 0166's "stray writer" string but no
+"SWEETPAN"/"console-panic"; the panic5 ring's "SWEET TOUCH: mt6853 spi4"
+string is in NO local kernel/patch - that kernel came from the other
+build tree; local image cmdlines have sweettouch=0).
+New patch **0169** (xnu/patches/0169-athens-stray-writer-watch.patch, NOT
+CI-verified yet):
+- `bsd/dev/sweet_watch.c`: 128 wired canary pages (sweetwatch_n), tagged
+  pattern, re-verified every ~100 ms after a PHYSICAL cache flush
+  (non-coherent writers can't hide behind a stale line). On mismatch:
+  VA+PA+dump printed (PA distribution = fingerprint: clustered = device
+  window, uniform = wild CPU pointer), ARM64 store watchpoint armed on the
+  corrupted granule (catches a cyclic CPU writer with a backtrace; a bus
+  master never trips it = the CPU-vs-DMA answer). sweetwatch=0/1/2
+  (off/report/panic-on-first-hit, default 1).
+- `zalloc_uaf_panic` prints the element's PHYSICAL address (pmap_find_phys)
+  + appends pa to the SWEETPAN tag; `sweetuaf=1` re-zeroes and continues
+  to collect many hits per boot.
+NEXT: build 0169 via CI, boot, watch for SWEETWATCH hits / SWEET UAF pa.
+If PAs cluster in a band, identify which MT6853 master owns it (SCP/SSPM,
+modem ccci, GCE, APDMA, connac) and extend the ADT exclusion.
+
 ## ATHENS HANDOFF (RMX2117, MT6853) - earlier milestone notes
 
 **MILESTONE: XNU-8796 fully boots on RMX2117** (verified via the UFS sweetlog

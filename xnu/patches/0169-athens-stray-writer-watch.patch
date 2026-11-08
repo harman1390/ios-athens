@@ -1,0 +1,262 @@
+athens "element modified after free" hunt: the writer is still unknown.
+DPM exclusion (0168 window) did not stop it. This patch adds:
+
+* bsd/dev/sweet_watch.c - `sweetwatch_n` wired canary pages (default 128,
+  ~0.2% of the 1 GiB window) filled with a tagged pattern and re-verified
+  every ~100 ms after a PHYSICAL cache flush, so a non-coherent writer
+  cannot hide behind a stale CPU cache line. On a mismatch it prints the
+  VA and PA plus a hex window - the PA distribution is the fingerprint
+  (clustered = a bus-master's window, uniform = a wild CPU pointer) - and
+  arms an ARM64 store watchpoint on the corrupted granule so a cyclic
+  CPU-side writer panics with a backtrace (a bus-master write never trips
+  the comparator, which is itself the CPU-vs-DMA answer). Boot args:
+  sweetwatch=0|1|2 (off / report / panic-on-first-hit, default 1),
+  sweetwatch_n=N.
+* osfmk/kern/zalloc.c - zalloc_uaf_panic now reports the corrupted
+  element's PHYSICAL address (pmap_find_phys) into the console + SWEETPAN
+  tag, and honours sweetuaf=1: re-zero the element and continue instead of
+  panicking so one boot collects many hits.
+
+diff -u a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -1,3 +1,4 @@
++bsd/dev/sweet_watch.c			standard
+ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+diff -u a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -1,3 +1,4 @@
+ extern void sweet_usb_probe(void);
+ extern void viva_usb_probe(void);
++extern void sweet_watch_start(void);
+ 
+@@ -1,5 +1,7 @@
+ 	sweet_usb_probe();
++	/* Stray-writer tripwire: canary pages + scanner (bsd/dev/sweet_watch.c). */
++	sweet_watch_start();
+ 	return 0;
+ }
+ 
+diff -u a/bsd/dev/sweet_watch.c b/bsd/dev/sweet_watch.c
+--- /dev/null
++++ b/bsd/dev/sweet_watch.c
+@@ -0,0 +1,169 @@
++/*
++ * SWEET stray-writer watch (the "element modified after free" hunt).
++ *
++ * athens panics (task_id_token, kalloc.12288, vm objects sz:256, pmap PTE
++ * garbage) all show freed, zeroed memory overwritten with scattered
++ * high-entropy data. The writer is unidentified: either a CPU store through
++ * a stale/aliased VA (a mapped write into DRAM the VM reused elsewhere) or a
++ * bus master DMAing outside its reserved window. This module:
++ *
++ *  - wires SW_DEF_PAGES wired canary pages filled with a tagged pattern,
++ *    spread over kernel RAM (their physical addresses are recorded);
++ *  - re-reads them every ~100 ms after a physical cache clean+invalidate,
++ *    so a non-coherent writer cannot hide behind a stale CPU cache line;
++ *  - on a mismatch prints VA and PA plus a hex window - the PA distribution
++ *    is the fingerprint: clustered = a device's DRAM window, uniform = a
++ *    wild CPU pointer - then refills with a fresh pattern so repeat hits
++ *    re-report;
++ *  - arms an ARM64 store watchpoint (DBGWVR/DBGWCR) on the first corrupted
++ *    granule's VA: a cyclic CPU-side writer panics with a backtrace, while
++ *    a bus-master write never trips the comparator - which is itself the
++ *    CPU-vs-DMA answer.
++ *
++ * Boot args:
++ *   sweetwatch=0    off
++ *   sweetwatch=1    scan and report (default)
++ *   sweetwatch=2    panic on the first hit (freeze closest to the write)
++ *   sweetwatch_n=N  canary pages (default 128, cap 512)
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/types.h>
++#include <sys/proc.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <machine/machine_routines.h>
++#include <arm/caches_internal.h>
++#include <vm/pmap.h>
++#include <vm/vm_kern.h>
++#include <pexpert/pexpert.h>
++#include <mach/vm_param.h>
++
++extern ppnum_t pmap_find_phys(pmap_t pmap, addr64_t va);
++extern kern_return_t kernel_thread_start(thread_continue_t, void *, thread_t *);
++extern void thread_deallocate(thread_t);
++extern int hz;
++
++#define SW_MAX_PAGES    512
++#define SW_DEF_PAGES    128
++#define SW_MARK         0x57a7c4de00000000ULL   /* 'WAT'-ish, nonzero top bits */
++
++static vm_offset_t sw_va[SW_MAX_PAGES];
++static uint64_t    sw_pa[SW_MAX_PAGES];
++static uint32_t    sw_gen[SW_MAX_PAGES];
++static int sw_npages, sw_mode = 1, sw_chan;
++static volatile uint64_t sw_hits;
++static int sw_wp_armed;
++
++static inline uint64_t
++sw_pattern(int page, uint32_t gen, int i)
++{
++	return SW_MARK | ((uint64_t)(page & 0x1ff) << 36) |
++	    ((uint64_t)(gen & 0xff) << 28) | (uint64_t)i;
++}
++
++static void
++sw_fill(int p, uint32_t gen)
++{
++	uint64_t *q = (uint64_t *)sw_va[p];
++	for (int i = 0; i < PAGE_SIZE / 8; i++) {
++		q[i] = sw_pattern(p, gen, i);
++	}
++	sw_gen[p] = gen;
++	flush_dcache64(sw_pa[p], PAGE_SIZE, TRUE);
++}
++
++/* ARM64 store watchpoint on a VA: a CPU writer through this VA panics with
++ * the writer's PC/FAR. DMA writes bypass the debug unit - expected silence. */
++static void
++sw_arm_watchpoint(uint64_t va)
++{
++	uint64_t mdscr, wcr = 0x1ull              /* E: enable */
++	    | (0x2ull << 3)                        /* LSC: match on store */
++	    | (0xffull << 5)                       /* BAS: all 8 bytes */
++	    | (0x1ull << 14);                      /* SSC: EL1 */
++	__asm__ volatile("mrs %0, MDSCR_EL1" : "=r"(mdscr));
++	mdscr |= (1ull << 13) | (1ull << 15);      /* KDE | MDE */
++	__asm__ volatile("msr MDSCR_EL1, %0" :: "r"(mdscr));
++	__asm__ volatile("msr DBGWVR0_EL1, %0" :: "r"(va));
++	__asm__ volatile("msr DBGWCR0_EL1, %0" :: "r"(wcr));
++	__asm__ volatile("isb");
++	printf("SWEETWATCH: DBGWVR0_EL1 armed on %p\n", (void *)va);
++}
++
++static void
++sw_scan_once(void)
++{
++	for (int p = 0; p < sw_npages; p++) {
++		uint64_t *q = (uint64_t *)sw_va[p];
++		int bad = 0, first = -1, last = -1;
++		/* The page may sit in the cache as a stale clean line: a
++		 * non-coherent writer updates DRAM behind the cache's back. */
++		flush_dcache64(sw_pa[p], PAGE_SIZE, TRUE);
++		for (int i = 0; i < PAGE_SIZE / 8; i++) {
++			if (q[i] != sw_pattern(p, sw_gen[p], i)) {
++				if (first < 0) {
++					first = i;
++				}
++				last = i;
++				bad++;
++			}
++		}
++		if (!bad) {
++			continue;
++		}
++		sw_hits++;
++		printf("SWEETWATCH: canary %d va %p pa 0x%llx: %d bad qwords "
++		    "at +0x%x..+0x%x (hit %llu)\n",
++		    p, (void *)sw_va[p], sw_pa[p], bad, first * 8, last * 8,
++		    sw_hits);
++		int a = first > 4 ? first - 4 : 0;
++		int b = a + 12;
++		if (b > PAGE_SIZE / 8) {
++			b = PAGE_SIZE / 8;
++		}
++		for (int i = a; i < b; i++) {
++			printf("SWEETWATCH:   +0x%03x = 0x%016llx\n",
++			    i * 8, q[i]);
++		}
++		if (!sw_wp_armed) {
++			sw_wp_armed = 1;
++			sw_arm_watchpoint(sw_va[p] + first * 8);
++		}
++		if (sw_mode >= 2) {
++			panic("SWEETWATCH: canary page %d (va %p pa 0x%llx) "
++			    "modified - stray writer", p, (void *)sw_va[p],
++			    sw_pa[p]);
++		}
++		sw_fill(p, sw_gen[p] + 1);
++	}
++}
++
++static void
++sw_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	for (;;) {
++		(void)tsleep(&sw_chan, PZERO, "sweetwatch", MAX(1, hz / 10));
++		sw_scan_once();
++	}
++}
++
++void
++sweet_watch_start(void)
++{
++	sw_mode = 1;
++	PE_parse_boot_argn("sweetwatch", &sw_mode, sizeof(sw_mode));
++	if (!sw_mode) {
++		return;
++	}
++	sw_npages = SW_DEF_PAGES;
++	PE_parse_boot_argn("sweetwatch_n", &sw_npages, sizeof(sw_npages));
++	if (sw_npages < 1 || sw_npages > SW_MAX_PAGES) {
++		sw_npages = SW_DEF_PAGES;
++	}
++	int n = 0;
++	for (; n < sw_npages; n++) {
++		if (kmem_alloc(kernel_map, &sw_va[n], PAGE_SIZE,
++		    KMA_DATA | KMA_KOBJECT | KMA_PERMANENT,
++		    VM_KERN_MEMORY_OSFMK) != KERN_SUCCESS) {
++			break;
++		}
++		ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)sw_va[n]);
++		if (!pn) {
++			break;
++		}
++		sw_pa[n] = ptoa_64(pn);
++		sw_fill(n, 1);
++	}
++	sw_npages = n;
++	if (n) {
++		printf("SWEETWATCH: %d canary pages armed "
++		    "(pa 0x%llx..0x%llx)\n", n, sw_pa[0], sw_pa[n - 1]);
++		thread_t th;
++		if (kernel_thread_start(sw_thread, NULL, &th) == KERN_SUCCESS) {
++			thread_deallocate(th);
++		} else {
++			printf("SWEETWATCH: kernel_thread_start failed\n");
++		}
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
+diff -u a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -1,4 +1,24 @@
+ 	sweet_ufs_panic_write(sweet_panic_zone, (const void *)elem, size);
++	/* SWEET: the corrupted element's physical address is the writer's
++	 * fingerprint - clustered PAs implicate a bus-master window, uniform
++	 * scatter a wild CPU pointer. Append it to the SWEETPAN tag and the
++	 * console; sweetuaf=1 re-zeroes and continues to collect more hits. */
++	ppnum_t uaf_pn = pmap_find_phys(kernel_pmap, (addr64_t)elem);
++	uint64_t uaf_pa = uaf_pn ? ptoa_64(uaf_pn) : 0;
++	snprintf(sweet_panic_zone + strlen(sweet_panic_zone),
++	    sizeof(sweet_panic_zone) - strlen(sweet_panic_zone),
++	    " pa:0x%llx", uaf_pa);
++	printf("SWEET UAF: [%s%s] elem %p pa 0x%llx\n",
++	    zone_heap_name(z), zone_name(z), (void *)elem, uaf_pa);
++	static int sweetuaf = -1;
++	if (sweetuaf < 0) {
++		sweetuaf = 0;
++		PE_parse_boot_argn("sweetuaf", &sweetuaf, sizeof(sweetuaf));
++	}
++	if (sweetuaf == 1) {
++		memset((void *)elem, 0, size);
++		return;
++	}
+ 	(panic)("[%s%s]: element modified after free "
