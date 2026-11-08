@@ -2,9 +2,10 @@ Persist a panic record + the full corrupted element to the partition log
 tail so recovery can read it after the log flusher dies with the panic.
 
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 629168f..3927e7a 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -1,6 +1,28 @@
+@@ -940,6 +940,28 @@ sweet_log_position(void)
  	return os_atomic_load(&sweet_log_total, relaxed);
  }
  
@@ -34,9 +35,10 @@ diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  	char magic[8];
  	uint32_t version, size;
 diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+index 182b44a..a8e8627 100644
 --- a/osfmk/kern/zalloc.c
 +++ b/osfmk/kern/zalloc.c
-@@ -1,7 +1,8 @@
+@@ -3066,6 +3066,7 @@ zalloc_skip_zero_check(void)
  	return false;
  }
  
@@ -44,8 +46,7 @@ diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
  __abortlike
  static void
  zalloc_uaf_panic(zone_t z, uintptr_t elem, size_t size)
- {
-@@ -1,6 +1,10 @@
+@@ -3090,6 +3091,10 @@ zalloc_uaf_panic(zone_t z, uintptr_t elem, size_t size)
  		}
  	}
  

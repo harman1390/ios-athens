@@ -4,10 +4,11 @@ static buffer and rewrites the SWEETPAN record, so pmap/assert panics leave
 their string + backtrace readable from recovery instead of only ~10 screen
 lines.
 
-diff -u a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+index 3927e7a..7c5e3f5 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
-@@ -1,6 +1,28 @@
+@@ -962,6 +962,34 @@ sweet_ufs_panic_write(const char *tag, const void *data, size_t len)
  	return ufs_write_blocks(base, 1 + (uint32_t)((len + UFS_BLOCK - 1) / UFS_BLOCK));
  }
  
@@ -42,19 +43,23 @@ diff -u a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
  struct sweet_log_header {
  	char magic[8];
  	uint32_t version, size;
-diff -u a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+index c86b9e7..4cefb41 100644
 --- a/osfmk/console/serial_console.c
 +++ b/osfmk/console/serial_console.c
-@@ -1,4 +1,5 @@
+@@ -268,6 +268,7 @@ _cnputc(char c, bool poll)
+  */
  #if defined(ARM64_BOARD_CONFIG_SWEET)
-+extern void sweet_panic_log_append(const char *c, int size);  /* bsd/dev/sweet_ufs.c */
  extern void sweet_log_append(const char *c, int size);  /* bsd/dev/sweet_ufs.c */
- #endif
++extern void sweet_panic_log_append(const char *c, int size);  /* bsd/dev/sweet_ufs.c */
+ /*
+  * Set by AppleCLCD (boot-arg sweetfb_noconsole=1) once the GUI presents:
+  * console text still goes to the persistent log, but is not drawn over
+@@ -283,6 +284,7 @@ _cnputs(char *c, int size, bool poll)
  
-@@ -1,6 +1,7 @@
  #if defined(ARM64_BOARD_CONFIG_SWEET)
  	sweet_log_append(c, size);
 +	sweet_panic_log_append(c, size);
- #endif
- 
- 	if (disableConsoleOutput) {
+ 	if (sweet_console_muted && !panic_active()) {
+ 		return;
+ 	}
