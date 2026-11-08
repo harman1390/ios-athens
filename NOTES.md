@@ -99,8 +99,14 @@ flash -> boot -> pull tail -> read "SWEET UAF: vmp qs:.." lines.
   compressor/cslot paths viva rarely hits; both last panics were
   compressed-PTE corruption.
 - NEXT IMAGE: diag kernel + patch 0170 + scrub shim + cmdline adds
-  `vm_compressor_mode=0 zlog1=vm_objects -zc`. If panic class changes
-  or vanishes, the corruption lives in the compressed-PTE/cslot path.
+  `zlog1=vm_objects -zc` (alloc/free backtraces for the vm objects
+  zone -> names the second owner when a UAF hits). Compressor stays
+  ON (default) so behavior matches the panicking runs; a separate
+  `vm_compressor_mode=0` boot is reserved to test whether the
+  corruption needs the compressed-PTE path.
+- Build note: CI run 42499726527 silently SKIPPED 0170 (malformed
+  hunk) - always grep the artifact binary for patch strings after a
+  build (fixed, redispatched as 42500689893).
 
 diag kernel `xnu/out-diag2` (SWEETWATCH/SWEET UAF/PA + SWEETPAN/console-panic
 strings confirmed in binary) + same bare ADT + same cmdline +
