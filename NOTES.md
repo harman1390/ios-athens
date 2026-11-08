@@ -86,6 +86,22 @@ corrupted page's own vm_page q_state/wire/flags at each UAF hit - its
 queue membership discriminates. NEXT: build -> payload+scrub shim ->
 flash -> boot -> pull tail -> read "SWEET UAF: vmp qs:.." lines.
 
+**External review (user's Claude) + verification:** - sweet_ufs_strategy audited: bounded; buf_map/vm_upl_map are stock XNU.
+- No in-page freelist in this xnu (no PACKED_PTR_FREELIST) -> the
+  pnum-table in corrupted elements is NOT freelist; candidates left:
+  UPL upl_page_info arrays, compressor cslot tables, pmap TT pages.
+- vm_compressor_mode=4 (default); `vm_compressor_mode=0` =
+  VM_PAGER_NOT_CONFIGURED kills the compressor + compressed-PTE path.
+- zlog<N>=<zone> boot-arg supported (max 10); `zlog1=vm_objects -zc`
+  logs alloc/free backtraces for the corrupted zone.
+- Memory: 62702 free pages (~980 MiB), compressor region 15G.
+- Low-memory theory strong: 1GiB window vs viva 3.9GiB pushes
+  compressor/cslot paths viva rarely hits; both last panics were
+  compressed-PTE corruption.
+- NEXT IMAGE: diag kernel + patch 0170 + scrub shim + cmdline adds
+  `vm_compressor_mode=0 zlog1=vm_objects -zc`. If panic class changes
+  or vanishes, the corruption lives in the compressed-PTE/cslot path.
+
 diag kernel `xnu/out-diag2` (SWEETWATCH/SWEET UAF/PA + SWEETPAN/console-panic
 strings confirmed in binary) + same bare ADT + same cmdline +
 `sweetuaf=1 sweetwatch=1` (survive hits, collect PAs + canary hits).
