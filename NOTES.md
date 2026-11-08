@@ -67,7 +67,19 @@ addresses as page-table pages -> pmap writes PTEs into them = the
 'VM bookkeeping in zone pages' signature. Also explains the recurring
 invalid-PTE asserts (pmap.c:4113+). Stale tag: '...384 off:10368
 sz:16384' = another 16K-page UAF fired (watchpoint armed on it; final
-panic was elsewhere). NEXT (0175): ptd free-list integrity check
+panic was elsewhere). NEXT (0175): ptd free-list integrity check.
+CLAUDE: head is a victim not mechanism - bad non-VA just faults; victim
+set now spans zones+PTEs+stacks+pmap descs = broad writer. tlbi only
+rules out EL1 stage-1 stale TLB - NOT cache-attr aliasing, leftover L3/
+syscache writebacks of old data (zeroed pool could be undone), or EL2/
+stage-2. 0x48 table may be PREV-BOOT remnants (boot VAs identical).
+CHEAP TESTS: (a) scrub-fill pool with per-boot pattern not zeros - if
+corruption bytes look like last boot's structs, its stale data; (b)
+cold power-cycle vs warm reset. 0175 PRIORITY: arm DBGWVR on the STATIC
+ptd free-list head global (fixed kernel VA - seen at adrp+0x978 in
+disasm, lives outside pmap.c - find in ptd_alloc_unlinked's file) at
+pmap init BEFORE corruption + XOR-shadow check under ptd lock; first
+non-pmap store gives writer PC directly.
 (validate head+each next is in TT range at alloc/free, panic on bad),
 PVH check on corrupted PA, SWEETPAN tag fields. Tail:
 logs/diag4-tail.bin, panic: logs/diag4-panic.txt.
