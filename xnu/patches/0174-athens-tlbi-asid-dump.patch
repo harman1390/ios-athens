@@ -1,0 +1,413 @@
+Stale-translation differential + CPU-id capture for the corruption hunt.
+
+* osfmk/vm/vm_resident.c - sweet_tlbi_flush(): tlbi vmalle1is on every
+  vm_page_grab_options handout and every zone page intake
+  (sweettlbi=0 disables). If corruption stops under the flush, a stale
+  or aliased mapping is the writer - narrow the flush afterward.
+  Also print ID_AA64MMFR0_EL1 (ASIDBits), MIDR_EL1, TCR_EL1, SCTLR_EL1
+  in the SWEET LAYOUT block so XNU's MAX_ASIDS assumption can be checked
+  against real hardware.
+
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 584ee38..bd5be94 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -2647,6 +2647,29 @@ pmap_next_page(
+ 		first_avail += PAGE_SIZE;
+ 		assert(avail_page_count > 0);
+ 		--avail_page_count;
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		{
++			static pmap_paddr_t sweet_pool_next;
++			pmap_paddr_t pa = (pmap_paddr_t)ptoa(*pnum);
++
++			/* SWEET corruption hunt: the bootstrap pool carves
++			 * strictly upward from topOfKernelData. A PA below
++			 * it lands in the kernel/ADT/boot_args/ramdisk
++			 * carve; a gap in the sequence means first_avail
++			 * was reset and pages can be handed out twice. */
++			if (__improbable(pa < BootArgs->topOfKernelData ||
++			    pa + PAGE_SIZE > avail_end ||
++			    (sweet_pool_next && pa != sweet_pool_next))) {
++				panic("SWEET pmap_next_page: pa 0x%llx outside bootstrap pool "
++				    "(topOfKernelData 0x%llx avail_end 0x%llx expected 0x%llx)",
++				    (unsigned long long)pa,
++				    (unsigned long long)BootArgs->topOfKernelData,
++				    (unsigned long long)avail_end,
++				    (unsigned long long)sweet_pool_next);
++			}
++			sweet_pool_next = pa + PAGE_SIZE;
++		}
++#endif
+ 		return TRUE;
+ 	}
+ 	assert(avail_page_count == 0);
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 24f1abc..c114c14 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -808,8 +808,17 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far)
+ 		 * abort.  Turn off watchpoints and keep going; we'll turn them back on in return_from_exception..
+ 		 */
+ 		if (FSC_DEBUG_FAULT == ISS_SSDE_FSC(esr)) {
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++			/* The athens corruption hunt arms EL1 store watchpoints
++			 * on corrupted zone elements (0173): the hit identifies
++			 * the stray writer, so panic with its saved state
++			 * instead of disarming and resuming. */
++			panic_with_thread_kernel_state(
++				"SWEET: EL1 watchpoint hit - stray writer state", state);
++#else
+ 			arm_debug_set(NULL);
+ 			break; /* return to first level handler */
++#endif
+ 		}
+ 		panic("Unsupported Class %u event code. state=%p class=%u esr=%u far=%p",
+ 		    class, state, class, esr, (void *)far);
+diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+index 5352878..aabe2fd 100644
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -3067,6 +3067,8 @@ zalloc_skip_zero_check(void)
+ }
+ 
+ extern int sweet_ufs_panic_write(const char *tag, const void *data, size_t len);
++extern void sweet_layout_dump(uint64_t elem_pa);  /* osfmk/vm/vm_resident.c */
++extern void sweet_check_zone_pages(vm_offset_t addr, uint32_t npages); /* ditto */
+ __abortlike
+ static void
+ zalloc_uaf_panic(zone_t z, uintptr_t elem, size_t size)
+@@ -3107,12 +3109,60 @@ zalloc_uaf_panic(zone_t z, uintptr_t elem, size_t size)
+ 	sweet_ufs_panic_write(sweet_panic_zone, (const void *)elem, size);
+ 	printf("SWEET UAF: [%s%s] elem %p pa 0x%llx\n",
+ 	    zone_heap_name(z), zone_name(z), (void *)elem, uaf_pa);
++	/* The corrupted element's own page: which queue owns it now?
++	 * On a free list while zalloc owns it = double-allocation; owned
++	 * elsewhere = a wild VA wrote to it. */
++	if (uaf_pn >= vm_first_phys_ppnum &&
++	    uaf_pn - vm_first_phys_ppnum < vm_pages_count) {
++		vm_page_t uaf_p = &vm_page_array_beginning_addr[uaf_pn - vm_first_phys_ppnum];
++		if (uaf_p) {
++			printf("SWEET UAF: vmp qs:%u wire:%u busy:%u fict:%u priv:%u gobbled:%u onspec:%u\n",
++			    uaf_p->vmp_q_state, uaf_p->vmp_wire_count, uaf_p->vmp_busy,
++			    uaf_p->vmp_fictitious, uaf_p->vmp_private, uaf_p->vmp_gobbled,
++			    uaf_p->vmp_on_specialq);
++		}
++	}
++	/* Full memory layout + verdict on this element's PA (vm_pages array
++	 * overlap, below-pool carve, past window end). */
++	sweet_layout_dump(uaf_pa);
+ 	static int sweetuaf = -1;
+ 	if (sweetuaf < 0) {
+ 		sweetuaf = 0;
+ 		PE_parse_boot_argn("sweetuaf", &sweetuaf, sizeof(sweetuaf));
+ 	}
+ 	if (sweetuaf == 1) {
++		/* SWEET: hardware store-watchpoints on the corrupted granule,
++		 * armed on both the zone element VA and its physmap alias.
++		 * Whoever writes into this element next trips the
++		 * comparator; the ESR_EC_WATCHPT_MATCH_EL1 hunk in
++		 * 0173-athens-uaf-watchpoint turns the hit into a panic
++		 * with the writer's saved state (stock sleh would just
++		 * disarm and resume). WVR0 is reserved for sweet_watch's
++		 * canary, so use pairs 1 and 2. */
++		if (first_offs != ~0u) {
++			extern unsigned long gPhysBase, gVirtBase, real_phys_size;
++			uint64_t gva = (uint64_t)(elem + first_offs);
++			uint64_t gpa = uaf_pa + ((gva & PAGE_MASK));
++			uint64_t daif, mdscr, pva = 0;
++			uint64_t wcr = 0x1ull | (0x2ull << 3) |
++			    (0xffull << 5) | (0x1ull << 14);
++			__asm__ volatile("msr OSLAR_EL1, %0" :: "r"(0ull));
++			__asm__ volatile("mrs %0, MDSCR_EL1" : "=r"(mdscr));
++			mdscr |= (1ull << 13) | (1ull << 15); /* KDE | MDE */
++			__asm__ volatile("msr MDSCR_EL1, %0" :: "r"(mdscr));
++			__asm__ volatile("msr DBGWVR1_EL1, %0" :: "r"(gva));
++			__asm__ volatile("msr DBGWCR1_EL1, %0" :: "r"(wcr));
++			if (gpa >= gPhysBase && gpa < gPhysBase + real_phys_size) {
++				pva = gpa - gPhysBase + gVirtBase;
++				__asm__ volatile("msr DBGWVR2_EL1, %0" :: "r"(pva));
++				__asm__ volatile("msr DBGWCR2_EL1, %0" :: "r"(wcr));
++			}
++			__asm__ volatile("mrs %0, DAIF" : "=r"(daif));
++			__asm__ volatile("msr DAIFClr, #8");
++			printf("SWEET UAF: watchpoint armed elem+0x%x va 0x%llx "
++			    "physmap 0x%llx daif 0x%llx\n",
++			    first_offs, gva, pva, daif);
++		}
+ 		memset((void *)elem, 0, size);
+ 		return;
+ 	}
+@@ -4166,6 +4216,11 @@ zone_fill_initially(zone_t zone, vm_size_t nelems)
+ 		    kmaflags, VM_KERN_MEMORY_ZONE);
+ 	}
+ 
++	/* SWEET: every page entering a zone must be wired and off all VM
++	 * queues - a page still on a free queue gets its links rewritten
++	 * into zone memory (the corruption signature). */
++	sweet_check_zone_pages(addr, pages);
++
+ 	zone_meta_populate(addr, ptoa(pages));
+ 	zcram(zone, addr, pages, 0);
+ }
+@@ -4462,6 +4517,12 @@ zone_allocate_va_locked(zone_t z, zalloc_flags_t flags)
+ 		    ptoa(pages + guards), kmaflags, VM_KERN_MEMORY_ZONE);
+ 	}
+ 
++	if (kr == KERN_SUCCESS) {
++		/* SWEET: pages handed to a zone must not still be on a VM
++		 * queue - see sweet_check_zone_pages. */
++		sweet_check_zone_pages(addr, pages + guards);
++	}
++
+ 	if (kr != KERN_SUCCESS) {
+ 		uint64_t zone_size = 0;
+ 		zone_t zone_largest = zone_find_largest(&zone_size);
+diff --git a/osfmk/vm/vm_resident.c b/osfmk/vm/vm_resident.c
+index 6394730..4a1e934 100644
+--- a/osfmk/vm/vm_resident.c
++++ b/osfmk/vm/vm_resident.c
+@@ -916,6 +916,190 @@ vm_init_before_launchd()
+  *	Each page cell is initialized and placed on the free list.
+  *	Returns the range of available kernel virtual memory.
+  */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++/*
++ * SWEET athens corruption hunt: the panic-time memory layout dump.
++ *
++ * Corrupted zone elements keep turning up full of VM bookkeeping data
++ * (packed pnum/pointer rows). The question is whether the corrupted page
++ * physically overlaps a VM-owned structure (double allocation) or was
++ * written through a wrong pointer. This records the physical span of the
++ * vm_pages array and prints every bootstrap memory-layout global once at
++ * boot and again on each zone-UAF hit, together with a verdict for the
++ * corrupted element's PA.
++ *
++ * The vm_pages array lives in pmap_steal_freeable_memory() VA space, NOT
++ * the physmap, so kvtophys() cannot translate it; each page's PA comes
++ * from pmap_find_phys(). Runs are snapshotted here at boot so the panic
++ * path needs no page table walk.
++ */
++extern unsigned long            gPhysBase, gVirtBase, gPhysSize, real_phys_size;
++extern vm_offset_t              mem_size;
++extern uint64_t                 max_mem, max_mem_actual, sane_size;
++extern vm_offset_t              first_avail;
++extern pmap_paddr_t             avail_start, avail_end, real_avail_end;
++extern pmap_paddr_t             vm_first_phys, vm_last_phys;
++extern boot_args                *BootArgs;
++
++#define SWEET_VMPA_MAX_RUNS 8
++static struct {
++	pmap_paddr_t    lo, hi;
++} sweet_vmpa_runs[SWEET_VMPA_MAX_RUNS];
++static unsigned int sweet_vmpa_nruns;
++
++static void
++sweet_layout_snapshot(void)
++{
++	vm_offset_t va = (vm_offset_t)vm_page_array_beginning_addr;
++	vm_offset_t end = (vm_offset_t)vm_page_array_ending_addr;
++	pmap_paddr_t run_lo = 0, run_hi = 0;
++	ppnum_t last = 0;
++	bool have = false;
++
++	for (; va < end; va += PAGE_SIZE) {
++		ppnum_t pn = pmap_find_phys(kernel_pmap, va);
++		if (pn && have && pn == last + 1) {
++			run_hi = ptoa_64(pn) + PAGE_SIZE;
++		} else {
++			if (have && sweet_vmpa_nruns < SWEET_VMPA_MAX_RUNS) {
++				sweet_vmpa_runs[sweet_vmpa_nruns].lo = run_lo;
++				sweet_vmpa_runs[sweet_vmpa_nruns].hi = run_hi;
++				sweet_vmpa_nruns++;
++			}
++			if (pn) {
++				run_lo = ptoa_64(pn);
++				run_hi = run_lo + PAGE_SIZE;
++			}
++			have = (pn != 0);
++		}
++		last = pn;
++	}
++	if (have && sweet_vmpa_nruns < SWEET_VMPA_MAX_RUNS) {
++		sweet_vmpa_runs[sweet_vmpa_nruns].lo = run_lo;
++		sweet_vmpa_runs[sweet_vmpa_nruns].hi = run_hi;
++		sweet_vmpa_nruns++;
++	}
++}
++
++static bool
++sweet_pa_in_vmpages(pmap_paddr_t pa)
++{
++	for (unsigned int i = 0; i < sweet_vmpa_nruns; i++) {
++		if (pa >= sweet_vmpa_runs[i].lo && pa < sweet_vmpa_runs[i].hi) {
++			return true;
++		}
++	}
++	return false;
++}
++
++void
++sweet_layout_dump(uint64_t elem_pa)
++{
++	printf("SWEET LAYOUT: gPhysBase 0x%lx gVirtBase 0x%lx gPhysSize 0x%lx real_phys_size 0x%lx\n",
++	    gPhysBase, gVirtBase, gPhysSize, real_phys_size);
++	printf("SWEET LAYOUT: mem_size 0x%lx max_mem 0x%llx max_mem_actual 0x%llx sane_size 0x%llx\n",
++	    mem_size, max_mem, max_mem_actual, sane_size);
++	printf("SWEET LAYOUT: first_avail 0x%lx avail_start 0x%llx avail_end 0x%llx real_avail_end 0x%llx\n",
++	    first_avail, (unsigned long long)avail_start,
++	    (unsigned long long)avail_end, (unsigned long long)real_avail_end);
++	printf("SWEET LAYOUT: vm_first_phys 0x%llx vm_last_phys 0x%llx vm_first_phys_ppnum 0x%x\n",
++	    (unsigned long long)vm_first_phys, (unsigned long long)vm_last_phys,
++	    vm_first_phys_ppnum);
++	if (BootArgs) {
++		printf("SWEET LAYOUT: boot_args physBase 0x%llx virtBase 0x%llx memSize 0x%llx "
++		    "memSizeActual 0x%llx topOfKernelData 0x%llx dtP %p dtLen %u\n",
++		    BootArgs->physBase, BootArgs->virtBase, BootArgs->memSize,
++		    BootArgs->memSizeActual, BootArgs->topOfKernelData,
++		    BootArgs->deviceTreeP, BootArgs->deviceTreeLength);
++	}
++	printf("SWEET LAYOUT: vm_pages va %p..%p count %u sizeof(vm_page) %zu, %u pa runs:\n",
++	    (void *)vm_page_array_beginning_addr, (void *)vm_page_array_ending_addr,
++	    vm_pages_count, sizeof(struct vm_page), sweet_vmpa_nruns);
++	for (unsigned int i = 0; i < sweet_vmpa_nruns; i++) {
++		printf("SWEET LAYOUT:   pa 0x%llx..0x%llx\n",
++		    (unsigned long long)sweet_vmpa_runs[i].lo,
++		    (unsigned long long)sweet_vmpa_runs[i].hi);
++	}
++	if (elem_pa) {
++		ppnum_t pn = atop_64(elem_pa);
++		printf("SWEET LAYOUT: elem pa 0x%llx: in vm_pages array %d, "
++		    "below topOfKernelData %d, at/past avail_end %d\n",
++		    elem_pa, sweet_pa_in_vmpages(elem_pa),
++		    BootArgs && elem_pa < BootArgs->topOfKernelData,
++		    elem_pa >= avail_end);
++		if (pn >= vm_first_phys_ppnum &&
++		    pn - vm_first_phys_ppnum < vm_pages_count) {
++			vm_page_t m = &vm_pages[pn - vm_first_phys_ppnum];
++			printf("SWEET LAYOUT: elem vmp qs:%u wire:%u busy:%u fict:%u "
++			    "priv:%u gobbled:%u onspec:%u\n",
++			    m->vmp_q_state, m->vmp_wire_count, m->vmp_busy,
++			    m->vmp_fictitious, m->vmp_private, m->vmp_gobbled,
++			    m->vmp_on_specialq);
++		} else {
++			printf("SWEET LAYOUT: elem pn 0x%x outside managed range\n", pn);
++		}
++	}
++}
++
++/* Stale-translation differential: flush all EL1 TLB entries on every
++ * page hand-out. If corruption stops, a stale/aliased mapping was the
++ * writer - narrow the flush afterward. sweettlbi=0 disables. */
++static int sweet_tlbi_mode = -1;
++static inline void
++sweet_tlbi_flush(void)
++{
++	if (sweet_tlbi_mode < 0) {
++		sweet_tlbi_mode = 1;
++		PE_parse_boot_argn("sweettlbi", &sweet_tlbi_mode, sizeof(sweet_tlbi_mode));
++	}
++	if (sweet_tlbi_mode) {
++		__asm__ volatile("tlbi vmalle1is; dsb ish; isb" ::: "memory");
++	}
++}
++
++/* Assert at the point a page leaves the allocator, not at detection
++ * time: a page handed out while still queue-linked or wired is the
++ * double-allocation case - the other owner keeps writing VM bookkeeping
++ * into memory the new owner believes is private. */
++#define SWEET_CHECK_HANDOUT(m)                                              \
++	MACRO_BEGIN                                                         \
++	if (__improbable((m) != VM_PAGE_NULL &&                           \
++	    ((m)->vmp_q_state != VM_PAGE_NOT_ON_Q ||                      \
++	     (m)->vmp_wire_count != 0))) {                                \
++		panic("SWEET vm_page_grab: %p (pn 0x%x) handed out with " \
++		    "qs %u wire %u - page still owned",                 \
++		    (m), VM_PAGE_GET_PHYS_PAGE(m), (m)->vmp_q_state,      \
++		    (m)->vmp_wire_count);                               \
++	}                                                                 \
++	MACRO_END
++
++/* Same assert at the zone boundary: every page a zone just obtained
++ * must be wired and on no VM queue. If it is still linked into a free
++ * queue, the VM will keep writing queue links into zone memory. */
++void
++sweet_check_zone_pages(vm_offset_t addr, uint32_t npages)
++{
++	sweet_tlbi_flush();
++	for (uint32_t i = 0; i < npages; i++, addr += PAGE_SIZE) {
++		ppnum_t pn = pmap_find_phys(kernel_pmap, addr);
++		if (!pn) {
++			continue;   /* guard pages may stay unmapped */
++		}
++		if (pn < vm_first_phys_ppnum ||
++		    pn - vm_first_phys_ppnum >= vm_pages_count) {
++			continue;
++		}
++		vm_page_t m = &vm_pages[pn - vm_first_phys_ppnum];
++		if (__improbable(m->vmp_q_state != VM_PAGE_NOT_ON_Q &&
++		    m->vmp_q_state != VM_PAGE_IS_WIRED)) {
++			panic("SWEET zone pages: va %p pn 0x%x handed to zone "
++			    "while qs %u wire %u - still on a VM queue",
++			    (void *)addr, pn, m->vmp_q_state, m->vmp_wire_count);
++		}
++	}
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET */
++
+ __startup_func
+ void
+ vm_page_bootstrap(
+@@ -1218,6 +1402,12 @@ vm_page_bootstrap(
+ 	printf("vm_page_bootstrap: %d free pages, %d wired pages, (up to %d of which are delayed free)\n",
+ 	    vm_page_free_count, vm_page_wire_count, vm_delayed_count);
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* Baseline for the corruption hunt: layout + vm_pages array PA runs. */
++	sweet_layout_snapshot();
++	sweet_layout_dump(0);
++#endif
++
+ 	kernel_debug_string_early("vm_page_bootstrap complete");
+ }
+ 
+@@ -3186,6 +3376,9 @@ restart:
+ 				vm_page_assign_special_state(mem, VM_PAGE_SPECIAL_Q_BG);
+ 			}
+ 		}
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		SWEET_CHECK_HANDOUT(mem);
++#endif
+ 		return mem;
+ 	}
+ 	enable_preemption();
+@@ -3216,6 +3409,9 @@ restart:
+ 	    vm_page_free_count <= vm_page_free_target &&
+ 	    (mem = vm_get_delayed_page(grab_options)) != NULL)) {
+ 		assert(!mem->vmp_realtime);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		SWEET_CHECK_HANDOUT(mem);
++#endif
+ 		return mem;
+ 	}
+ 
+@@ -3251,6 +3447,9 @@ restart:
+ 				VM_DEBUG_EVENT(vm_page_grab, VM_PAGE_GRAB, DBG_FUNC_NONE, grab_options, 0, 0, 0);
+ 
+ 				assert(!mem->vmp_realtime);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++				SWEET_CHECK_HANDOUT(mem);
++#endif
+ 				return mem;
+ 			}
+ 		}
+@@ -3419,6 +3618,9 @@ restart:
+ 			}
+ 		}
+ 	}
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	SWEET_CHECK_HANDOUT(mem);
++#endif
+ 	return mem;
+ }
+ 

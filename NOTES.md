@@ -58,6 +58,13 @@ logs/ (scrub-tail's SWEETPAN element was overwritten by the console-
 panic transcript record), so the 64-byte-stride check couldn't be done
 locally - 0171 makes the next dump self-describing anyway.
 
+**0174 BUILT (stale-translation differential):** tlbi vmalle1is on every
+grab/zone-intake (sweettlbi=0 off) + MMFR0/MIDR/TCR/SCTLR in LAYOUT block.
+If corruption stops -> stale/aliased TLB. PVH check + SWEETPAN tag fields
+(vmp/verdict/DAIF/cookies) + free-time watchpoint arm deferred to 0175.
+Claude: packed-VA decode may be numerology (byte-granular counting);
+real read = strided store loop, one qword per 72-byte record = init loop
+of a 72-byte-elt array built by an owner that believes it owns the page.
 **pad8m RESULT: different victim, same family.** kernel_end delta was
 exactly 0x800000 (0x85ac000->0x8dac000 - the 0x844000 in the earlier
 print compared the wrong baseline). Panic: pmap.c:4113 "invalid pte
