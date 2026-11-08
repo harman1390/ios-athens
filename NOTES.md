@@ -58,6 +58,19 @@ logs/ (scrub-tail's SWEETPAN element was overwritten by the console-
 panic transcript record), so the 64-byte-stride check couldn't be done
 locally - 0171 makes the next dump self-describing anyway.
 
+**diag4 RESULT: TLBI FLUSH DID NOT STOP CORRUPTION** - stale-EL1-TLB
+theory effectively ruled out (vmalle1is on every grab/intake). Panic:
+data abort in _ptd_alloc_unlinked+0xd4, 'ldr x9,[x19]' where x19 =
+ptd free-list HEAD = 0x601484b0200884d0 (garbage, not a VA). MECHANISM
+LEAD: corrupted pmap ptd free list -> ptd_alloc hands out wild/owned
+addresses as page-table pages -> pmap writes PTEs into them = the
+'VM bookkeeping in zone pages' signature. Also explains the recurring
+invalid-PTE asserts (pmap.c:4113+). Stale tag: '...384 off:10368
+sz:16384' = another 16K-page UAF fired (watchpoint armed on it; final
+panic was elsewhere). NEXT (0175): ptd free-list integrity check
+(validate head+each next is in TT range at alloc/free, panic on bad),
+PVH check on corrupted PA, SWEETPAN tag fields. Tail:
+logs/diag4-tail.bin, panic: logs/diag4-panic.txt.
 **FLASHED (sdc52): athens-boot-diag4.img = 0174 kernel (CI 42506889691) + scrub shim + bare ADT + normal layout (no pad) + diag cmdline, sweettlbi ON. If corruption stops -> stale TLB.
 **0174 BUILT (stale-translation differential):** tlbi vmalle1is on every
 grab/zone-intake (sweettlbi=0 off) + MMFR0/MIDR/TCR/SCTLR in LAYOUT block.
