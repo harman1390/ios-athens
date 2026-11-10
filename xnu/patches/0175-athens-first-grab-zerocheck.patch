@@ -471,7 +471,7 @@ legitimately patterns free pages, so the checks stand down when set.
  
 --- a/osfmk/arm/pmap/pmap_data.c
 +++ b/osfmk/arm/pmap/pmap_data.c
-@@ -2747,6 +2747,26 @@
+@@ -2747,6 +2747,28 @@
  	 */
  	pt_desc_t *const next_node = (pt_desc_t *)(*(void **)ptd_free_list);
  
@@ -484,8 +484,10 @@ legitimately patterns free pages, so the checks stand down when set.
 +	 * inside the kernel VA range. Panic now with the popped node's VA,
 +	 * PA, the count and the bad word - the node's page can then be
 +	 * read for a poison pattern or a PVH entry. */
++	/* Nodes live at physmap VAs (0xfffffd7f_... on this platform), so
++	 * accept any kernel VA, not just VM_MIN_KERNEL_ADDRESS and above. */
 +	if (__improbable(next_node != PTD_ENTRY_NULL &&
-+	    ((vm_offset_t)next_node < VM_MIN_KERNEL_ADDRESS ||
++	    (((vm_offset_t)next_node >> 48) != 0xffff ||
 +	     ((vm_offset_t)next_node & 7) != 0))) {
 +		panic("SWEET PTD: popped node %p (pa 0x%llx) has bad next "
 +		    "0x%016lx (count %u) - stray write into ptd page",
@@ -498,7 +500,7 @@ legitimately patterns free pages, so the checks stand down when set.
  	/**
  	 * If the next node in the list is NULL but there are supposed to still be
  	 * nodes left, then we've hit the previously allocated empty page of nodes.
-@@ -2754,6 +2774,22 @@
+@@ -2754,6 +2776,22 @@
  	 */
  	if ((next_node == PTD_ENTRY_NULL) && (ptd_free_count > 1)) {
  		ptd_free_list = ptd_free_list + 1;

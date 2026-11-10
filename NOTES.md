@@ -154,6 +154,25 @@ ADDENDUM 4 (0175 v5 - UFS lock fix + every-pop ptd check):
   check kept too. Commit ef7c5d5. Still needs push (no creds here)
   or a gh dispatch with the verify gate.
 
+
+ADDENDUM 5: pushed affae6e to athens (gh.exe token via Windows
+  keyring; `gh` absent in WSL but "/mnt/c/Program Files/GitHub CLI/
+  gh.exe" works). CI run 42904311335 dispatched with drop set
+  0161/0164/0165 + verify_strings "SWEET ZCHECK,SWEET POOLSCAN,SWEET
+  PTD,used-freed". Push-triggered run 42904301784 auto-cancelled.
+  NEXT: check run outcome + verify gate; on success build shim img,
+  record artifact SHA256, boot, pull sdc59 tail.
+
+
+RUN STATUS: CI 42904311335 success, all 4 markers in binary.
+  Image built: shim/out/athens-boot.img sha256
+  8ff427e66c302365e71a103fb51d68bc31e33e3149e182b4aeaffb06f2696a84
+  (kernel f6c49afb382cea2ebe881174b94a7ac2b02c75b6a013cd99f4801e4983a3720b),
+  cmdline diag4 + cpus=1 sweetuaf=1 sweetwatch=1 zlog1=vm_objects -zc.
+  fastboot boot sent at ~21:35 (WSL "Too many links" status error is
+  cosmetic - device left fastboot). AWAITING: boot result + sdc59 tail
+  pull for ZCHECK/POOLSCAN/SWEET PTD/SWEETPAN records.
+
 ## >>> ATHENS HANDOFF 2026-11-08 ~23:xx - EXTERNAL-REVIEW PLAN IMPLEMENTED (read first) <<<
 
 The four-point plan (mem-layout dump / watchpoint / alloc asserts /
