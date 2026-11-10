@@ -173,6 +173,22 @@ RUN STATUS: CI 42904311335 success, all 4 markers in binary.
   cosmetic - device left fastboot). AWAITING: boot result + sdc59 tail
   pull for ZCHECK/POOLSCAN/SWEET PTD/SWEETPAN records.
 
+
+RUN-1 RESULT (42904311335): SWEET PTD fired - FALSE POSITIVE
+  (my bound used VM_MIN_KERNEL_ADDRESS, physmap nodes sit below it;
+  bad word was a legit node+0x28 link). Fixed to (next>>48)==0xffff.
+  Commit 9111e16. Rebuild = run 42907586907 (in progress).
+  Evidence path PROVEN: panic under lock -> sweet_ufs_diag_write ->
+  SWEETPAN console-panic record survived in sdc59 tail (ring lost).
+  Pulled: logs/athens-0175-pull.txt.bin, run1-console-panic.txt,
+  run1-tail-strings.txt (stale ring shows an older boot reached
+  launchd/keybagd/usermanagerd).
+  TWRP reserved-memory dump saved: logs/reserved-memory-dump.txt.
+  DPM at 0xffe60000+0x190000 confirmed abutting window top; all other
+  mblocks sit below gPhysBase 0xc0000000 - window is clean.
+  NEXT: when 42907586907 finishes -> download kernel, repack img,
+  fastboot boot, adb pull tail in recovery.
+
 ## >>> ATHENS HANDOFF 2026-11-08 ~23:xx - EXTERNAL-REVIEW PLAN IMPLEMENTED (read first) <<<
 
 The four-point plan (mem-layout dump / watchpoint / alloc asserts /
