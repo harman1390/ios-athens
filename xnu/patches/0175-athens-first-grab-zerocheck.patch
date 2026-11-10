@@ -1,0 +1,585 @@
+First-grab zero check + never-used free-page scanner + poison-on-free +
+ptd node checks: the split experiment for the stray-writer hunt.
+
+The shim scrubs [topOfKernelData, window end) to zero before entry, so a
+managed page must read all-zero until it is handed out. sweet_fg_bits[]
+marks pages that have ever left the free pool; every handout (all four
+vm_page_grab_options returns via SWEET_CHECK_HANDOUT, cpm_allocate's
+contiguous lists, and pmap_next_page_hi bootstrap steals) civacs + scans
+a first-grab page and panics with PA + offset + first bad qwords on a
+nonzero word.
+
+Freed previously-used pages get a self-describing poison pattern
+(0xf2ee<<48 | ppnum<<16 | qword index) written at BOTH free-queue
+enqueue sites (vm_page_release and the vm_page_free_list batch path);
+a separate sweet_pz_bits[] "is poisoned now" bit is set on each poison
+write and cleared on each grab, so a freed page that bypassed a
+poisoning enqueue can never produce a false used-freed hit. Side
+effect: poison found inside a live object in a later dump proves a
+double-free/double-ownership path, and the embedded ppnum names the
+page.
+
+A kernel thread (started at kernel_bootstrap_thread and again from
+sweet_ufs_init, idempotent) sweeps free-queue pages at 1024 pages per
+~100 ms tick plus one full pass at start (civac to PoC first, so a
+non-coherent writer cannot hide behind stale cached zeros), checking
+zero-fill for never-used pages and poison for used-then-freed ones;
+hits log PA + offset + q_state + queue color + mach_absolute_time, and
+the first 4 hits plus every ZCHECK panic are persisted through
+sweet_ufs_diag_write (sweet_ufs_lock held when not panicking - the
+record write shares the bounce buffer with live strategy I/O).
+
+ptd pops additionally validate every next_node word (NULL or
+8-aligned kernel VA) before it can reach the head, and the
+reserve-page walk branch re-verifies the new head node's word: either
+fires one step before a wild ptd_free_list head forms, with the node's
+VA, PA, count and bad word (the pages are bzero'd by
+pmap_pages_alloc_zeroed after the first-grab window, which ZCHECK
+alone cannot see).
+
+Boot args: sweetzcheck=0 (first-grab off), sweetscan=0 (scanner off,
+default 1 report, 2 panic on hit), sweetscan_n=N (pages/tick, def
+1024), sweetpoison=0 (poison-on-free off). The fill= boot arg
+legitimately patterns free pages, so the checks stand down when set.
+
+--- a/osfmk/vm/vm_resident.c
++++ b/osfmk/vm/vm_resident.c
+@@ -1063,14 +1063,17 @@
+  * into memory the new owner believes is private. */
+ #define SWEET_CHECK_HANDOUT(m)                                              \
+ 	MACRO_BEGIN                                                         \
+-	if (__improbable((m) != VM_PAGE_NULL &&                           \
+-	    ((m)->vmp_q_state != VM_PAGE_NOT_ON_Q ||                      \
+-	     (m)->vmp_wire_count != 0))) {                                \
+-		panic("SWEET vm_page_grab: %p (pn 0x%x) handed out with " \
+-		    "qs %u wire %u - page still owned",                 \
+-		    (m), VM_PAGE_GET_PHYS_PAGE(m), (m)->vmp_q_state,      \
+-		    (m)->vmp_wire_count);                               \
+-	}                                                                 \
++	if ((m) != VM_PAGE_NULL) {                                         \
++		/* first handout since the shim scrub: page must be zero */ \
++		sweet_first_grab(m);                                            \
++		if (__improbable((m)->vmp_q_state != VM_PAGE_NOT_ON_Q ||        \
++		    (m)->vmp_wire_count != 0)) {                                \
++			panic("SWEET vm_page_grab: %p (pn 0x%x) handed out with " \
++			    "qs %u wire %u - page still owned",                     \
++			    (m), VM_PAGE_GET_PHYS_PAGE(m), (m)->vmp_q_state,        \
++			    (m)->vmp_wire_count);                                  \
++		}                                                               \
++	}                                                                   \
+ 	MACRO_END
+ 
+ /* Same assert at the zone boundary: every page a zone just obtained
+@@ -1098,6 +1101,329 @@
+ 		}
+ 	}
+ }
++/*
++ * First-grab zero check and never-used-page scanner (the split
++ * experiment for the stray-writer hunt).
++ *
++ * The shim scrubs [topOfKernelData, window end) to zero before entering
++ * XNU, so every managed page must still read all-zero until its first
++ * handout. sweet_fg_bits[] records which pages have ever left the free
++ * pool; sweet_first_grab() runs at every handout, dc-civacs the page
++ * (so a stale clean cache line cannot hide a non-coherent physical
++ * write) and scans all 16K - a nonzero word panics with the PA, the
++ * offset and the first bad values, before the new owner can write it.
++ * sweet_poolscan_thread() re-reads never-used free pages every ~100 ms
++ * and reports the PA, offset and time of the first change.
++ *
++ * A nonzero never-used page = a writer into free memory (bus master, or
++ * a CPU stale pointer); the PA/offset/timing then characterise it. If
++ * free pages stay zero while in-use pages corrupt, the bug is in an
++ * owner's code instead.
++ *
++ * vm_page_release() additionally tags used-then-freed pages with a
++ * self-describing poison pattern, so the scanner covers both
++ * populations: never-used pages (expected zero) and used-then-freed
++ * pages (expected poison).
++ *
++ * Boot args:
++ *   sweetzcheck=0   first-grab check off (default 1; panics on hit)
++ *   sweetscan=0     pool scanner off (default 1 report, 2 panic on hit)
++ *   sweetscan_n=N   pages scanned per ~100 ms tick (default 256)
++ *   sweetpoison=0   poison-on-free fill off (default 1)
++ */
++extern vm_map_address_t phystokv(pmap_paddr_t pa);  /* osfmk/arm64/arm_vm_init.c */
++extern void flush_dcache64(addr64_t addr, unsigned count, int phys); /* osfmk/arm/caches_internal.h */
++extern int sweet_ufs_diag_write(const char *tag, const void *data, size_t len); /* bsd/dev/sweet_ufs.c */
++
++#define SWEET_FG_MAX_PN	(1u << 18)			/* ppnums: PAs below 4 GiB */
++static uint32_t sweet_fg_bits[SWEET_FG_MAX_PN / 32];
++static uint32_t sweet_pz_bits[SWEET_FG_MAX_PN / 32];	/* "is poisoned now" */
++static int sweet_fg_mode = -1;
++
++/* Set the page's "has left the free pool" bit; returns its old value. */
++static bool
++sweet_fg_test_and_mark(ppnum_t pn)
++{
++	uint32_t bit = 1u << (pn & 31);
++
++	if (pn >= SWEET_FG_MAX_PN) {
++		return true;	/* outside the tracked window: never checked */
++	}
++	return (os_atomic_or_orig(&sweet_fg_bits[pn >> 5], bit, relaxed) & bit) != 0;
++}
++
++static bool
++sweet_fg_marked(ppnum_t pn)
++{
++	return pn >= SWEET_FG_MAX_PN ||
++	    (sweet_fg_bits[pn >> 5] & (1u << (pn & 31))) != 0;
++}
++
++/* Poison-on-free: a page that has ever been handed out gets a tagged
++ * pattern while it sits on a free queue (in vm_page_release below), so
++ * the scanner can catch stray writes into used-then-freed pages too,
++ * not just never-used ones. The pattern packs a magic, the ppnum and
++ * the qword index, so any mismatched word self-describes. */
++#define SWEET_POISON_TOP	0xf2ee000000000000ULL
++static inline uint64_t
++sweet_poison(ppnum_t pn, uint32_t i)
++{
++	return SWEET_POISON_TOP | ((uint64_t)(pn & 0xffff) << 16) | i;
++}
++
++static int sweet_poison_mode = -1;
++static void
++sweet_poison_page(ppnum_t pn)
++{
++	uint64_t *q = (uint64_t *)phystokv((pmap_paddr_t)ptoa_64(pn));
++
++	if (pn >= SWEET_FG_MAX_PN) {
++		return;
++	}
++	if (sweet_poison_mode < 0) {
++		sweet_poison_mode = 1;
++		PE_parse_boot_argn("sweetpoison", &sweet_poison_mode, sizeof(sweet_poison_mode));
++	}
++	for (unsigned int i = 0; i < PAGE_SIZE / sizeof(uint64_t); i++) {
++		q[i] = sweet_poison(pn, i);
++	}
++	/* Set the poisoned bit AFTER the fill: the scanner may check this
++	 * page only from this point on. */
++	os_atomic_or(&sweet_pz_bits[pn >> 5], 1u << (pn & 31), relaxed);
++}
++
++static bool
++sweet_poisoned(ppnum_t pn)
++{
++	return pn < SWEET_FG_MAX_PN &&
++	    (sweet_pz_bits[pn >> 5] & (1u << (pn & 31))) != 0;
++}
++
++static void
++sweet_depoison(ppnum_t pn)
++{
++	if (pn < SWEET_FG_MAX_PN) {
++		os_atomic_andnot(&sweet_pz_bits[pn >> 5], 1u << (pn & 31), relaxed);
++	}
++}
++
++/* Clean+invalidate the page to the point of coherency, then count
++ * words that differ from the expected fill (0, or the poison pattern
++ * when poisoned is set). *offp gets the offset of the first bad one,
++ * w0/w1 the first two bad values. */
++static unsigned int
++sweet_page_dirty(ppnum_t pn, pmap_paddr_t pa, bool poisoned,
++    uint32_t *offp, uint64_t *w0, uint64_t *w1)
++{
++	const uint64_t *q = (const uint64_t *)phystokv(pa);
++	unsigned int bad = 0;
++
++	*offp = ~0u;
++	*w0 = *w1 = 0;
++	flush_dcache64((addr64_t)pa, PAGE_SIZE, TRUE);
++	for (unsigned int i = 0; i < PAGE_SIZE / sizeof(uint64_t); i++) {
++		if (q[i] == (poisoned ? sweet_poison(pn, i) : 0)) {
++			continue;
++		}
++		if (*offp == ~0u) {
++			*offp = i * (uint32_t)sizeof(uint64_t);
++			*w0 = q[i];
++		} else if (bad == 1) {
++			*w1 = q[i];
++		}
++		bad++;
++	}
++	return bad;
++}
++
++/* The page is leaving the free pool. The first time it does it must
++ * still be shim-scrubbed to zero; panic otherwise. The bit is set even
++ * when the check is off so the pool scanner sees real use either way. */
++void
++sweet_first_grab_pn(ppnum_t pn)
++{
++	pmap_paddr_t pa;
++	uint32_t off;
++	uint64_t w0, w1;
++	unsigned int bad;
++
++	if (sweet_fg_mode < 0) {
++		sweet_fg_mode = 1;
++		PE_parse_boot_argn("sweetzcheck", &sweet_fg_mode, sizeof(sweet_fg_mode));
++	}
++	sweet_depoison(pn);
++	if (sweet_fg_test_and_mark(pn)) {
++		return;		/* a reuse: the content is an owner's data */
++	}
++	if (!sweet_fg_mode || fill) {
++		return;		/* fill= patterns free pages legitimately */
++	}
++	pa = (pmap_paddr_t)ptoa_64(pn);
++	bad = sweet_page_dirty(pn, pa, false, &off, &w0, &w1);
++	if (__improbable(bad)) {
++		printf("SWEET ZCHECK: pn 0x%x pa 0x%llx: %u nonzero qwords, "
++		    "first at +0x%x = 0x%016llx (second 0x%016llx)\n",
++		    pn, (unsigned long long)pa, bad, off, w0, w1);
++		{
++			char rec[256];
++			/* The console ring may never flush again after the panic,
++			 * so persist through the polled UFS path now. */
++			snprintf(rec, sizeof(rec),
++			    "ZCHECK pn 0x%x pa 0x%llx bad %u off +0x%x w0 0x%016llx w1 0x%016llx\n",
++			    pn, (unsigned long long)pa, bad, off, w0, w1);
++			sweet_ufs_diag_write("zcheck", rec, strlen(rec));
++		}
++		panic("SWEET ZCHECK: page was dirty before its first handout "
++		    "- stray write into the free pool");
++	}
++}
++
++static inline void
++sweet_first_grab(vm_page_t m)
++{
++	sweet_first_grab_pn(VM_PAGE_GET_PHYS_PAGE(m));
++}
++
++/* --- never-used free-page scanner --- */
++
++static int sweet_scan_mode = -1;
++static unsigned int sweet_scan_chunk = 1024;
++static uint64_t sweet_scan_hits;
++static int sweet_scan_chan;
++
++static bool
++sweet_scan_freeq(int q_state)
++{
++	return q_state == VM_PAGE_ON_FREE_Q ||
++	    q_state == VM_PAGE_ON_FREE_LOCAL_Q ||
++	    q_state == VM_PAGE_ON_FREE_LOPAGE_Q;
++}
++
++static void
++sweet_poolscan_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	uint32_t i = 0;
++	bool full_pass = true;	/* one complete sweep before ticking */
++
++	for (;;) {
++		uint64_t deadline;
++		nanoseconds_to_absolutetime(100 * NSEC_PER_MSEC, &deadline);
++		deadline += mach_absolute_time();
++		if (!full_pass) {
++			(void)assert_wait_deadline(&sweet_scan_chan, THREAD_UNINT, deadline);
++			thread_block(THREAD_CONTINUE_NULL);
++		}
++
++		for (unsigned int n = 0; n < sweet_scan_chunk; n++) {
++			ppnum_t pn;
++			pmap_paddr_t pa;
++			vm_page_t m;
++			uint32_t off;
++			uint64_t w0, w1;
++			unsigned int bad;
++			bool marked, poisoned, same_state;
++			int qs;
++
++			if (i >= vm_pages_count) {
++				i = 0;	/* wrap: sweep continuously */
++				full_pass = false;
++			}
++			m = &vm_pages[i++];
++			pn = VM_PAGE_GET_PHYS_PAGE(m);
++			marked = sweet_fg_marked(pn);
++			poisoned = sweet_poisoned(pn);
++			if (!sweet_scan_freeq(m->vmp_q_state) ||
++			    (marked && !poisoned)) {
++				/* a used page that was freed without going through
++				 * a poisoning release carries owner data and cannot
++				 * be checked - the poisoned bit makes a false hit
++				 * structurally impossible */
++				continue;
++			}
++			/* Two populations: unmarked pages must still be zero;
++			 * poisoned (used once, freed, tagged) pages must still
++			 * carry the poison pattern. Race-tolerant first look:
++			 * a page grabbed (and so depoisoned + written) mid-scan
++			 * is discarded by the locked re-check below. */
++			pa = (pmap_paddr_t)ptoa_64(pn);
++			bad = sweet_page_dirty(pn, pa, poisoned, &off, &w0, &w1);
++			if (!bad) {
++				continue;
++			}
++			vm_page_lock_queues();
++			qs = m->vmp_q_state;
++			same_state = sweet_scan_freeq(qs) &&
++			    (marked == sweet_fg_marked(pn)) &&
++			    (poisoned == sweet_poisoned(pn));
++			vm_page_unlock_queues();
++			if (!same_state) {
++				continue;
++			}
++			sweet_scan_hits++;
++			printf("SWEET POOLSCAN: %s free page pn 0x%x color %u "
++			    "qs %u pa 0x%llx: %u bad qwords, first at +0x%x = "
++			    "0x%016llx (second 0x%016llx), t=%llu abs (hit %llu)\n",
++			    marked ? "used-freed" : "never-used",
++			    pn, VM_PAGE_GET_COLOR(m), qs,
++			    (unsigned long long)pa, bad, off, w0, w1,
++			    (unsigned long long)mach_absolute_time(),
++			    (unsigned long long)sweet_scan_hits);
++			if (sweet_scan_hits <= 4) {
++				char rec[256];
++				/* Persist the first few hits through the polled UFS
++				 * path: a later panic can kill the ring flush. */
++				snprintf(rec, sizeof(rec),
++				    "POOLSCAN %s pn 0x%x qs %u color %u pa 0x%llx "
++				    "off +0x%x w0 0x%016llx w1 0x%016llx t %llu hit %llu\n",
++				    marked ? "used-freed" : "never-used",
++				    pn, qs, VM_PAGE_GET_COLOR(m),
++				    (unsigned long long)pa, off, w0, w1,
++				    (unsigned long long)mach_absolute_time(),
++				    (unsigned long long)sweet_scan_hits);
++				sweet_ufs_diag_write("poolscan", rec, strlen(rec));
++			}
++			if (sweet_scan_mode >= 2) {
++				panic("SWEET POOLSCAN: free page modified - "
++				    "stray writer into free memory");
++			}
++		}
++	}
++}
++
++void
++sweet_poolscan_start(void)
++{
++	thread_t thread;
++	static bool started;
++
++	if (started) {
++		return;
++	}
++	started = true;
++	if (sweet_scan_mode < 0) {
++		sweet_scan_mode = 1;
++		PE_parse_boot_argn("sweetscan", &sweet_scan_mode, sizeof(sweet_scan_mode));
++		PE_parse_boot_argn("sweetscan_n", &sweet_scan_chunk, sizeof(sweet_scan_chunk));
++		PE_parse_boot_argn("sweetpoison", &sweet_poison_mode, sizeof(sweet_poison_mode));
++		if (sweet_poison_mode < 0) {
++			sweet_poison_mode = 1;
++		}
++	}
++	if (!sweet_scan_mode || fill) {
++		return;
++	}
++	if (sweet_scan_chunk == 0) {
++		sweet_scan_chunk = 1;
++	}
++	if (kernel_thread_start(sweet_poolscan_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++		printf("SWEET POOLSCAN: armed - %u managed pages, %u pages/tick every 100 ms, "
++		    "max pn 0x%x (bitmap covers pn < 0x%x)\n",
++		    vm_pages_count, sweet_scan_chunk,
++		    vm_first_phys_ppnum + vm_pages_count - 1, SWEET_FG_MAX_PN - 1);
++	}
++}
++
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+ 
+ __startup_func
+@@ -3875,6 +4201,17 @@
+ 
+ 	pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* Poison-on-free: the content of a released page is dead
++	 * (vmp_object == 0), so tag it; the pool scanner then detects
++	 * stray writes into used-then-freed pages, not only never-used
++	 * ones. Unmarked pages keep their scrubbed zero fill - writes
++	 * there are caught by the never-used population instead. */
++	if (sweet_poison_mode && sweet_fg_marked(VM_PAGE_GET_PHYS_PAGE(mem))) {
++		sweet_poison_page(VM_PAGE_GET_PHYS_PAGE(mem));
++	}
++#endif
++
+ 	if (__improbable(mem->vmp_realtime)) {
+ 		if (!page_queues_locked) {
+ 			vm_page_lock_queues();
+@@ -4538,6 +4875,15 @@
+ 					local_freeq = mem;
+ 					pg_count++;
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++					/* The batch free path enqueues directly, bypassing
++					 * vm_page_release - poison here too. */
++					if (sweet_poison_mode &&
++					    sweet_fg_marked(VM_PAGE_GET_PHYS_PAGE(mem))) {
++						sweet_poison_page(VM_PAGE_GET_PHYS_PAGE(mem));
++					}
++#endif
++
+ 					pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
+ 				}
+ 			} else {
+@@ -6790,6 +7136,13 @@
+ 	 */
+ 	assert(vm_page_verify_contiguous(pages, npages));
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* cpm handouts bypass vm_page_grab_options: same first-grab check. */
++	for (vm_page_t m = pages; m; m = NEXT_PAGE(m)) {
++		sweet_first_grab(m);
++	}
++#endif
++
+ 	if (flags & KMA_ZERO) {
+ 		for (vm_page_t m = pages; m; m = NEXT_PAGE(m)) {
+ 			vm_page_zero_fill(m);
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -2629,7 +2629,17 @@
+ 	ppnum_t            * pnum,
+ 	__unused boolean_t might_free)
+ {
+-	return pmap_next_page(pnum);
++	boolean_t ok = pmap_next_page(pnum);
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* Bootstrap steals leave the free pool too: mark them so the
++	 * pool scanner does not misread them as never-used, and run the
++	 * same scrubbed-zero check while they are still untouched. */
++	if (ok) {
++		extern void sweet_first_grab_pn(ppnum_t pn); /* osfmk/vm/vm_resident.c */
++		sweet_first_grab_pn(*pnum);
++	}
++#endif
++	return ok;
+ }
+ 
+ 
+--- a/osfmk/arm/pmap/pmap_data.c
++++ b/osfmk/arm/pmap/pmap_data.c
+@@ -2747,6 +2747,26 @@
+ 	 */
+ 	pt_desc_t *const next_node = (pt_desc_t *)(*(void **)ptd_free_list);
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	/* SWEET: next_node comes from a word in a node that must be NULL
++	 * or point at a live ptd. If a stray write left garbage there, the
++	 * assignment below turns the head itself into garbage and the NEXT
++	 * pop faults dereferencing it (the diag4 signature). Validate the
++	 * word before it can reach the head: NULL, or 8-byte aligned and
++	 * inside the kernel VA range. Panic now with the popped node's VA,
++	 * PA, the count and the bad word - the node's page can then be
++	 * read for a poison pattern or a PVH entry. */
++	if (__improbable(next_node != PTD_ENTRY_NULL &&
++	    ((vm_offset_t)next_node < VM_MIN_KERNEL_ADDRESS ||
++	     ((vm_offset_t)next_node & 7) != 0))) {
++		panic("SWEET PTD: popped node %p (pa 0x%llx) has bad next "
++		    "0x%016lx (count %u) - stray write into ptd page",
++		    ptd_free_list,
++		    (unsigned long long)kvtophys_nofail((vm_offset_t)ptd_free_list),
++		    (unsigned long)next_node, ptd_free_count);
++	}
++#endif
++
+ 	/**
+ 	 * If the next node in the list is NULL but there are supposed to still be
+ 	 * nodes left, then we've hit the previously allocated empty page of nodes.
+@@ -2754,6 +2774,22 @@
+ 	 */
+ 	if ((next_node == PTD_ENTRY_NULL) && (ptd_free_count > 1)) {
+ 		ptd_free_list = ptd_free_list + 1;
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++		/* SWEET: the reserve page's untouched nodes must still read
++		 * zero; a nonzero first word becomes a wild head on the next
++		 * pop and faults in the pop after that. Catch it here, one
++		 * node early, with the address, PA and value - the page was
++		 * zeroed by pmap_pages_alloc_zeroed at alloc time, so any
++		 * nonzero word is a write that happened while the page was
++		 * already owned by the ptd allocator. */
++		if (__improbable(*(void **)ptd_free_list != NULL)) {
++			uint64_t npa = (uint64_t)kvtophys_nofail((vm_offset_t)ptd_free_list);
++			panic("SWEET PTD: reserve node %p (pa 0x%llx) dirty: "
++			    "next word 0x%016lx - stray write into ptd page",
++			    ptd_free_list, (unsigned long long)npa,
++			    (unsigned long)*(void **)ptd_free_list);
++		}
++#endif
+ 	} else {
+ 		ptd_free_list = next_node;
+ 	}
+--- a/osfmk/kern/startup.c
++++ b/osfmk/kern/startup.c
+@@ -807,6 +807,17 @@
+ 	 * a background thread. Take this opportunity to initialize and free
+ 	 * any remaining vm_pages that were delayed earlier by pmap_startup().
+ 	 */
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		/* Start the never-used/poisoned free-page scanner at the
++		 * earliest point a thread can run: its first sweep covers the
++		 * whole pool, so writes that happened since the shim scrub are
++		 * seen here even before the UFS log ring exists (they still
++		 * land in the console ring). */
++		extern void sweet_poolscan_start(void); /* osfmk/vm/vm_resident.c */
++		sweet_poolscan_start();
++	}
++#endif
+ 	vm_free_delayed_pages();
+ 
+ 	/*
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -57,6 +57,7 @@
+ extern void sweet_usb_probe(void);
+ extern void viva_usb_probe(void);
+ extern void sweet_watch_start(void);
++extern void sweet_poolscan_start(void);
+ 
+ #define REG_CAP         0x00
+ #define REG_IS          0x20
+@@ -873,6 +874,8 @@
+ 	sweet_usb_probe();
+ 	/* Stray-writer tripwire: canary pages + scanner (bsd/dev/sweet_watch.c). */
+ 	sweet_watch_start();
++	/* Never-used free-page scanner (zero-canary; osfmk/vm/vm_resident.c). */
++	sweet_poolscan_start();
+ 	return 0;
+ }
+ 
+@@ -964,6 +967,22 @@
+ 	memcpy(b + UFS_BLOCK, data, len);
+ 	return ufs_write_blocks(base, 1 + (uint32_t)((len + UFS_BLOCK - 1) / UFS_BLOCK));
+ }
++/* SWEET: same record path, but safe to call outside panic context -
++ * takes the host lock so it cannot race a live strategy read on the
++ * bounce buffer. Falls back to the unlocked path while panicking. */
++int
++sweet_ufs_diag_write(const char *tag, const void *data, size_t len)
++{
++	int r;
++
++	if (panic_active()) {
++		return sweet_ufs_panic_write(tag, data, len);
++	}
++	lck_mtx_lock(&sweet_ufs_lock);
++	r = sweet_ufs_panic_write(tag, data, len);
++	lck_mtx_unlock(&sweet_ufs_lock);
++	return r;
++}
+ 
+ /* SWEET: while panicking, accumulate the console transcript into a static
+  * buffer and rewrite the panic record with the growing text on every write.

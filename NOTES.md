@@ -1,5 +1,159 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ATHENS HANDOFF 2026-11-10 - 0175 ZERO-CANARY BUILT + MMIO AUDIT (read first) <<<
+
+Claude's split experiment (free pages: stray writer vs owner bug) is
+implemented as `xnu/patches/0175-athens-first-grab-zerocheck.patch`.
+The file of that name in the tree was a stale copy of 0174 (someone
+started it by duplicating the previous patch); replaced wholesale.
+Verified: `patch -p1` applies clean on the post-0174 apply-tree
+(logs/xnu-src has the edits applied) and regenerates the edited
+sources byte-for-byte. NOT compiled locally (no Apple clang here);
+next CI run with verify_strings is the check.
+
+WHAT IT DOES:
+- sweet_fg_bits[] bitmap by absolute ppnum (PA < 4 GiB) marks every
+  page that leaves the free pool. Mark sites: the 4
+  vm_page_grab_options returns (inside SWEET_CHECK_HANDOUT),
+  cpm_allocate's contiguous lists, and pmap_next_page_hi bootstrap
+  steals.
+- First handout of a page: dc civac (flush_dcache64 phys) then scan
+  all 16K; any nonzero qword panics with pa, offset, first two bad
+  values ("SWEET ZCHECK"). That is exactly the ptd reserve-page kill
+  shot Claude identified: a dirty word in a future ptd page becomes a
+  wild ptd_free_list head.
+- Scanner thread (from sweet_ufs_init, next to sweet_watch_start):
+  every ~100 ms civac + scans sweetscan_n=256 never-marked pages that
+  are currently on a free queue (FREE_Q/FREE_LOCAL_Q/FREE_LOPAGE_Q),
+  wraps continuously through vm_pages[]. Nonzero -> locked re-check
+  (still unmarked AND still on a free queue) then "SWEET POOLSCAN" log
+  with pa, offset, values, mach_absolute_time. sweetscan=2 panics.
+- Boot args: sweetzcheck=0, sweetscan=0, sweetscan_n=N. fill= boot-arg
+  legitimately patterns free pages so both checks stand down under it.
+
+COVERAGE ANALYSIS (verified against the tree, not guessed):
+- arm64 never sets delay_above_pnum (x86-only), so ALL managed pages
+  are materialized in the pmap_startup loop via pmap_next_page and
+  released to free queues - pmap_next_page itself is intentionally
+  NOT marked, so post-boot the only unmarked pages are true
+  never-used free pages.
+- vm_lopage_needed is FALSE on arm64 (only i386 sets it) ->
+  vm_page_grablo funnels into vm_page_grab -> covered.
+- vm_page_find_contiguous's only allocator caller is cpm_allocate.
+- Steal pages (vm_pages array, buckets, zone maps) are wired, not on
+  free queues -> scanner skips them by q_state regardless; marking
+  them in pmap_next_page_hi also protects the freeable tail.
+- Known residual: an unmarked page that left the free queue through a
+  path not listed above and returned with data would report a false
+  hit - the log line carries q_state/timing to diagnose that.
+
+CLAUDE'S "haven't seen" AUDIT - RESOLVED:
+- sweet_ufs_strategy + init + DMA alloc: bounded (1 MiB bounce,
+  MIN(count,BOUNCE-skip) loop, kmem_alloc_contig KMA_ZERO <4GiB).
+  buf_map/buf_unmap stock.
+- THE sweet_* CALL SITES: sweet_ufs.c:871-873 call keys/touch/usb
+  UNCONDITIONALLY after su.ready - but each callee reads its own
+  boot-arg before touching MMIO (sweetkeys/sweettouch/sweetusb), and
+  tools/athens-mkboot.sh BASE sets all three =0. viva_usb_probe
+  (sweet_ufs_rootdev:1079) defaults off (vivausb=0). => on Athens no
+  Qualcomm-address MMIO is touched today.
+- FRAGILE: defaults are enabled=1 for all three (and sweetusb=2 writes
+  QSCRATCH/DWC3). Any future diag cmdline that drops the zeros will
+  map GENI SE7 0xa84000 / GCC 0x100000 / TLMM 0x3900000 / DWC3
+  0xa600000 on MT6853 and WRITE them (touch worst: GCC vote + RCG +
+  SE init at 45 s post-UFS - suspiciously near the ~45 s panic zone).
+  Recommend hard-gating all three behind #if !ARM64_BOARD_CONFIG_... 
+  or an athens-only force-off if more weirdness appears.
+- arm_vm_init/pmap_bootstrap + 0011: physmap live early; phystokv
+  resolves any DRAM PA via ptov_table then gVirtBase linear map;
+  kva_active=TRUE (arm_vm_init:2199) precedes pmap_bootstrap (2297).
+  0011 only pads the physmap VA aperture. Clean.
+- VPIDR_EL2/VMPIDR_EL2 still unwritten in shim enter_el1 (Claude's
+  point stands; XNU reads vpidr as MIDR on this CPU).
+
+NEXT: CI build 0175 kernel (drop_patches same set as diag4 =
+"0161-athens-ufs-diag.patch 0164-athens-ufs-err.patch
+0165-athens-tidt-assert.patch"), verify_strings must include
+"SWEET ZCHECK" and "SWEET POOLSCAN". Then mkpayload + scrub shim +
+same cmdline (sweetuaf=1 sweetwatch=1 zlog1=vm_objects -zc; add
+sweetscan=1). Boot, pull sdc59 tail: POOLSCAN lines = stray writer
+into free memory (pa/offset/time fingerprint); a ZCHECK panic =
+corrupt-before-first-use; neither + continued in-use corruption =
+owner-side bug -> then ptd free-list watchpoint (old 0175 plan).
+
+
+ADDENDUM (same session, 0175 v2 - Claude's 4 checks + poison ext):
+- Verified: bitmap keys absolute ppnum, 1<<18 entries covers all PAs
+  <4 GiB (whole window + margin); flush_dcache64(phys=1) does civac
+  to PoC per line via the physmap alias then the scan reads that same
+  alias; steals stay marked (harmless: non-free-q pages are skipped
+  anyway and it protects the freeable tail).
+- Fixed per review: POOLSCAN now logs q_state + queue color +
+  mach_absolute_time on every hit.
+- POISON-ON-FREE added (vm_page_release, before the free-q enqueue):
+  any marked page freed gets pattern 0xf2ee<<48 | pn<<16 | qword_idx.
+  Scanner now checks two populations: unmarked+freeq must be zero,
+  marked+freeq must be poison. vm_page_release asserts vmp_object==0
+  so page content is dead there; the write happens before
+  vm_free_page_lock_spin (outside the spinlock). Local queue pages
+  are grab-refill only and stay unmarked-zero. sweetpoison=0 kills it;
+  with poison off the scanner skips marked free pages (their content
+  is owner data, uncheckable).
+
+ADDENDUM 2 (0175 v3 - Claude's choke-point catch + pz-bit design):
+- CONFIRMED his memory: vm_page_free_list batch path enqueues
+  directly into vm_page_queue_free (~line 4850), bypassing
+  vm_page_release; so does vm_page_release_startup (startup-only,
+  never-used pages - intentionally NOT poisoned). Batch site now
+  poisons too.
+- New sweet_pz_bits[] "is poisoned now" bit: set inside
+  sweet_poison_page AFTER the fill, cleared on every grab
+  (sweet_depoison in sweet_first_grab_pn). Scanner checks the
+  used-freed population ONLY when the bit is set, and the locked
+  re-check now also re-verifies the bit - false used-freed hits are
+  structurally impossible.
+- ppnum >= 1<<18 (PA >= 4GiB) is skipped-and-never-written in all
+  three helpers (test_and_mark/marked/poison_page/depoison/poisoned),
+  so a later high-bank test is safe.
+- sweetscan_n default 256 -> 1024; thread does one FULL sweep at
+  start before the 100 ms cadence. Also started from
+  kernel_bootstrap_thread (startup.c, before vm_free_delayed_pages)
+  - much earlier than the ufs-init call site, which stays as an
+  idempotent second call.
+- verify_strings for the build: "SWEET ZCHECK","SWEET POOLSCAN",
+  "used-freed". Absence-grep (0161/0164/0165 dropped): markers from
+  those patches e.g. their printf strings must NOT appear.
+- Note for dump analysis: 0xf2ee in any live object = poison leak =
+  double-free/double-ownership, embedded pn names the page. Panic
+  timing may shift (16K poison write per free).
+
+ADDENDUM 3 (0175 v4 - ptd reserve-node check + hit persistence):
+- Claude: ZCHECK can't see the ptd case (pmap_pages_alloc_zeroed
+  bzeros after grab). Added check in ptd_alloc_unlinked on the
+  NULL-next/count>1 reserve branch: after head advances, verify the
+  new head node's first word is still zero; panic "SWEET PTD" with
+  node VA, PA (kvtophys_nofail) and the bad value. Catches the wild
+  head one node before it forms. ptd_alloc_unlinked is patched but
+  otherwise unmodified XNU logic.
+- Persistence: ZCHECK record and first 4 POOLSCAN hits now go through
+  sweet_ufs_panic_write (polled UFS, SWEETPAN zone) at hit time, so a
+  lost ring flush can't eat them. Tags "zcheck"/"poolscan".
+- armed print now includes max managed ppnum vs bitmap bound.
+- Cmdline for the run: keep sweetscan=1 (report), do NOT pass
+  sweetscan=2 - first run wants all hits, not a stop at #1.
+- verify_strings: "SWEET ZCHECK","SWEET POOLSCAN","SWEET PTD",
+  "used-freed" + absence markers for dropped 0161/0164/0165.
+
+ADDENDUM 4 (0175 v5 - UFS lock fix + every-pop ptd check):
+- CONFIRMED: sweet_ufs_panic_write takes no lock and shares the
+  bounce buffer with live strategy I/O. New sweet_ufs_diag_write
+  takes sweet_ufs_lock when !panic_active; hits/ZCHECK now use it.
+- ptd check strengthened per Claude: EVERY pop validates next_node
+  (NULL or 8-aligned kernel VA) before it can become the head -
+  panics with popped node VA, PA, count, bad word. Reserve-branch
+  check kept too. Commit ef7c5d5. Still needs push (no creds here)
+  or a gh dispatch with the verify gate.
+
 ## >>> ATHENS HANDOFF 2026-11-08 ~23:xx - EXTERNAL-REVIEW PLAN IMPLEMENTED (read first) <<<
 
 The four-point plan (mem-layout dump / watchpoint / alloc asserts /
