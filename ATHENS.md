@@ -176,3 +176,43 @@ flash; GPU driver.
 Waiting on device (Phase 0, see docs/athens-flash.md): live FDT, GPT/LUN for
 userdata, atag videolfb, which touch variant is populated, lk kernel-format
 and `fastboot boot` behavior.
+
+## Touch bring-up notes (2026-11-12, from linux drivers/spi/spi-mt65xx.c)
+
+MTK SPI host `mediatek,mt6765-spi` @0x11018000 uses mt6765_compat:
+need_pad_sel, must_tx, enhance_timing (timing in CFG2 not CFG0),
+dma_ext, NO ipm_design. Reg window is only 0x100 bytes (dts reg size).
+
+Registers (non-IPM path):
+  CFG0 0x00 SCK_HIGH[7:0] SCK_LOW[15:8] CS_HOLD[23:16] CS_SETUP[31:24]
+  CFG1 0x04 CS_IDLE[7:0] PACKET_LOOP[15:8] PACKET_LENGTH[25:16]
+  TX_SRC 0x08 RX_DST 0x0c TX_DATA 0x10 RX_DATA 0x14 CMD 0x18 STATUS0 0x1c
+  PAD_SEL 0x24 CFG2 0x28 (enhance_timing: SCK_HIGH[15:0] SCK_LOW[31:16])
+  TX_SRC_64 0x2c RX_DST_64 0x30
+
+CMD bits: ACT=1 RESUME=2 RST=4 PAUSE_EN=0x10 DEASSERT=0x20 SAMPLE_SEL=0x40
+  CS_POL=0x80 CPHA=0x100 CPOL=0x200 RX_DMA=0x400 TX_DMA=0x800
+  TXMSBF=0x1000 RXMSBF=0x2000 RX_ENDIAN=0x4000 TX_ENDIAN=0x8000
+  FINISH_IE=0x10000 PAUSE_IE=0x20000
+
+Transfer algo (FIFO/PIO path, xfer <= 32B chunks or poll STATUS0):
+  div = spi_clk_hz / speed_hz (min 1); sck_time=(div+1)/2
+  CFG2: SCK_HIGH=SCK_LOW=(sck_time-1)&0xffff   [enhance_timing]
+  CFG1: PACKET_LENGTH=(min(len,1024)-1)<<16, PACKET_LOOP=(len/1024)-1<<8
+  TX: iowrite32_rep TX_DATA; RX: read RX_DATA; CMD |= ACT to start
+  CS/pad: need_pad_sel -> PAD_SEL reg + mediatek,pad-select=0 in dts
+  must_tx: RX-only transfers still need dummy TX bytes clocked
+
+STILL NEEDED before driver works:
+  - spi_clk_hz: parent clock for spi4 (clk-mt6853: topckgen/infracfg SPI
+    clocks; likely 26 MHz or 48 MHz source - MEASURE, no clock framework)
+  - clock gating: CG bits enabling SPI4 in infracfg/topckgen
+    (clk-mt6853.c has the gate map - research needed)
+  - pinmux: GPIO12=MI 13=MO 97=CLK 98=CSB, drive 4; dts pinmux values
+    <0xc02 0xd02 0x6102 0x6202>; decode via mt6853_pin_mode_range
+    (pin n -> reg 0x300+8*(n/8)... pin80-87 at 0x3a0 etc, 4-bit fields)
+  - NT36672C "noflash" protocol: NOT in mainline (OPPO/Novatek vendor
+    driver). 139392-byte fw upload + report format TBD from OPPO
+    kernel source (drivers/input/touchscreen/... or vendor blob).
+  - EINT14 irq (edge), GPIO33 reset via VivaGPIO output-pins (added).
+
