@@ -562,26 +562,60 @@ legitimately patterns free pages, so the checks stand down when set.
  	return 0;
  }
  
-@@ -964,6 +967,22 @@
- 	memcpy(b + UFS_BLOCK, data, len);
+@@ -948,14 +951,15 @@
+  * this runs in panic context; the caller passes the panic tag + payload and we
+  * drop the host lock (the other CPUs are quiesced while the panic dumps run). */
+ int
+-sweet_ufs_panic_write(const char *tag, const void *data, size_t len)
++sweet_ufs_record_write(uint64_t blk_off, const char *tag,
++    const void *data, size_t len)
+ {
+ 	uint8_t *b = (uint8_t *)(su.dma + DMA_BOUNCE);
+ 	uint64_t base;
+ 	if (!su.ready || !su.writable || !su.dma || !su.nblocks) {
+ 		return -1;
+ 	}
+-	base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS;
++	base = su.first_block + su.nblocks - SWEET_LOG_BLOCKS + blk_off;
+ 	if (len > BOUNCE_SIZE - UFS_BLOCK) {
+ 		len = BOUNCE_SIZE - UFS_BLOCK;
+ 	}
+@@ -965,6 +969,38 @@
  	return ufs_write_blocks(base, 1 + (uint32_t)((len + UFS_BLOCK - 1) / UFS_BLOCK));
  }
+ 
++int
++sweet_ufs_panic_write(const char *tag, const void *data, size_t len)
++{
++	return sweet_ufs_record_write(0, tag, data, len);
++}
++
 +/* SWEET: same record path, but safe to call outside panic context -
 + * takes the host lock so it cannot race a live strategy read on the
-+ * bounce buffer. Falls back to the unlocked path while panicking. */
++ * bounce buffer. Falls back to the unlocked path while panicking.
++ * Diag records live in slots ABOVE the console-panic zone (65 blocks
++ * for the 256K transcript) so panic-time transcript rewrites cannot
++ * clobber them; each call advances the slot. */
 +int
 +sweet_ufs_diag_write(const char *tag, const void *data, size_t len)
 +{
-+	int r;
++	static int diag_slot;
++	int r, slot;
 +
 +	if (panic_active()) {
 +		return sweet_ufs_panic_write(tag, data, len);
 +	}
++	slot = 72 + diag_slot * 8;
++	if (slot + 16 > SWEET_LOG_BLOCKS) {
++		return -1;
++	}
++	diag_slot++;
 +	lck_mtx_lock(&sweet_ufs_lock);
-+	r = sweet_ufs_panic_write(tag, data, len);
++	r = sweet_ufs_record_write((uint64_t)slot, tag, data, len);
 +	lck_mtx_unlock(&sweet_ufs_lock);
 +	return r;
 +}
- 
++
  /* SWEET: while panicking, accumulate the console transcript into a static
   * buffer and rewrite the panic record with the growing text on every write.
+  * Called from _cnputs (panic context, interrupts off); ufs_write_blocks is
