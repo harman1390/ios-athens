@@ -1,50 +1,28 @@
-First-grab zero check + never-used free-page scanner + poison-on-free +
-ptd node checks: the split experiment for the stray-writer hunt.
-
-The shim scrubs [topOfKernelData, window end) to zero before entry, so a
-managed page must read all-zero until it is handed out. sweet_fg_bits[]
-marks pages that have ever left the free pool; every handout (all four
-vm_page_grab_options returns via SWEET_CHECK_HANDOUT, cpm_allocate's
-contiguous lists, and pmap_next_page_hi bootstrap steals) civacs + scans
-a first-grab page and panics with PA + offset + first bad qwords on a
-nonzero word.
-
-Freed previously-used pages get a self-describing poison pattern
-(0xf2ee<<48 | ppnum<<16 | qword index) written at BOTH free-queue
-enqueue sites (vm_page_release and the vm_page_free_list batch path);
-a separate sweet_pz_bits[] "is poisoned now" bit is set on each poison
-write and cleared on each grab, so a freed page that bypassed a
-poisoning enqueue can never produce a false used-freed hit. Side
-effect: poison found inside a live object in a later dump proves a
-double-free/double-ownership path, and the embedded ppnum names the
-page.
-
-A kernel thread (started at kernel_bootstrap_thread and again from
-sweet_ufs_init, idempotent) sweeps free-queue pages at 1024 pages per
-~100 ms tick plus one full pass at start (civac to PoC first, so a
-non-coherent writer cannot hide behind stale cached zeros), checking
-zero-fill for never-used pages and poison for used-then-freed ones;
-hits log PA + offset + q_state + queue color + mach_absolute_time, and
-the first 4 hits plus every ZCHECK panic are persisted through
-sweet_ufs_diag_write (sweet_ufs_lock held when not panicking - the
-record write shares the bounce buffer with live strategy I/O).
-
-ptd pops additionally validate every next_node word (NULL or
-8-aligned kernel VA) before it can reach the head, and the
-reserve-page walk branch re-verifies the new head node's word: either
-fires one step before a wild ptd_free_list head forms, with the node's
-VA, PA, count and bad word (the pages are bzero'd by
-pmap_pages_alloc_zeroed after the first-grab window, which ZCHECK
-alone cannot see).
-
-Boot args: sweetzcheck=0 (first-grab off), sweetscan=0 (scanner off,
-default 1 report, 2 panic on hit), sweetscan_n=N (pages/tick, def
-1024), sweetpoison=0 (poison-on-free off). The fill= boot arg
-legitimately patterns free pages, so the checks stand down when set.
-
 --- a/osfmk/vm/vm_resident.c
 +++ b/osfmk/vm/vm_resident.c
-@@ -1063,14 +1063,17 @@
+@@ -1041,20 +1041,39 @@
+ 	}
+ }
+ 
++/* Stale-translation differential: flush all EL1 TLB entries on every
++ * page hand-out. If corruption stops, a stale/aliased mapping was the
++ * writer - narrow the flush afterward. sweettlbi=0 disables. */
++static int sweet_tlbi_mode = -1;
++static inline void
++sweet_tlbi_flush(void)
++{
++	if (sweet_tlbi_mode < 0) {
++		sweet_tlbi_mode = 1;
++		PE_parse_boot_argn("sweettlbi", &sweet_tlbi_mode, sizeof(sweet_tlbi_mode));
++	}
++	if (sweet_tlbi_mode) {
++		__asm__ volatile("tlbi vmalle1is; dsb ish; isb" ::: "memory");
++	}
++}
++
+ /* Assert at the point a page leaves the allocator, not at detection
+  * time: a page handed out while still queue-linked or wired is the
+  * double-allocation case - the other owner keeps writing VM bookkeeping
   * into memory the new owner believes is private. */
  #define SWEET_CHECK_HANDOUT(m)                                              \
  	MACRO_BEGIN                                                         \
@@ -70,7 +48,15 @@ legitimately patterns free pages, so the checks stand down when set.
  	MACRO_END
  
  /* Same assert at the zone boundary: every page a zone just obtained
-@@ -1098,6 +1101,365 @@
+@@ -1063,6 +1082,7 @@
+ void
+ sweet_check_zone_pages(vm_offset_t addr, uint32_t npages)
+ {
++	sweet_tlbi_flush();
+ 	for (uint32_t i = 0; i < npages; i++, addr += PAGE_SIZE) {
+ 		ppnum_t pn = pmap_find_phys(kernel_pmap, addr);
+ 		if (!pn) {
+@@ -1081,6 +1101,365 @@
  		}
  	}
  }
@@ -436,7 +422,7 @@ legitimately patterns free pages, so the checks stand down when set.
  #endif /* ARM64_BOARD_CONFIG_SWEET */
  
  __startup_func
-@@ -3875,6 +4237,17 @@
+@@ -3858,6 +4237,17 @@
  
  	pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
  
@@ -454,7 +440,7 @@ legitimately patterns free pages, so the checks stand down when set.
  	if (__improbable(mem->vmp_realtime)) {
  		if (!page_queues_locked) {
  			vm_page_lock_queues();
-@@ -4538,6 +4911,15 @@
+@@ -4521,6 +4911,15 @@
  					local_freeq = mem;
  					pg_count++;
  
@@ -470,7 +456,7 @@ legitimately patterns free pages, so the checks stand down when set.
  					pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
  				}
  			} else {
-@@ -6790,6 +7172,13 @@
+@@ -6773,6 +7172,13 @@
  	 */
  	assert(vm_page_verify_contiguous(pages, npages));
  
@@ -569,6 +555,15 @@ legitimately patterns free pages, so the checks stand down when set.
  }
  
  /*
+@@ -2065,7 +2117,7 @@
+ nonspeculative_timebase(void)
+ {
+ #if defined(HAS_ACNTVCT)
+-	return __builtin_arm_rsr64("S3_4_c15_c10_6");
++	return __builtin_arm_rsr64("ACNTVCT_EL0");
+ #elif __ARM_ARCH_8_6__
+ 	return __builtin_arm_rsr64("CNTVCTSS_EL0");
+ #else
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
 @@ -2629,7 +2629,17 @@
@@ -674,10 +669,66 @@ legitimately patterns free pages, so the checks stand down when set.
  
  #define REG_CAP         0x00
  #define REG_IS          0x20
-@@ -799,16 +800,30 @@
+@@ -313,7 +314,7 @@
+ 	}
+ 	if (memcmp(b, "EFI PART", 8) != 0) {
+ 		printf("SWEET UFS: LUN %u has no GPT\n", su.lun);
+-		return ENXIO;
++		return 63;
+ 	}
+ 	uint64_t entry_lba;
+ 	uint32_t nent, esz;
+@@ -322,7 +323,7 @@
+ 	memcpy(&esz, b + 84, 4);
+ 	if (esz != 128 || nent == 0 || nent * esz > BOUNCE_SIZE) {
+ 		printf("SWEET UFS: unsupported GPT entries %u x %u\n", nent, esz);
+-		return ENXIO;
++		return 64;
+ 	}
+ 	error = ufs_read_blocks(entry_lba, (nent * esz + UFS_BLOCK - 1) / UFS_BLOCK);
+ 	if (error) {
+@@ -347,7 +348,7 @@
+ 		memcpy(&first, e + 32, 8);
+ 		memcpy(&last, e + 40, 8);
+ 		if (last < first) {
+-			return ENXIO;
++			return 65;
+ 		}
+ 		*firstp = first;
+ 		*nblocksp = last - first + 1;
+@@ -548,7 +549,7 @@
+ 	uint32_t hce = ufs_rd(REG_HCE), hcs = ufs_rd(REG_HCS);
+ 	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
+ 		printf("SWEET UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
+-		return ENXIO;
++		return 62;
+ 	}
+ 	if (ufs_rd(REG_UTRLDBR)) {
+ 		printf("SWEET UFS: requests outstanding from the bootloader\n");
+@@ -558,7 +559,7 @@
+ 	if (((su.dma_pa + DMA_SIZE - 1) >> 32) && !(ufs_rd(REG_CAP) & CAP_64AS)) {
+ 		printf("SWEET UFS: DMA memory at 0x%llx but the host has no 64-bit addressing\n",
+ 		    su.dma_pa);
+-		return ENXIO;
++		return 69;
+ 	}
+ 	ufs_wr(REG_IE, 0);                      /* polled operation */
+ 	ufs_wr(REG_IS, ufs_rd(REG_IS));
+@@ -785,7 +786,7 @@
+ 	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
+ 	    size < 2 * sizeof(uintptr_t)) {
+ 		printf("SWEET UFS: no /sweet-ufs node in the device tree\n");
+-		return ENXIO;
++		return 61;
+ 	}
+ 	PE_parse_boot_argn("ufsroot", want, sizeof(want));
+ 	uint32_t rw = 0;
+@@ -798,17 +799,31 @@
+ 
  	su.regs = ml_io_map(reg[0], reg[1]);
  	/* A host without 64-bit addressing gets DMA memory below 4 GiB. */
- 	ppnum_t max_pnum = (ppnum_t)(atop_64(1ULL << 32) - 1); /* always <4GiB: CAP read can lie early */
+-	ppnum_t max_pnum = (ufs_rd(REG_CAP) & CAP_64AS) ? 0 : (ppnum_t)(atop_64(1ULL << 32) - 1);
++	ppnum_t max_pnum = (ppnum_t)(atop_64(1ULL << 32) - 1); /* always <4GiB: CAP read can lie early */
 +	uint64_t ufsdma = 0xfd000000;	/* low-bank bounce for a >4G pool (old window, unmanaged) */
 +	PE_parse_boot_argn("ufsdma", &ufsdma, sizeof(ufsdma));
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, max_pnum, 0,
@@ -712,7 +763,33 @@ legitimately patterns free pages, so the checks stand down when set.
  	su.secsize = DEV_BSIZE;
  	uint32_t lun_arg = UINT32_MAX;
  	PE_parse_boot_argn("ufslun", &lun_arg, sizeof(lun_arg));
-@@ -873,6 +888,8 @@
+@@ -832,7 +847,10 @@
+ 			break;
+ 		}
+ 		if (lun == lun_last) {
+-			error = ENXIO;
++			/* Preserve the real per-LUN error (62 host, 63 no GPT, 64
++			 * bad entries, 65 bad bounds, ENOENT missing part, or the
++			 * scsi/transport error) instead of masking it with 66. */
++			error = lun_error;
+ 		}
+ 	}
+ 	lck_mtx_unlock(&sweet_ufs_lock);
+@@ -842,11 +860,11 @@
+ 
+ 	su.bmajor = bdevsw_add(-1, &sweet_ufs_bdevsw);
+ 	if (su.bmajor < 0) {
+-		return ENXIO;
++		return 67;
+ 	}
+ 	su.cmajor = cdevsw_add_with_bdev(-1, &sweet_ufs_cdevsw, su.bmajor);
+ 	if (su.cmajor < 0) {
+-		return ENXIO;
++		return 68;
+ 	}
+ 	su.bdev = makedev(su.bmajor, 0);
+ 	devfs_make_node(su.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "ufsroot0");
+@@ -870,6 +888,8 @@
  	sweet_usb_probe();
  	/* Stray-writer tripwire: canary pages + scanner (bsd/dev/sweet_watch.c). */
  	sweet_watch_start();
@@ -721,7 +798,7 @@ legitimately patterns free pages, so the checks stand down when set.
  	return 0;
  }
  
-@@ -891,6 +908,13 @@
+@@ -888,6 +908,13 @@
   */
  #define SWEET_LOG_SIZE          (4u << 20)
  #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
@@ -735,7 +812,7 @@ legitimately patterns free pages, so the checks stand down when set.
  #define SWEET_LOG_SECS          10u
  
  static char sweet_log_ring[SWEET_LOG_SIZE];
-@@ -948,23 +972,66 @@
+@@ -945,23 +972,66 @@
   * this runs in panic context; the caller passes the panic tag + payload and we
   * drop the host lock (the other CPUs are quiesced while the panic dumps run). */
  int
@@ -804,7 +881,7 @@ legitimately patterns free pages, so the checks stand down when set.
  /* SWEET: while panicking, accumulate the console transcript into a static
   * buffer and rewrite the panic record with the growing text on every write.
   * Called from _cnputs (panic context, interrupts off); ufs_write_blocks is
-@@ -981,6 +1048,15 @@
+@@ -978,6 +1048,15 @@
  		return;
  	}
  	size_t n = (size_t)size;
@@ -820,7 +897,7 @@ legitimately patterns free pages, so the checks stand down when set.
  	if (n > sizeof(sweet_panic_text) - sweet_panic_len) {
  		n = sizeof(sweet_panic_text) - sweet_panic_len;
  	}
-@@ -1020,8 +1096,16 @@
+@@ -1017,8 +1096,16 @@
  		while (pos < total && !error) {
  			uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
  			uint32_t blk = off / UFS_BLOCK;
