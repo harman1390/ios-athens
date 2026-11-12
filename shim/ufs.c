@@ -84,7 +84,7 @@ static uint32_t be32(const uint8_t *p)
  * Returns 0 on success, otherwise a code describing the failure stage.
  */
 static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *buf, uint32_t len,
-    uint32_t *ocs_out, uint32_t *status_out)
+    int wr, uint32_t *ocs_out, uint32_t *status_out)
 {
 	static uint8_t tag;
 	zero(&utrl[0], sizeof(utrl[0]));
@@ -92,7 +92,7 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 
 	/* Command UPIU: header (12 bytes), expected length, CDB. */
 	ucd.cmd[0] = 0x01;			/* transaction type: COMMAND */
-	ucd.cmd[1] = len ? 0x40 : 0x00;		/* flags: R (data in) */
+	ucd.cmd[1] = len ? (wr ? 0x20 : 0x40) : 0x00;	/* flags: W (out) / R (in) */
 	ucd.cmd[2] = lun;
 	ucd.cmd[3] = ++tag;
 	ucd.cmd[12] = len >> 24;
@@ -103,7 +103,7 @@ static uint32_t scsi(uint8_t lun, const uint8_t *cdb, unsigned cdb_len, void *bu
 		ucd.cmd[16 + i] = cdb[i];
 
 	uintptr_t ucd_pa = (uintptr_t)&ucd;
-	utrl[0].dw0 = (1u << 28) | ((len ? 2u : 0u) << 25) | (1u << 24);	/* UFS storage, dev->host */
+	utrl[0].dw0 = (1u << 28) | ((len ? (wr ? 1u : 2u) : 0u) << 25) | (1u << 24);
 	utrl[0].dw2 = 0x0f;			/* OCS: invalid until the host updates it */
 	utrl[0].ucdba = (uint32_t)ucd_pa;
 	utrl[0].ucdbau = (uint32_t)(ucd_pa >> 32);
@@ -139,8 +139,143 @@ static uint32_t read_blocks(uint32_t lba, uint32_t count, void *buf)
 {
 	uint8_t cdb[10] = { 0x28, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0, count >> 8, count, 0 };
 	uint32_t ocs, st;
-	return scsi(0, cdb, sizeof(cdb), buf, count * BLOCK, &ocs, &st);
+	return scsi(0, cdb, sizeof(cdb), buf, count * BLOCK, 0, &ocs, &st);
 }
+
+static uint64_t le64(const uint8_t *p);
+
+int strcmp(const char *a, const char *b)
+{
+	while (*a && *a == *b)
+		a++, b++;
+	return (unsigned char)*a - (unsigned char)*b;
+}
+
+static uint32_t write_blocks(uint8_t lun, uint32_t lba, uint32_t count, const void *buf)
+{
+	uint8_t cdb[10] = { 0x2a, 0, lba >> 24, lba >> 16, lba >> 8, lba, 0, count >> 8, count, 0 };
+	uint32_t ocs, st;
+	return scsi(lun, cdb, sizeof(cdb), (void *)buf, count * BLOCK, 1, &ocs, &st);
+}
+
+/* Panic-log harvester: the kernel's 1 MiB panic log at pram (top of its DRAM
+ * window) survives a warm reset. On every boot, copy any nonzero region to
+ * the 257 blocks just below the kernel's own 1025-block tail on the userdata
+ * partition: header block then up to 1 MiB of pram. Recovery pulls it with
+ * the same dd, a couple hundred blocks earlier. Never writes inside the
+ * kernel's zone or anywhere else. */
+
+static int ufs_takeover(void)
+{
+	uint32_t hce = ufs_rd(REG_HCE), hcs = ufs_rd(REG_HCS);
+	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY))
+		return 1;
+	if (ufs_rd(REG_UTRLDBR))
+		return 2;
+	ufs_wr(REG_UTRLRSR, 0);
+	uintptr_t list = (uintptr_t)utrl;
+	ufs_wr(REG_UTRLBA, (uint32_t)list);
+	ufs_wr(REG_UTRLBAU, (uint32_t)(list >> 32));
+	ufs_wr(REG_UTRLRSR, 1);
+	if (ufs_rd(REG_UTRLBA) != (uint32_t)list || ufs_rd(REG_UTRLBAU) != (uint32_t)(list >> 32) ||
+	    !(ufs_rd(REG_UTRLRSR) & 1))
+		return 3;
+	return 0;
+}
+
+static int find_userdata(uint8_t *lun_out, uint64_t *last_out)
+{
+	static uint8_t ents[256 * 128] __attribute__((aligned(4096)));
+	uint32_t ocs, st;
+	for (uint8_t lun = 0; lun < 8; lun++) {
+		uint8_t cdb[10] = { 0x28, 0, 0, 0, 0, 0, 0, 0, 2, 0 };
+		if (scsi(lun, cdb, sizeof(cdb), data, 2 * BLOCK, 0, &ocs, &st))
+			continue;
+		const uint8_t *gpt = data + BLOCK;
+		if (gpt[0] != 'E' || gpt[1] != 'F' || gpt[2] != 'I' || gpt[3] != ' ')
+			continue;
+		uint32_t nent = gpt[80] | gpt[81] << 8 | gpt[82] << 16 | (uint32_t)gpt[83] << 24;
+		uint32_t esz = gpt[84] | gpt[85] << 8;
+		uint64_t elba = le64(gpt + 72);
+		if (esz != 128 || !nent || nent > 256)
+			continue;
+		uint32_t blocks = (nent * 128 + BLOCK - 1) / BLOCK;
+		uint8_t rcdb[10] = { 0x28, 0, (uint8_t)(elba >> 24), (uint8_t)(elba >> 16),
+		    (uint8_t)(elba >> 8), (uint8_t)elba, 0, (uint8_t)(blocks >> 8), (uint8_t)blocks, 0 };
+		if (scsi(lun, rcdb, sizeof(rcdb), ents, blocks * BLOCK, 0, &ocs, &st))
+			continue;
+		for (uint32_t i = 0; i < nent; i++) {
+			const uint8_t *e = ents + i * 128;
+			uint64_t first = le64(e + 32), last = le64(e + 40);
+			if (!first)
+				continue;
+			char name[9];
+			for (int c = 0; c < 8; c++) {
+				uint8_t ch = e[56 + 2 * c];
+				name[c] = (ch >= 32 && ch < 127) ? ch : 0;
+			}
+			name[8] = 0;
+			if (!__builtin_strcmp(name, "userdata")) {
+				*lun_out = lun;
+				*last_out = last;
+				return 0;
+			}
+		}
+	}
+	return 1;
+}
+
+void ufs_harvest_pram(void)
+{
+	if (ufs_takeover()) {
+		con_str("PRAM", "ufs host not usable");
+		return;
+	}
+	uint8_t lun;
+	uint64_t last;
+	if (find_userdata(&lun, &last) || last < 2048) {
+		con_str("PRAM", "no userdata gpt");
+		return;
+	}
+	/* Zone: header block at last-1281, pram data at [last-1280, last-1025].
+	 * The kernel owns [last-1024, last] (1025 blocks). */
+	static const uint64_t regions[] = { 0x1bfeff000UL, 0x1bdf00000UL, 0xffd60000UL };
+	uint32_t data_lba = (uint32_t)last - 1280;
+	uint32_t nreg = 0;
+	uint32_t slot_lba = data_lba;
+	for (unsigned r = 0; r < sizeof(regions) / sizeof(regions[0]); r++) {
+		const uint8_t *p = (const uint8_t *)(uintptr_t)regions[r];
+		int nonzero = 0;
+		for (uint64_t off = 0; off < 0x100000 && !nonzero; off += 64)
+			nonzero = p[off] != 0;
+		if (!nonzero)
+			continue;
+		for (uint32_t chunk = 0; chunk < 256 && slot_lba < (uint32_t)last - 1025; chunk += 16) {
+			uint32_t nb = 16;
+			if (slot_lba + nb > (uint32_t)last - 1025)
+				nb = (uint32_t)last - 1025 - slot_lba;
+			uint32_t rc = write_blocks(lun, slot_lba, nb, p + (uint64_t)chunk * BLOCK);
+			if (rc) {
+				con_hex2("PRAM WR", "rc=", rc, "lba=", slot_lba);
+				goto out;
+			}
+			slot_lba += nb;
+		}
+		nreg++;
+	}
+out:
+	/* Header last: a partial dump never produces a valid marker. */
+	zero(data, BLOCK);
+	for (int i = 0; i < 8; i++)
+		data[i] = "SHIMPRAM"[i];
+	data[8] = 'A' + nreg - (nreg ? 1 : 0);
+	data[9] = nreg;
+	data[10] = 0x17;
+	data[11] = 0x5A;
+	write_blocks(lun, (uint32_t)last - 1281, 1, data);
+	con_hex2("PRAM->UFS", "regions=", nreg, "lba=", slot_lba);
+}
+
 
 static uint64_t le64(const uint8_t *p)
 {
@@ -232,21 +367,21 @@ void test_ufs(void)
 	static const uint8_t tur[6] = { 0x00 };
 	/* A first command may report a unit attention; retry a few times. */
 	for (int i = 0; i < 3; i++) {
-		rc = scsi(0, tur, sizeof(tur), 0, 0, &ocs, &st);
+		rc = scsi(0, tur, sizeof(tur), 0, 0, 0, &ocs, &st);
 		con_hex2("UFS TUR", "rc=", rc, "ocs/st=", ocs << 8 | st);
 		if (!rc)
 			break;
 	}
 
 	static const uint8_t cap10[10] = { 0x25 };	/* READ CAPACITY(10) */
-	rc = scsi(0, cap10, sizeof(cap10), data, 8, &ocs, &st);
+	rc = scsi(0, cap10, sizeof(cap10), data, 8, 0, &ocs, &st);
 	con_hex2("UFS CAP", "rc=", rc, "ocs/st=", ocs << 8 | st);
 	if (!rc)
 		con_hex2("UFS LUN0", "lastlba=", be32(data), "blk=", be32(data + 4));
 
 	/* READ(10) LBA 0, 2 blocks: protective MBR and the GPT header. */
 	static const uint8_t rd10[10] = { 0x28, 0, 0, 0, 0, 0, 0, 0, 2, 0 };
-	rc = scsi(0, rd10, sizeof(rd10), data, 2 * BLOCK, &ocs, &st);
+	rc = scsi(0, rd10, sizeof(rd10), data, 2 * BLOCK, 0, &ocs, &st);
 	con_hex2("UFS READ", "rc=", rc, "ocs/st=", ocs << 8 | st);
 	if (rc)
 		return;

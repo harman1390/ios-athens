@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include "console.h"
 #include "loader.h"
+#include "ufs.h"
 
 /* toprgu@10007000 (mt6853.dts); register layout as Linux mtk_wdt.c. */
 #define TOPRGU_WDT_MODE		0x10007000UL
@@ -92,7 +93,7 @@ static int streq(const char *a, const char *b)
  * could not photograph can still be read on the next boot. */
 static void panic_scan(void)
 {
-	static const uint64_t regions[] = { 0xffd60000UL, 0x1bdf00000UL };
+	static const uint64_t regions[] = { 0xffd60000UL, 0x1bdf00000UL, 0x1bfeff000UL };
 	char line[80];
 	for (unsigned r = 0; r < sizeof(regions) / sizeof(regions[0]); r++) {
 		const uint8_t *base = (const uint8_t *)regions[r];
@@ -180,6 +181,7 @@ void shim_main(uint64_t dtb, uint64_t sctlr_el2_entry)
 	if (fb != FB_BASE)
 		con_str("WARN", "LK fb differs from FB_BASE; kernel fbcon must match");
 	panic_scan();
+	ufs_harvest_pram();
 	con_skip();
 
 	wr32(CKPT_MAGIC, 0);	/* reset for this attempt */
