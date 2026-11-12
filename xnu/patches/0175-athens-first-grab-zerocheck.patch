@@ -70,7 +70,7 @@ legitimately patterns free pages, so the checks stand down when set.
  	MACRO_END
  
  /* Same assert at the zone boundary: every page a zone just obtained
-@@ -1098,6 +1101,329 @@
+@@ -1098,6 +1101,352 @@
  		}
  	}
  }
@@ -232,18 +232,32 @@ legitimately patterns free pages, so the checks stand down when set.
 +		return;		/* fill= patterns free pages legitimately */
 +	}
 +	pa = (pmap_paddr_t)ptoa_64(pn);
++	/* The shim only scrubbed [topOfKernelData, window end). Pages below
++	 * it - kernel-image carve, page tables, BOOTDATA - are freed into the
++	 * pool by ml_static_mfree/vm_page_create with their old contents and
++	 * were never zero, so a dirty first handout there is not evidence.
++	 * They are still marked above: once freed again they join the
++	 * used-freed poisoned population. */
++	if (BootArgs && pa < BootArgs->topOfKernelData) {
++		return;
++	}
 +	bad = sweet_page_dirty(pn, pa, false, &off, &w0, &w1);
 +	if (__improbable(bad)) {
 +		printf("SWEET ZCHECK: pn 0x%x pa 0x%llx: %u nonzero qwords, "
-+		    "first at +0x%x = 0x%016llx (second 0x%016llx)\n",
-+		    pn, (unsigned long long)pa, bad, off, w0, w1);
++		    "first at +0x%x = 0x%016llx (second 0x%016llx) "
++		    "tokd 0x%llx aend 0x%llx\n",
++		    pn, (unsigned long long)pa, bad, off, w0, w1,
++		    BootArgs ? (unsigned long long)BootArgs->topOfKernelData : 0,
++		    (unsigned long long)avail_end);
 +		{
 +			char rec[256];
 +			/* The console ring may never flush again after the panic,
 +			 * so persist through the polled UFS path now. */
 +			snprintf(rec, sizeof(rec),
-+			    "ZCHECK pn 0x%x pa 0x%llx bad %u off +0x%x w0 0x%016llx w1 0x%016llx\n",
-+			    pn, (unsigned long long)pa, bad, off, w0, w1);
++			    "ZCHECK pn 0x%x pa 0x%llx bad %u off +0x%x w0 0x%016llx w1 0x%016llx tokd 0x%llx aend 0x%llx\n",
++			    pn, (unsigned long long)pa, bad, off, w0, w1,
++			    BootArgs ? (unsigned long long)BootArgs->topOfKernelData : 0,
++			    (unsigned long long)avail_end);
 +			sweet_ufs_diag_write("zcheck", rec, strlen(rec));
 +		}
 +		panic("SWEET ZCHECK: page was dirty before its first handout "
@@ -319,6 +333,12 @@ legitimately patterns free pages, so the checks stand down when set.
 +			 * a page grabbed (and so depoisoned + written) mid-scan
 +			 * is discarded by the locked re-check below. */
 +			pa = (pmap_paddr_t)ptoa_64(pn);
++			if (!poisoned && BootArgs && pa < BootArgs->topOfKernelData) {
++				/* Below the shim-scrubbed range: unmarked free pages here
++				 * are ml_static_mfree kernel-carve pages with legitimate
++				 * old contents - not the zero-canary population. */
++				continue;
++			}
 +			bad = sweet_page_dirty(pn, pa, poisoned, &off, &w0, &w1);
 +			if (!bad) {
 +				continue;
@@ -347,12 +367,15 @@ legitimately patterns free pages, so the checks stand down when set.
 +				 * path: a later panic can kill the ring flush. */
 +				snprintf(rec, sizeof(rec),
 +				    "POOLSCAN %s pn 0x%x qs %u color %u pa 0x%llx "
-+				    "off +0x%x w0 0x%016llx w1 0x%016llx t %llu hit %llu\n",
++				    "off +0x%x w0 0x%016llx w1 0x%016llx t %llu hit %llu "
++				    "tokd 0x%llx aend 0x%llx\n",
 +				    marked ? "used-freed" : "never-used",
 +				    pn, qs, VM_PAGE_GET_COLOR(m),
 +				    (unsigned long long)pa, off, w0, w1,
 +				    (unsigned long long)mach_absolute_time(),
-+				    (unsigned long long)sweet_scan_hits);
++				    (unsigned long long)sweet_scan_hits,
++				    BootArgs ? (unsigned long long)BootArgs->topOfKernelData : 0,
++				    (unsigned long long)avail_end);
 +				sweet_ufs_diag_write("poolscan", rec, strlen(rec));
 +			}
 +			if (sweet_scan_mode >= 2) {
@@ -400,7 +423,7 @@ legitimately patterns free pages, so the checks stand down when set.
  #endif /* ARM64_BOARD_CONFIG_SWEET */
  
  __startup_func
-@@ -3875,6 +4201,17 @@
+@@ -3875,6 +4224,17 @@
  
  	pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
  
@@ -418,7 +441,7 @@ legitimately patterns free pages, so the checks stand down when set.
  	if (__improbable(mem->vmp_realtime)) {
  		if (!page_queues_locked) {
  			vm_page_lock_queues();
-@@ -4538,6 +4875,15 @@
+@@ -4538,6 +4898,15 @@
  					local_freeq = mem;
  					pg_count++;
  
@@ -434,7 +457,7 @@ legitimately patterns free pages, so the checks stand down when set.
  					pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
  				}
  			} else {
-@@ -6790,6 +7136,13 @@
+@@ -6790,6 +7159,13 @@
  	 */
  	assert(vm_page_verify_contiguous(pages, npages));
  
@@ -448,6 +471,42 @@ legitimately patterns free pages, so the checks stand down when set.
  	if (flags & KMA_ZERO) {
  		for (vm_page_t m = pages; m; m = NEXT_PAGE(m)) {
  			vm_page_zero_fill(m);
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -1782,6 +1782,7 @@
+ 	ppnum_t     ppn;
+ 	uint32_t    freed_pages = 0;
+ 	uint32_t    freed_kernelcache_pages = 0;
++	ppnum_t     first_ppn = 0;
+ 
+ 
+ 	/* It is acceptable (if bad) to fail to free. */
+@@ -1810,6 +1811,9 @@
+ 
+ 
+ 			vm_page_create(ppn, (ppn + 1));
++			if (first_ppn == 0) {
++				first_ppn = ppn;
++			}
+ 			freed_pages++;
+ 			if (paddr_cur >= arm_vm_kernelcache_phys_start && paddr_cur < arm_vm_kernelcache_phys_end) {
+ 				freed_kernelcache_pages++;
+@@ -1824,6 +1828,15 @@
+ #if     DEBUG
+ 	kprintf("ml_static_mfree: Released 0x%x pages at VA %p, size:0x%llx, last ppn: 0x%x, +%d bad\n", freed_pages, (void *)vaddr, (uint64_t)size, ppn, bad_page_cnt);
+ #endif
++#if DEVELOPMENT
++	/* These ranges enter the free pool with live contents and below
++	 * topOfKernelData; log them so a ZCHECK/POOLSCAN PA can be ruled
++	 * in or out of the static-free population without the ring. */
++	kprintf("SWEET STATICFREE: va 0x%lx size 0x%llx pa 0x%llx..0x%llx freed %u\n",
++	    (unsigned long)vaddr, (uint64_t)size,
++	    (unsigned long long)ptoa_64(first_ppn),
++	    (unsigned long long)ptoa_64(ppn), freed_pages);
++#endif
+ }
+ 
+ /*
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
 @@ -2629,7 +2629,17 @@
@@ -562,7 +621,7 @@ legitimately patterns free pages, so the checks stand down when set.
  	return 0;
  }
  
-@@ -948,14 +951,15 @@
+@@ -948,23 +951,60 @@
   * this runs in panic context; the caller passes the panic tag + payload and we
   * drop the host lock (the other CPUs are quiesced while the panic dumps run). */
  int
@@ -580,7 +639,13 @@ legitimately patterns free pages, so the checks stand down when set.
  	if (len > BOUNCE_SIZE - UFS_BLOCK) {
  		len = BOUNCE_SIZE - UFS_BLOCK;
  	}
-@@ -965,6 +969,38 @@
++	/* Zero the whole written extent first: the bounce buffer is
++	 * shared with strategy reads, so tail bytes would otherwise carry
++	 * stale file data that can look like corruption in a raw pull. */
++	bzero(b, (1 + (len + UFS_BLOCK - 1) / UFS_BLOCK) * UFS_BLOCK);
+ 	memcpy(b, "SWEETPAN", 8);
+ 	strlcpy((char *)b + 8, tag, UFS_BLOCK - 8);
+ 	memcpy(b + UFS_BLOCK, data, len);
  	return ufs_write_blocks(base, 1 + (uint32_t)((len + UFS_BLOCK - 1) / UFS_BLOCK));
  }
  
