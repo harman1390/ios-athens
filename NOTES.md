@@ -1820,3 +1820,24 @@ recovery so unreadable; ring log dies with panic so panics never flush.
   verification rely on key-EVENT logs (post-boot) or add UFS snapshot.
 - GIC convention confirmed: DT stores SPI# (74->INTID106, 163->195);
   mkadt spi() writes DT-style numbers - keypad/eint nodes correct.
+
+### 0178 IMAGE READY (2026-11-12, CI 43284849223)
+
+- Build SUCCESS, all markers verified in kernel.development.sweet:
+  SWEETABR, takeover hce, AthensPMIC(68), MT6359, ATHENS PMIC(11),
+  polls, VIVA KP.
+- Image: shim/out/athens-boot-highmem.img
+  sha256 0e9f7414afee828b6c1c2b74f4c0e685ef6183bd88f289c77424c2b81dbf8567
+  payload c7936f1385af475b4c80fb60962c66ec8415426c9a348261bb90bb8fda53ba3d
+  highmem adt, ufs-rw, cpus=8, sweetlog=1 ufslogsecs=5.
+- EXPECTED on boot: 'VIVA KP: sta ... mem ...' (keypad probe - matrix
+  unused but harmless), 'VIVA PWRAP' init on pwrap@10026000,
+  'ATHENS PMIC: MT6359 swcid 0x.., all PMIC interrupts off',
+  'ATHENS PMIC KEYS: power -> 0x30, home -> 0xe9, topstatus 0x..'.
+- BUTTONS TEST: power btn -> HID power; vol-up -> HID vol-up (HOMEKEY);
+  vol-down = EINT80 NOT covered yet (needs 0179 EINT-key driver).
+  Press keys during/after boot; 'ATHENS PMIC KEYS: key 0x.. down/up'
+  appears in console -> visible in next SWEETLOG pull.
+- CAVEAT: probe-time IOLogs get evicted from 4MiB ring by userspace
+  spam; key-EVENT logs post-boot survive. If no PMIC lines at all,
+  check whether pwrap init itself failed (VIVA PWRAP logs).
