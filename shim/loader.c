@@ -11,6 +11,7 @@
 #include "console.h"
 #include "fdt.h"
 #include "loader.h"
+#include "ufs.h"
 
 #define BOOT_LINE_LENGTH	608
 #define PAGE_16K		0x4000UL
@@ -114,6 +115,10 @@ const char *loader_boot(uintptr_t dtb)
 	copy64(adt_pa, rd_start + p->adt_off, p->adt_size);
 	uintptr_t ba_pa = (adt_pa + p->adt_size + PAGE_16K - 1) & ~(PAGE_16K - 1);
 	uintptr_t top = ba_pa + PAGE_16K;
+
+	/* The previous kernel may have dropped a "SWEETABR" trap frame at
+	 * ba+0x3f00 during an early panic. Persist the page before we wipe it. */
+	con_hex2("BADUMP", "rc=", ufs_dump_ba(ba_pa), "pa=", ba_pa);
 
 	zero64(ba_pa, PAGE_16K);
 	volatile struct boot_args *ba = (volatile struct boot_args *)ba_pa;

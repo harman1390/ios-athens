@@ -446,3 +446,21 @@ ufs_dump_fb(uint64_t fb_pa, uint32_t fb_bytes, uint32_t w, uint32_t h, uint32_t 
 	}
 	return write_blocks(lun, (uint32_t)last - 4096, 1, data) ? 4 : 0;
 }
+
+/* Boot-args page dump: the kernel drops its abort trap frame at ba+0x3f00
+ * ("SWEETABR") in panic_with_thread_kernel_state. Runs before loader_boot
+ * zeroes the page for this boot's args; writes the whole 16 KiB page to
+ * [last-4352, last-4349] - the magic inside identifies a live capture. */
+uint32_t
+ufs_dump_ba(uint64_t ba_pa)
+{
+	uint8_t lun;
+	uint64_t last;
+
+	if (ufs_takeover())
+		return 1;
+	if (find_userdata(&lun, &last) || last < 8192)
+		return 2;
+	return write_blocks(lun, (uint32_t)last - 4352, 4,
+	    (const void *)(uintptr_t)ba_pa) ? 3 : 0;
+}
