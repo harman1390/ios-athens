@@ -1,5 +1,43 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ATHENS HANDOFF 2026-11-12c - TRAP-FRAME MAILBOX (read first) <<<
+
+RUN-4 PULL (logs/athens-highmem-run4-pull.bin): all three zones present
+(SHIMFB header, SHIMPRAM, stale SWEETPAN). The framebuffer dump rendered
+to logs/panic-screen.png = **the LK realme splash, not the panic** - LK
+redraws its splash over the panic screen on every boot, so fb dumping
+cannot recover panic screens across a reboot. (fb dump left in place;
+harmless and may still catch shim-time state.)
+
+REAL FIX (commit 45ed8a0, patch 0176): panic_with_thread_kernel_state
+now copies arm_saved_state64 into the boot_args page tail at
+phystokv(topOfKernelData - 0x4000 + 0x3f00) with "SWEETABR" magic -
+guarded by avail_end (physmap up). Shim ufs_dump_ba() writes that 16K
+page to userdata [last-4352, last-4349] inside loader_boot BEFORE
+zero64() rewrites it. Next-boot pull then yields pc/lr/sp/fp/esr/far/
+x0-x28 of the fault even when panic log/debug log/UFS never came up.
+
+Zone map updated (partition-relative, last = 13049847):
+  [13045495]            ba page "SWEETBA"-free zone (4 blocks,
+                        [last-4352, last-4349], magic "SWEETABR" at
+                        page offset 0x3f00)
+  [13045752, 13048565]  SHIMFB pixels; header at 13045751
+  [13048567, 13048821]  SHIMPRAM data; header at 13048566
+  [13048823, 13049847]  kernel 1025-block log tail
+Pull covering all: dd if=/dev/block/sdc59 bs=4096 skip=13045495 count=4353
+
+CI BUILD DISPATCHED: run 43232381650 on athens @45ed8a0, drop_patches
+"0161-athens-ufs-diag.patch 0164-athens-ufs-err.patch
+0165-athens-tidt-assert.patch", verify_strings incl. SWEETABR.
+A push-triggered run 43232343019 also exists (no verify gate - ignore
+if it only builds).
+
+Shim rebuilt locally with ufs_dump_fb + ufs_dump_ba (Image.gz 9627 B,
+NDK clang). When the CI kernel lands: mkpayload --highmem payload ->
+viva-bootimg repack backup/boot.img Image.gz ... --ramdisk payload ->
+flash -> let it panic -> normal reboot (shim dumps ba page + pram) ->
+PitchBlack -> pull skip=13045495.
+
 ## >>> ATHENS HANDOFF 2026-11-12b - SHIM UFS WRITE PATH WORKS; FB DUMP ADDED (read first) <<<
 
 SHIM UFS HARVEST CONFIRMED WORKING. With UFS_BASE=0x11270000 (MediaTek,
