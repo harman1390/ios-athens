@@ -15,6 +15,31 @@ regressions immediately.
 Legend: ✅ verified working · ⚠️ partially working/known-buggy ·
 ❌ broken/regressed · ⬜ not started/untested
 
+Epistemic honesty: every ✅ means evidence exists on disk or in CI logs —
+not "should work". Claims that are inference or hypothesis are marked
+explicitly. If a row ever says ✅ without a pointer to the artifact that
+proves it, treat it as unverified.
+
+Audit of current claims (2026-11-12):
+- OBSERVED: shim UFS writes land on disk (SHIMPRAM/SHIMFB headers + data
+  in pull logs/athens-highmem-run4-pull.bin).
+- OBSERVED: sdc59 = 13,049,848 blocks (52,199,392 KiB in /proc/partitions);
+  records found at the corrected offset.
+- OBSERVED: run-6 stray-write records (4 pages at 0xe0000000, tokd
+  0xc25cc000, aend 0xffd60000) — decoded from disk records.
+- OBSERVED: "Unaligned kernel data abort" panic, kernel_task tid 101 —
+  from the photographed screen; esr/far digits are photo-transcribed and
+  may contain read errors (treat the exact FAR as approximate).
+- INFERRED (strong): kernel dies before panic-log init — pram region
+  0x1bfeff000 contains only unwritten-DRAM garbage.
+- HYPOTHESIS: the DRAMC/SPM dummy-read engine is the stray writer —
+  fits the alloc-range evidence but NOT proven.
+- HYPOTHESIS: the abort is post-physmap so patch 0176's mailbox fires —
+  if it doesn't, that itself proves the abort is pre-arm_vm_init.
+- ASSUMPTION REMOVED: fb dump can't recover panic screens (LK redraws
+  fb every boot) — verified by rendering, kept in shim only because it
+  costs nothing.
+
 ## Boot chain
 
 | Item | Status | Evidence / last verified |
