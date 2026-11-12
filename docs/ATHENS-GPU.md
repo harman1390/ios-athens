@@ -1,0 +1,91 @@
+# GPU on athens: porting the viva Mali-G57 work (research only, 2026-11-12)
+
+Status: **research, no code written.** Do not start implementation until
+buttons and touch are confirmed working on device (user instruction).
+
+## Hardware equivalence
+
+| | viva (RMX3031) | athens (RMX2117) |
+|---|---|---|
+| SoC | MT6781 Helio G96 | MT6853 Dimensity 800U |
+| GPU | Mali-G57 **MC2** (Valhall, 2 shader cores) | Mali-G57 **MC3** (Valhall, 3 shader cores) |
+| Mali MMIO | 0x13000000 | **0x13000000 — identical** |
+| topckgen | 0x10000000 | 0x10000000 — identical |
+| apmixed | 0x1000c000 | 0x1000c000 — identical |
+| scpsys/SPM | 0x10006000 | 0x10006000 — identical |
+| mfgcfg | 0x13fbf000 | **0x13fbf000 — identical** (confirmed in mt6853 gpufreq debug prints 0x13fb_f130/0x13fb_f0b4) |
+| PMIC | MT6366 | **MT6359 — different regulator map** |
+| ADT gpu compatible | `mediatek,mt6781-mali` | `mediatek,mt6853-mali` (mkadt already emits) |
+
+Every register block the Mali job-manager driver touches (GPU_ID, MMU,
+JS, IRQs) is the same Valhall IP — the ~4200 lines of `VivaGPU.cpp`
+(MMU address spaces, job slots, syncobj, fault recovery) port essentially
+unchanged. GPU_ID will report MC3; the driver already reads
+SHADER_PRESENT so core count should be dynamic — verify.
+
+## What actually differs (the port surface)
+
+1. **Match**: `VivaGPUAccelerator` matches only `mediatek,mt6781-mali`.
+   Athens ADT emits `mediatek,mt6853-mali` → add match entry (or an
+   AthensGPU subclass). KernelConfigTables one-liner.
+
+2. **GPU power domains**: mt6853.dts gpufreq clocks list
+   SCP_SYS_MFG0/1/2/3/**5** (five domains: ASYNC, MFG_TOP, Shader
+   Stack0/2/4) vs MT6781's set — verify against athens live FDT which
+   power-domains the mali node uses; SPM MTCMOS sequence order may differ.
+
+3. **PMIC rails (the real work)**: MT6366 VGPU/VSRAM registers
+   (0x1508/0x1526/0x1bc8/0x1bf4) are wrong for MT6359. Per
+   `drivers/gpu/mediatek/gpufreq/v1/mt6853/mtk_gpufreq_plat.c` +
+   mt6853.dts, the supplies are `_vgpu`/`_vsram_gpu` resolved to:
+   - **VGPU = `buck_vproc1`** (mt_pmic_vproc1_buck_reg):
+     EN `MT6359_RG_BUCK_VPROC1_EN_ADDR` = 0x1708 bit0;
+     VOSEL `MT6359_RG_BUCK_VPROC1_VOSEL_ADDR` = 0x172e [6:0]
+   - **VSRAM_GPU = `ldo_vsram_md`** (mt_pmic_vsram_md_ldo_reg):
+     EN `MT6359_RG_LDO_VSRAM_MD_EN_ADDR` = 0x1f2c bit0;
+     VOSEL `MT6359_RG_LDO_VSRAM_MD_VOSEL_ADDR` = 0x1b46 [6:0]
+   - NOTE: vproc1/vgpu11 naming is confusing — vgpu11 feeds proc1 per
+     the same dts (`proc1-supply = <&mt_pmic_vgpu11_buck_reg>`), while
+     the gpufreq `_vgpu` maps to vproc1. **MEASURE on athens**: pull the
+     gpufreq/mali node supplies from live FDT next recovery session;
+     realme's dts may differ from xiaomi's.
+   - Constraint differs: mt6853 wants **0 ≤ VSRAM−VGPU ≤ 350 mV**
+     (vs MT6781's vsram ≥ vgpu + 0.1 V floor); slew rates 12.5 mV/µs
+     rising, 5 mV/µs falling. These are regulator-framework calls in
+     Linux; we poke pwrap registers directly like VivaGPU already does —
+     but must add the MT6359 addresses to `VivaPwrap::writeAllowed`.
+
+4. **OPP table**: `g_opp_table_segment_1/2/3` chosen by efuse
+   devinfo index 134 — freq/vgpu/vsram triples. Extract for athens;
+   start with ONE conservative OPP like viva did (vivagpufreq boot-arg,
+   default 300 MHz — mt6853 max is higher, table TBD).
+
+5. **Clocks**: MFGPLL in apmixed (0x1000c000, parent XTAL 26 MHz),
+   mfg_sel mux in topckgen CLK_CFG_0[17:16] — same offsets as MT6781
+   per the shared register layout; verify PCW/enable sequence against
+   mt6853 clk driver (apmixed MFGPLL offset may differ — check
+   clk-mt6853.c).
+
+## What does NOT need porting
+
+- The whole userspace Metal stack plan (`docs/PIANO-GPU.md` G3-G9):
+  Mesa/Panfrost Valhall compiler + Gallium backend + AIR→NIR translator
+  + `VivaMTLDriver.bundle` — **GPU-architecture-specific, identical for
+  MC2/MC3**. This is the bulk of the work and it transfers wholesale.
+- `VivaGPUUserClient` ioctl surface (DRM_PANFROST_* semantics +
+  syncobj + IOSurface import) — unchanged.
+- `IOAcceleratorES` publishing + `vivagpu=0` kill switch — unchanged.
+
+## Suggested order (when unblocked)
+
+1. Add `mediatek,mt6853-mali` match (verify GPU_ID reads MC3, IRQs fire)
+2. Port power-on with MT6359 rails (extend pwrap whitelist) — G1
+3. MMU/jobs — reuse as-is — G2
+4. Then the shared Metal stack (PIANO-GPU G3+) applies to both devices.
+
+## Open questions for next recovery pull
+
+- live FDT: mali node `power-domains`, gpufreq node `_vgpu-supply`/
+  `_vsram_gpu-supply` targets, `sram-supply` if present
+- `/proc/device-tree` clock-names for gpufreq (MFG domain list)
+- efuse/devinfo for OPP segment selection (index 134)
