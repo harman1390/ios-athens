@@ -143,7 +143,9 @@ LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
 | HIGHMEM window (0x100000000–0x1bfeff000) | ✅ boots to driver init | run-5: no early abort, no corruption — reached UFS init cleanly. The earlier "unaligned abort" was lowmem-era; highmem pool works |
 | HIGHMEM = writer containment? | ✅ consistent | pool above both dummy-read ranges; run-5 survived to driver init (inference: containment works) |
 | Trap-frame mailbox | ✅ wired | patch 0176 in kernel cbb29270 ("SWEETABR" verified in binary); run-5 ba zone correctly empty (hang ≠ panic — mailbox only fires on exceptions) |
-| Kernel UFS host takeover | ❌ hangs | run-5: stops after `host cap 0x387071f, DMA at 0xfd000000` — silent spin, no panic (ba zone empty). Suspects: mach_absolute_time frozen → deadline never fires; or dram_r1 scribbling the 0xfd000000 bounce |
+| Kernel UFS host takeover | ✅ works | run-6 (0177): takeover + LUN scan + GPT probe + **rootfs mount + launchd exec attempted** — the whole storage chain works read-only |
+| Kernel reaches launchd | ✅ | run-6: pid 1 init exec'd /sbin/launchd — died only at the signature stage (below) |
+| launchd exec | ❌ WRONG_PLATFORM | run-6 panic: `unexpected SIGKILL of launchd (CS_KILLED) namespace 9` = OS_REASON_EXEC — iOS binary refused w/o `unentitled_ios_sim_launch` (solved upstream, NOTES:978). cmdline lacked it — repacked with it |
 | UFS DMA carve | ⚠️ replaced | `ufsdma=0xfd000000` sat INSIDE dram_r1 alloc-range — flawed. 0177: CAP_64AS (bit24 set in real read) → DMA from managed >4G pool; fallback moved to 0x4e000000 (below both dummy-read ranges) |
 | ufs_scsi silent-spin risk | ⚠️ patched | 0177: 2²⁸ hard poll cap + host-state dump — a stuck command now times out loudly instead of hanging |
 

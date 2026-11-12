@@ -3,7 +3,41 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
-## >>> ATHENS HANDOFF 2026-11-12d - UFS-STAGE HANG, NOT PANIC (read first) <<<
+## >>> ATHENS HANDOFF 2026-11-12e - LAUNCHD REACHED; WRONG_PLATFORM (read first) <<<
+
+RUN-6 BOOT RESULT (kernel 3119523f with 0177, cpus=8): **the whole
+storage chain works.** UFS takeover + LUN scan + GPT + rootfs mount +
+load_init_program all succeeded - the kernel exec'd /sbin/launchd and
+pid 1 died ONLY at the signature check:
+    panic(cpu 4 caller ...): unexpected SIGKILL of launchd (CS_KILLED)
+    with reason -- namespace 9 code 0x0 description: none
+(photo on file; panicked task = pid 1 "init", 0 pages/0 threads =
+exec teardown state. mach_absolute_time ~51 s incl. console draw.)
+
+DECODED VIA UPSTREAM HISTORY (NOTES ~line 978, sweet boot 0029u): the
+identical panic was `namespace 9 code 0xe` = OS_REASON_EXEC /
+EXEC_EXIT_REASON_WRONG_PLATFORM - our kernel is XNU_TARGET_OS_OSX and
+refuses iOS-platform binaries unless spawn-attr platform is set or
+the DEVELOPMENT tunable `unentitled_ios_sim_launch` is passed. Athens
+ufs-ro cmdline lacked it. (Screen read "0x0" but font is tiny; 0xe is
+the documented value for this path. If it's genuinely 0x0 the next
+boot will show a different code and this entry needs revisiting.)
+
+FIXED IMAGE (local repack, same kernel 3119523f):
+shim/out/athens-boot-highmem.img =
+56b95737690b5d7b9817953d6a969c846fe6f42e65555b6673ea483357f1c3b2
+cmdline now adds: unentitled_ios_sim_launch=1 launchd_unsecure_cache=1
+(the second flag preempts the NEXT known wall - launchd_cache_loader
+needs AMFI for the xpc cache signature, upstream boot 0038e).
+
+EXPECTED NEXT: launchd runs ("exec launchd" lines + boot tasks fsck,
+mount -P 1/2). Likely next walls from upstream history: mount needs
+/chosen/boot-manifest-hash (already in ADT), bindfs (patch 0037 in),
+watchdogd->IOWatchdog (patch 0040 SweetWatchdog in), Sandbox policy
+(patch 0050 in). If panic persists with a DIFFERENT exec code, decode
+it against bsd/sys/reason.h + kern_exec.c.
+
+## >>> ATHENS HANDOFF 2026-11-12d - UFS-STAGE HANG, NOT PANIC (superseded) <<<
 
 RUN-5 BOOT RESULT: the highmem image (kernel cbb29270, all 8 markers)
 did NOT panic - it booted cleanly through pmap/VM init and hung at:
@@ -33,8 +67,11 @@ ROOT-CAUSE ANALYSIS of the hang (observation + inference):
   does 64-bit DMA, so the whole carve-into-low-bank workaround was
   unnecessary AND harmful (it placed DMA in dram_r1's reach).
 
-PATCH 0177 (commit a885af1, CI run 43254730625, dispatched with the
-proven drop list + 10-marker gate incl "takeover hce","polls %llu"):
+PATCH 0177 (commit a885af1 + baseline fix, CI run 43257125096,
+dispatched with the proven drop list + 10-marker gate incl
+"takeover hce","polls %llu"; first attempt 43254730625 skipped at
+sweet_ufs.c:547 because apply-tree context had dropped-0164 codes -
+patch regenerated against ENXIO baseline):
 1. max_pnum = CAP_64AS ? 0 : <4G - DMA allocates from the managed pool
    ABOVE 4 GiB, outside every firmware engine's alloc-range.
 2. Fixed fallback (if contig alloc fails) moved 0xfd000000 -> 0x4e000000
@@ -44,11 +81,22 @@ proven drop list + 10-marker gate incl "takeover hce","polls %llu"):
 4. ufs_scsi doorbell wait gained a 2^28 hard poll cap + host-state dump
    (hcs/is/rlrsr/rlclr/ocs) - can never hang silently again.
 
-NEXT: when kernel lands -> repack athens-boot-highmem.img ->
-fastboot flash boot + reboot -> expect EITHER "takeover hce ..." line
-then LUN scan (GPT probe), OR a "command 0x00 timed out" with register
-dump -> then recovery pull to decode. The nostorage differential
-image (8907e485) remains available if UFS keeps failing.
+READY TO FLASH: shim/out/athens-boot-highmem.img =
+ff06923477acb1fbdc78b15c75305f318b891a7c3fe964d6e06b2c67e6e6a519
+(kernel 3119523f, all 10 markers verified in binary incl "takeover
+hce"/"polls %llu"). Same flash+pull routine as run-5.
+
+OUTCOMES TO EXPECT (each is diagnostic):
+- "takeover hce 0x... hcs 0x..." then LUN lines -> takeover fine,
+  hang was the 0xfd000000 bounce being scribbled by dram_r1
+- "command 0x00 timed out (hcs .. is .. rlrsr .. rlclr .. ocs ..
+  polls N)" -> host ignored our UTRL; the dumped registers say which
+  link state it's in (MediaTek may need a different takeover path)
+- still silent hang -> stall is inside ufs_take_over_host MMIO or
+  lck_mtx; next step adds per-stage prints between each ufs_wr
+The nostorage differential image (8907e485) remains available if UFS
+keeps failing - it should panic at root mount, proving everything
+upstream is clean.
 
 ## >>> ATHENS HANDOFF 2026-11-12c - TRAP-FRAME MAILBOX (superseded, kept for zone map) <<<
 
