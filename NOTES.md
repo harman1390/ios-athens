@@ -1867,3 +1867,22 @@ recovery so unreadable; ring log dies with panic so panics never flush.
   16x36/10pt/1080x2400 all in ATHENS.md). Still needs: MTK SPI master
   driver for spi-mt6765 @0x11018000 + Novatek nf_nt36672c protocol.
   No SPI driver exists in tree - biggest remaining task.
+
+### 0179 IMAGE READY (2026-11-12, CI 43290178829 SUCCESS)
+
+- All markers verified in kernel.development.sweet: AthensGpioKeys x3,
+  athens,gpio-keys, ATHENS GPIO KEYS x3, AthensPMIC x4, MT6359 x3.
+- Image: shim/out/athens-boot-highmem.img
+  sha256 260f0d4cd8d1405761d058a1fc829112b92e57e71b5735c1c420e56dd8360905
+  payload 8012e38943b5c1778a0c449cf4849249580f97498fd6366fdd0227f616aaa5a3
+  Same proven config: highmem adt, ufs-rw, cpus=8, sweetlog=1 ufslogsecs=5,
+  unentitled_ios_sim_launch=1 launchd_unsecure_cache=1.
+- BUTTONS NOW COVERED: power=PWRKEY, vol-up=HOMEKEY (0178 PMIC),
+  vol-down=GPIO80 polled (0179). Expected logs: 'ATHENS PMIC KEYS: key
+  0x.. down/up' and 'ATHENS GPIO KEYS: key 0xea down/up' + 'N keys,
+  active-low, pins 80->0xea'.
+- GPIO80==EINT80 is a MEASURE assumption: if vol-down never logs, the
+  eint->gpio mapping differs; check pinctrl-mt6853 eint mux or try the
+  pin the live FDT's volume-down gpio property names (wasn't dumped).
+- TOUCH: still needs SPI4 host + NT36672C (see ATHENS.md notes); ADT
+  touch node removed until then.
