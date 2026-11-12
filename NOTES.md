@@ -3,7 +3,54 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
-## >>> ATHENS HANDOFF 2026-11-12c - TRAP-FRAME MAILBOX (read first) <<<
+## >>> ATHENS HANDOFF 2026-11-12d - UFS-STAGE HANG, NOT PANIC (read first) <<<
+
+RUN-5 BOOT RESULT: the highmem image (kernel cbb29270, all 8 markers)
+did NOT panic - it booted cleanly through pmap/VM init and hung at:
+    SWEET UFS: host cap 0x387071f, DMA at 0xfd000000
+This is a milestone: highmem survived where lowmem corrupted. The
+remaining failure is UFS driver bring-up, not memory corruption.
+
+RUN-5 PULL (logs/athens-run5-pull.bin, skip=13045495 count=4353):
+- ba zone [first 4 blocks]: ALL ZEROS, no SHIMBA/SWEETABR -> the hung
+  boot never took an exception (mailbox correctly empty - consistent
+  with hang, not panic).
+- All SWEETPAN/ZCHECK/POOLSCAN records in the pull decode with
+  aend 0xffd60000 and lowmem PAs (0xe0000000, 0xc1b90000, 0xc2150000)
+  = STALE run-6-era lowmem data persisting on disk. Nothing new was
+  written by either recent boot (hang wrote nothing; nostorage image
+  never flashed).
+- No "SWEET UFS" console strings in pram (hang before any pram flush).
+
+ROOT-CAUSE ANALYSIS of the hang (observation + inference):
+- OBSERVED: ufs_take_over_host() has NO loops (straight MMIO r/w), and
+  ufs_scsi has a deadline timeout. A silent infinite hang therefore
+  requires either (a) mach_absolute_time() frozen so the deadline never
+  fires, or (b) the DMA bounce at 0xfd000000 getting scribbled by
+  dram_r1 (it IS inside [0xc0000000,0xffe60000)) so the doorbell never
+  clears - which then still needs (a) to hang FOREVER.
+- OBSERVED: CAP = 0x387071f -> bit 24 CAP_64AS SET. The host genuinely
+  does 64-bit DMA, so the whole carve-into-low-bank workaround was
+  unnecessary AND harmful (it placed DMA in dram_r1's reach).
+
+PATCH 0177 (commit a885af1, CI run 43254730625, dispatched with the
+proven drop list + 10-marker gate incl "takeover hce","polls %llu"):
+1. max_pnum = CAP_64AS ? 0 : <4G - DMA allocates from the managed pool
+   ABOVE 4 GiB, outside every firmware engine's alloc-range.
+2. Fixed fallback (if contig alloc fails) moved 0xfd000000 -> 0x4e000000
+   (free gap [0x4d100000,0x56000000), below BOTH dummy-read ranges).
+3. "takeover hce/hcs/utrldbr" print inside ufs_take_over_host so any
+   future stall localizes to a specific stage.
+4. ufs_scsi doorbell wait gained a 2^28 hard poll cap + host-state dump
+   (hcs/is/rlrsr/rlclr/ocs) - can never hang silently again.
+
+NEXT: when kernel lands -> repack athens-boot-highmem.img ->
+fastboot flash boot + reboot -> expect EITHER "takeover hce ..." line
+then LUN scan (GPT probe), OR a "command 0x00 timed out" with register
+dump -> then recovery pull to decode. The nostorage differential
+image (8907e485) remains available if UFS keeps failing.
+
+## >>> ATHENS HANDOFF 2026-11-12c - TRAP-FRAME MAILBOX (superseded, kept for zone map) <<<
 
 RUN-4 PULL (logs/athens-highmem-run4-pull.bin): all three zones present
 (SHIMFB header, SHIMPRAM, stale SWEETPAN). The framebuffer dump rendered
@@ -1591,3 +1638,23 @@ recovery so unreadable; ring log dies with panic so panics never flush.
   0175 strings absent (patch skipped) -> unusable for the mailbox test.
 - Rebuild: 43245911553 (@7d61816, drop_patches as above, verify incl
   SWEETABR). If green -> repack highmem image -> flash test.
+
+### RUN-5 MAILBOX IMAGE (2026-11-12, CI 43245911553)
+
+- Build 43245911553 @7d61816 SUCCESS, all 8 verify markers incl SWEETABR.
+  Kernel: logs/ci-0176/kernel.development.sweet
+  sha256 cbb29270932bf394a7c376ca4edd0aac03d5e84e32114c4b280f551270ac03cc
+- Shim: out/athens (ufs.o linked: ufs_harvest_pram + ufs_dump_fb +
+  ufs_dump_ba all present; loader calls ufs_dump_ba(ba_pa) pre-zero64).
+- Image: shim/out/athens-boot-highmem.img
+  sha256 6baa162503692a91078d2bf6ffea8653b1d7b788ebc922c337227cc9179399e7
+  payload: phys_base 0x100000000 mem_size 0xbfeff000, entry
+  0xfffffe00074b0488, ufs-ro + cpus=8.
+- BOOT SEQUENCE: flash -> panic -> NORMAL reboot (shim harvests
+  ba-page mailbox + pram + fb BEFORE zeroing) -> PitchBlack ->
+  pull: dd if=/dev/block/sdc59 bs=4096 skip=13045495 count=4353
+  (ba zone at [last-4352,last-4349] = SHIMBA; fb zone hdr at
+  skip=13045751; pram zone SHIMPRAM at 0xaff000; kernel tail SWEETPAN).
+- ba-page record: "SWEETABR" magic + arm_saved_state64 (pc,esr,far,
+  x0-28,fp,lr,sp,cpsr) at offset 0x3f00 of the 16K page at
+  topOfKernelData-0x4000.

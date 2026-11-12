@@ -140,10 +140,12 @@ LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
 | XNU reaches launchd (LOWMEM window) | ✅ | run-6-era boot: launchd tasks, fsck, mount-phase-1/2, FIPS POST in pram log |
 | ZCHECK/POOLSCAN/STATICFREE diag | ✅ | CI 43212579684 verified strings; run-6 pull decoded clean records |
 | Stray writer on LOWMEM | ❌ unfixed | run-6: 4 contiguous free pages dirtied at PA 0xe0000000 (~191 bad qwords each, t≈29 s) inside `dram_r1_dummy_read` alloc-range — suspect MTK DRAMC/SPM engine, roams per boot |
-| HIGHMEM window (0x100000000–0x1bfeff000) | ❌ broken | unaligned kernel data abort, esr 0x96000061, kernel_task tid 101, BEFORE panic/debug-log/UFS init — fault PC unknown, trap-frame capture build 43232381650 in progress |
-| HIGHMEM = writer containment? | ⬜ | can't evaluate until kernel survives the early abort |
-| Trap-frame mailbox | ⬜ | patch 0176: `panic_with_thread_kernel_state` copies saved_state to ba page tail ("SWEETABR"), shim persists it — pending CI kernel + flash |
-| UFS DMA carve | ⬜ | `ufsdma=0xfd000000` fallback for >4G pool; untested (dies before ufs init) |
+| HIGHMEM window (0x100000000–0x1bfeff000) | ✅ boots to driver init | run-5: no early abort, no corruption — reached UFS init cleanly. The earlier "unaligned abort" was lowmem-era; highmem pool works |
+| HIGHMEM = writer containment? | ✅ consistent | pool above both dummy-read ranges; run-5 survived to driver init (inference: containment works) |
+| Trap-frame mailbox | ✅ wired | patch 0176 in kernel cbb29270 ("SWEETABR" verified in binary); run-5 ba zone correctly empty (hang ≠ panic — mailbox only fires on exceptions) |
+| Kernel UFS host takeover | ❌ hangs | run-5: stops after `host cap 0x387071f, DMA at 0xfd000000` — silent spin, no panic (ba zone empty). Suspects: mach_absolute_time frozen → deadline never fires; or dram_r1 scribbling the 0xfd000000 bounce |
+| UFS DMA carve | ⚠️ replaced | `ufsdma=0xfd000000` sat INSIDE dram_r1 alloc-range — flawed. 0177: CAP_64AS (bit24 set in real read) → DMA from managed >4G pool; fallback moved to 0x4e000000 (below both dummy-read ranges) |
+| ufs_scsi silent-spin risk | ⚠️ patched | 0177: 2²⁸ hard poll cap + host-state dump — a stuck command now times out loudly instead of hanging |
 
 ## Logging / persistence (the discipline that must not regress)
 
