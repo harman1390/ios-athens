@@ -1203,3 +1203,38 @@ instead of zfree) + validator on each release -> stray write panics
 within one release, exposing writer context. Kernel CI 42409654215.
 Panic log lives at phys 0x1bdf00000 (panic_base) but /dev/mem absent in
 recovery so unreadable; ring log dies with panic so panics never flush.
+
+## 2026-11-12 handoff - ZCHECK HIT: stray writer into the free pool confirmed
+
+### Result (run 4, flashed image, beaa8e3d build)
+
+- `SWEET ZCHECK` panic: **a shim-scrubbed page was nonzero at its FIRST
+  handout** - `vm_resident.c:1260`. This is the first classification:
+  something writes to free memory before any owner gets it (bus master /
+  DMA or a stale CPU alias), NOT a live-owner UAF.
+- BUT: the zcheck record with PA/offset/qwords was overwritten by the
+  console-panic record - every `sweet_ufs_panic_write` wrote at the SAME
+  fixed offset. Details of the hit are lost; only the panic string survives
+  (`logs/run4-console-panic.txt`, raw `logs/athens-0175-run4-pull.txt.bin`).
+- Runs 2-3 earlier: pulls were byte-identical -> those boots never wrote
+  (old binary: @pmap_data.c:2766 false-positive lineage).
+
+### Fix landed (commit 3c67ba2)
+
+- `sweet_ufs_record_write(blk_off, tag, data, len)`: panic/console records
+  stay at slot 0; `sweet_ufs_diag_write` slots at `72 + 8*n`, above the 256KB
+  transcript zone -> zcheck/poolscan records survive the transcript rewrite.
+
+### In flight
+
+- CI run **43190643922** (workflow_dispatch, same drop set, verify adds
+  `sweet_ufs_diag_write`). Next: artifact -> repack -> boot -> tail pull.
+  Expect: `zcheck` record WITH PA/offset/qwords + population, then compare
+  PA vs reserved-memory dump (DPM at 0xffe60000 is the prime suspect range).
+
+### How to read the next tail
+
+- `zcheck`/`poolscan` records at slots 72,80,88,96,... - walk them in order.
+- PA near window top (~0xffe6xxxx) -> DPM/DRAM dummy-write HW; scattered PAs
+  -> stale CPU store path; PA in low pages -> allocator bookkeeping.
+
