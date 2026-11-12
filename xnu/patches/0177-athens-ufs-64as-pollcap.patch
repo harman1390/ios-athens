@@ -29,7 +29,7 @@
 +	    hce, hcs, ufs_rd(REG_UTRLDBR));
  	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
  		printf("SWEET UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
- 		return 62;
+ 		return ENXIO;
 @@ -798,10 +807,21 @@
  	su.wait = (wait == 1);
  
