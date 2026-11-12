@@ -40,6 +40,45 @@ Audit of current claims (2026-11-12):
   fb every boot) — verified by rendering, kept in shim only because it
   costs nothing.
 
+## Pipeline audit (whole image build path, 2026-11-12)
+
+Per-file review of everything that produces `athens-boot-highmem.img`
+(mkadt → mkpayload → shim objects → viva-bootimg repack):
+
+VERIFIED BY EVIDENCE:
+- mkadt constants: ATHENS_UFS 0x11270000 (dts + writes confirmed), FB
+  0x77e20000 stride 4352 (dtb + rendered PNG), GIC 0x0c000000/0x0c040000,
+  TIMEBASE 13 MHz, VTIMER 27 (dts + 8-core boot), dram windows (live-FDT
+  reserved-memory dump), pram reg = two u64s, memory-map node minimal
+  (XNU tolerates; lowmem reached launchd).
+- mkpayload: chained-fixup resolution + payload header (boots XNU;
+  header verified phys_base/mem_size on every image).
+- shim loader.c: 64-bit clean audited; mmu.c identity map covers 64 GiB.
+- shim ufs.c: UTRD/UCD/PRDT layout + READ/WRITE(10) — writes verified
+  on hardware (SHIMPRAM landed).
+- 0175/0176 patches: `git apply` clean against real CI tree (0176 was
+  re-verified after LF normalization); verify_strings gates the binary.
+
+DELIBERATE STAND-INS (known fakes, documented, not bugs):
+- ATHENS_ECID, serial/MLB/UDID/MACs, region-info 'HN/A' (India — matches
+  this variant), BOOT_MANIFEST_HASH (fixed sha384 stand-in so mount -P1
+  passes), synthetic product props copied from the real D22AP ADT.
+- display canvas 1125x2436 (presented as iPhone X panel; real panel is
+  1080x2400 — presentation only, framebuffer is native).
+
+UNVERIFIED ASSUMPTIONS (flagged; fix or prove before relying on them):
+- athens-mkboot.sh payload-size bound uses VIVA's LK ramdisk/DTB addrs
+  (0x47c80000/0x4bc80000), marked MEASURE, never confirmed on athens.
+  Guard only; payload ~17 MiB works in practice — low risk.
+- `ufsdma=0xfd000000` low-bank DMA carve: guessed PA, boot-arg
+  relocatable, never exercised (kernel dies before ufs init).
+- panic_scan region 0x1bdf00000: stale hardcoded PA, harmless scan.
+- CKPT_MAGIC 0xc256bf00: lowmem-era PA, kernel never writes (dead diag).
+- CPU clock-frequency props in ADT (2.4/2.0 GHz): descriptive only.
+- athens_devices peripheral nodes: addresses from mt6853.dts, driver
+  register semantics partly from viva MT6781 — untested until boot.
+- 0176 mailbox itself: compiles/applies cleanly, hardware test pending.
+
 ## Boot chain
 
 | Item | Status | Evidence / last verified |
