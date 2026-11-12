@@ -1238,3 +1238,17 @@ recovery so unreadable; ring log dies with panic so panics never flush.
 - PA near window top (~0xffe6xxxx) -> DPM/DRAM dummy-write HW; scattered PAs
   -> stale CPU store path; PA in low pages -> allocator bookkeeping.
 
+
+### Follow-up (same day, commit 8f27322)
+
+- The run-4 ZCHECK hit was probably a FALSE POSITIVE: zero-canary was not
+  gated on topOfKernelData. ml_static_mfree frees kernel-carve pages
+  (arm_vm_init.c:1636/1644/1653 + vm_pages[] tail) into the pool UNMARKED
+  with live contents - a dirty first handout below tokd is expected.
+- Fix: never-used population now requires pa >= BootArgs->topOfKernelData
+  in both sweet_first_grab_pn and the scanner. Below-scrub pages are still
+  marked at handout so they join the used-freed poisoned population.
+- Records now carry tokd + avail_end; SWEET STATICFREE logs each
+  ml_static_mfree range under DEVELOPMENT; record_write bzeros its extent.
+- Rebuilding: CI run 43191529298 (supersedes 43190643922).
+
