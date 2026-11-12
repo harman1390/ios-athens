@@ -1335,3 +1335,21 @@ recovery so unreadable; ring log dies with panic so panics never flush.
   it targets. Also consider: is the 0xe0000000 writer actually an SPM
   write-verify pattern or a data buffer from another firmware agent.
 
+
+### HIGH-BANK MOVE (commit a2c912c, CI 43200619575)
+
+- Rationale: run6 hit pa 0xe0000000 is inside dram_r1_dummy_read alloc-range;
+  EVERY MTK reserved/dynamic region is 32-bit -> no firmware engine can
+  write above 4 GiB. Window moves to [0x100000000, 0x1bffff000) ~3GiB
+  (dramc-rk1 4K carve at 0x1bffff000 stays outside; panic log carve inside).
+- mkadt: --athens --highmem selects it; FIXED a real bug where serialize/
+  write was nested inside --athens-mem so mkadt wrote nothing (stale ADT
+  was silently reused in earlier image builds - verify past images!).
+- 0175: bitmap 1<<19 (<8G), poison pn field 32 bits, sweet_ufs falls back
+  to fixed low-bank DMA at ufsdma= (default 0xfd000000, old window left
+  unmanaged -> nothing owns it; still inside dram_r1 range but dodges the
+  observed target). su.dma uses ml_io_map - uncached, no sync needed.
+- If corruption persists in the high bank -> the writer is XNU CPU-side
+  (stale VA/owner bug), not a firmware engine. That is the differential.
+- Image build: mkadt --athens --athens-ufs --highmem; same repack.
+
