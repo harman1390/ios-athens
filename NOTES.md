@@ -1753,3 +1753,42 @@ recovery so unreadable; ring log dies with panic so panics never flush.
 - ba-page record: "SWEETABR" magic + arm_saved_state64 (pc,esr,far,
   x0-28,fp,lr,sp,cpsr) at offset 0x3f00 of the 16K page at
   topOfKernelData-0x4000.
+
+### BUTTONS/PMIC-KEYS WORK (2026-11-12, patch 0178, CI 43284849223)
+
+- User asked for buttons+touch while run-9 boots to Hello. Audit result:
+  viva drivers are the right reuse BUT compatibles must match exactly.
+- ADT (mkadt athens_devices) already emits: keypad mt6781-keypad @
+  10010000 SPI74 (VivaKeypad matches -> probes, read-only KP_MEM scan,
+  relies on LK having configured scanning - runtime will show),
+  eint mt6781-eint @1000b000 (VivaEINT), pwrap mt6781-pwrap @10026000
+  (VivaPwrap bus), pmic mt6359-pmic + keys mt6359-keys (NO driver matched
+  -> wrote new ones).
+- MT6359 facts (mainline mt6359/registers.h + mtk-pmic-keys.c
+  mt6359_regs, verified): SWCID@0xa id 0x59; TOPSTATUS=0x2a (deb bits
+  pwrkey 0x2 / homekey 0x8, 0=pressed); PSC_TOP_INT_CON0=0x910 /
+  STATUS0=0x91c (same addrs as MT6358); TOP_INT_STATUS0=0x19e group
+  order identical (PSC=bit2); PSC int bits pwrkey/homekey/_r/_r same
+  positions. BUCK/LDO/SCK/AUD group bases DIFFER from MT6358 -> new
+  gAthensPMICGroups table (BUCK 1418/1424 n1, LDO 1b14/1b28 n2,
+  PSC 910/91c n1, SCK 528/534 n1, BM c32/c4a n2, HK f92/f9e n1,
+  AUD 2328/2334 n1, MISC 188/194 n1).
+- Patch 0178 (commit a23679b): NEW iokit/Kernel/arm/AthensPMIC.{h,cpp}
+  + hid/AthensPMICKeys.cpp (mirrors VivaPMIC/VivaPMICKeys, MT6359 map);
+  VivaPwrap.cpp +AthensPMIC.h include + writeAllowed() now also
+  whitelists gAthensPMICGroups; KernelConfigTables +2 match entries
+  (mt6359-pmic->AthensPMIC, mt6359-keys->AthensPMICKeys); files.arm64 +2.
+  Viva drivers untouched (user request: separate device driver).
+- KEYMAP: ADT keys node already (0=POWER,1=VOL_UP) per Realme dts
+  (PWRKEY=power, HOMEKEY=vol up). Keypad node keymap bit0->VOL_DOWN is
+  still a MEASURE guess - needs live 'VIVA KP: unmapped bit' logs.
+- RISKS to verify on device: (a) VivaPwrap pwrap IP on MT6853@10026000
+  assumed same USPI block as MT6781@1000d000 - INIT_DONE0 handshake
+  will show; (b) EINT118->GIC212 path via VivaEINT; (c) KP_MEM only
+  works if LK left scanning on.
+- CI: push-run 43284810028 lacks drop_patches (will fail 0175 gate -
+  ignore); authoritative dispatch 43284849223 with drop 0161/0164/0165
+  + verify SWEETABR,takeover hce,AthensPMIC,MT6359 keys,mt6359-pmic,polls.
+- TOUCH still untouched: needs MTK SPI4 host @11018000 + Novatek
+  NT36672C noflash (139KB fw, EINT14 irq, GPIO33 reset, 9.6MHz, 1080x2400
+  10pt). No SPI driver exists in tree - biggest remaining driver task.
