@@ -160,11 +160,16 @@ void shim_main(uint64_t dtb, uint64_t sctlr_el2_entry)
 
 	stage = "loader";
 	uint64_t fb = videolfb_base(dtb);
+	/* The previous boot's panic screen still sits in LK's framebuffer DRAM.
+	 * Persist it to UFS before con_clear_rows erases it; reported below. */
+	uint32_t fbdump = ufs_dump_fb(fb ? fb : FB_BASE, FB_STRIDE * FB_H,
+	    FB_W, FB_H, FB_STRIDE);
 	if (fb)
 		con_fb = (volatile uint32_t *)fb;
 	/* Clear only the text area: kernel checkpoint bands (rows 700+) survive
 	 * a warm reset, so a reset loop still shows how far the kernel got. */
 	con_clear_rows(BLACK, 600);
+	con_hex2("FBDUMP", "rc=", fbdump, "bytes=", FB_STRIDE * FB_H);
 	con_str("SHIM", "athens: xnu loader");
 	con_hex2("EL", "el=", rsr("CurrentEL") >> 2, "wdt=", rd32(TOPRGU_WDT_MODE));
 	con_hex("DTB", dtb);

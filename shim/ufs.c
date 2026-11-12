@@ -403,3 +403,46 @@ void test_ufs(void)
 		return;
 	list_partitions(elba, nent);
 }
+
+/* Framebuffer dump: the previous boot's screen (panic text included) survives
+ * a warm reset in the LK framebuffer's DRAM. Runs before the console clears
+ * it: copies fb pixels to userdata so recovery can render them off-line.
+ * Zone: header block at last-4096, pixels at [last-4095, last-1282].
+ * Silent by design - the caller reports rc after the console is usable. */
+uint32_t
+ufs_dump_fb(uint64_t fb_pa, uint32_t fb_bytes, uint32_t w, uint32_t h, uint32_t stride)
+{
+	static uint8_t data[BLOCK] __attribute__((aligned(4096)));
+	uint8_t lun;
+	uint64_t last;
+
+	if (ufs_takeover())
+		return 1;
+	if (find_userdata(&lun, &last) || last < 8192)
+		return 2;
+
+	const uint8_t *p = (const uint8_t *)(uintptr_t)fb_pa;
+	uint32_t nblocks = (fb_bytes + BLOCK - 1) / BLOCK;
+	uint32_t zone = ((uint32_t)last - 1282) - ((uint32_t)last - 4095) + 1;
+	if (nblocks > zone)
+		nblocks = zone;
+	uint32_t slot = (uint32_t)last - 4095;
+	for (uint32_t off = 0; off < nblocks; off += 16) {
+		uint32_t nb = nblocks - off;
+		if (nb > 16)
+			nb = 16;
+		if (write_blocks(lun, slot + off, nb, p + (uint64_t)off * BLOCK))
+			return 3;
+	}
+	zero(data, BLOCK);
+	for (int i = 0; i < 6; i++)
+		data[i] = "SHIMFB"[i];
+	for (int i = 0; i < 8; i++) {
+		data[8 + i] = (uint8_t)(w >> (8 * i));
+		data[16 + i] = (uint8_t)(h >> (8 * i));
+		data[24 + i] = (uint8_t)(stride >> (8 * i));
+		data[32 + i] = (uint8_t)(((uint64_t)nblocks * BLOCK) >> (8 * i));
+		data[40 + i] = (uint8_t)(fb_pa >> (8 * i));
+	}
+	return write_blocks(lun, (uint32_t)last - 4096, 1, data) ? 4 : 0;
+}

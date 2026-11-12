@@ -1,5 +1,60 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ATHENS HANDOFF 2026-11-12b - SHIM UFS WRITE PATH WORKS; FB DUMP ADDED (read first) <<<
+
+SHIM UFS HARVEST CONFIRMED WORKING. With UFS_BASE=0x11270000 (MediaTek,
+fixed in f1722eb; Qualcomm 0x1d84000 was wrong) the shim writes userdata
+fine: pull shows `SHIMPRAM` header + nonzero pram dump.
+
+CRITICAL PULL-OFFSET BUG FOUND: userdata sdc59 = 53,452,177,408 bytes =
+13,049,848 4K blocks exactly (earlier notes said 13,044,966 - misdivision).
+The kernel writes its 1025-block log at partition blocks [13048823,
+13049847] (first_block+nblocks-1025 in device LBAs, sdc59 is
+partition-relative). Pulls at skip=13043941/13043684 were ~4900 blocks too
+early and read zeros - the "empty tail" was a READ error, not a write
+failure. Correct pull window covering everything (see zone map):
+  dd if=/dev/block/sdc59 bs=4096 skip=13045751 count=4097
+
+ZONE MAP (partition-relative, last = 13049847):
+  [13045752, 13048565] SHIMFB pixel data (2814 blocks, fb dump - NEW)
+  13045751             "SHIMFB" header: w,h,stride,bytes,fb_pa (le u64s at +8)
+  [13048567, 13048821] shim pram harvest data (255 blocks)
+  13048566             "SHIMPRAM" header
+  [13048823, 13049847] kernel's own 1025-block log tail (SWEETPAN records)
+
+RUN-3 DECODE (pull logs/athens-highmem-run3-pull.bin):
+- pram region 0x1bfeff000 = pure DRAM garbage (0xff/0xdfef pattern, no
+  strings): the highmem kernel NEVER wrote its panic log -> dies before
+  debug_log_init, i.e. VERY early with the "Unaligned kernel data abort"
+  (esr 0x96000061, far 0xfffffe301551040, kernel_task tid 101) seen on
+  screen.
+- kernel tail zone still holds run-6 leftovers on disk (tokd 0xc25cc000,
+  pa 0xe0000000 poolscan records) - disk persistence, not fresh writes.
+- BootArgs handoff is 64-bit clean (loader.c audited); mkadt already
+  carves pram out of dram-size correctly (no overlap bug).
+
+NEW: shim ufs_dump_fb() (ufs.c, called first thing in shim_main before
+con_clear_rows) copies the LK framebuffer (from /chosen/atag,videolfb,
+fallback FB_BASE) to the SHIMFB zone. The previous boot's panic SCREEN
+survives a warm reset in fb DRAM -> recovery pull + offline render gives
+the panic text (pc/registers) without photos. Boot flow: panic ->
+reboot auto-boots our flashed image -> shim dumps fb+pram -> XNU
+probably panics again (harmless) -> PitchBlack -> pull.
+
+IMAGE: shim/out/athens-boot-highmem.img sha256
+3d5b57f79c0a2162ed4d47b9926143222dd698180822318a120e990c1ee56f91
+= kernel 4475c6ea (CI 43212579684) + shim with ufs_harvest_pram +
+ufs_dump_fb + MediaTek UFS_BASE. Built: NDK clang
+(.../ndk/27.0.12077973/.../clang.exe --target=aarch64-none-elf -DATHENS),
+ld.lld, viva-bootimg.py repack backup/boot.img Image.gz ... --ramdisk
+shim/out/athens-payload.bin (payload already highmem phys_base
+0x100000000 mem_size 0xbfeff000).
+
+NEXT: flash -> panic -> reboot (image reflashes automatically? it is in
+boot partition; a normal reboot boots it again) -> recovery -> pull
+skip=13045751 -> render SHIMFB pixels to PNG -> read panic PC -> fix
+highmem early-boot abort.
+
 ## >>> ATHENS HANDOFF 2026-11-12 - HIGHMEM MOVE, PATCH REBASED ON TRUE CI TREE (read first) <<<
 
 STRATEGY: move the XNU window to the high DRAM bank so every known
