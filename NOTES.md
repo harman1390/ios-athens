@@ -1273,3 +1273,14 @@ recovery so unreadable; ring log dies with panic so panics never flush.
   false-trip ZCHECK. All ml_static_mfree targets are below topOfKernelData
   by construction, so the tokd gate covers all three ranges.
 
+
+### Build 43192237918 landed + booted
+
+- CI: success 8m56s; verify gate printed all 7 markers (ZCHECK, POOLSCAN,
+  PTD, used-freed, STATICFREE, sweet_ufs_diag_write, sweet_staticfree_dump).
+- kernel sha256 868d88144441b7143e6f0e60d49227b97ea3933402ce824502c728cb5c8916a6
+- image  sha256 3f34899bc0756fc1cd4bcebcf7eac63e6bcd30a9cec75aa19589962ff06b36ad
+- cmdline: ufs-rw diag set + cpus=1 sweetuaf=1 sweetwatch=1 zlog1=vm_objects -zc
+- fastboot boot ~10:08Z; device left fastboot. Watch screen / pull tail via
+  PitchBlack. Expect records: layout, zcheck/poolscan slots, console-panic.
+
