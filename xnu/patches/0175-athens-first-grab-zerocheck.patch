@@ -70,7 +70,7 @@ legitimately patterns free pages, so the checks stand down when set.
  	MACRO_END
  
  /* Same assert at the zone boundary: every page a zone just obtained
-@@ -1098,6 +1101,352 @@
+@@ -1098,6 +1101,365 @@
  		}
  	}
  }
@@ -107,6 +107,7 @@ legitimately patterns free pages, so the checks stand down when set.
 +extern vm_map_address_t phystokv(pmap_paddr_t pa);  /* osfmk/arm64/arm_vm_init.c */
 +extern void flush_dcache64(addr64_t addr, unsigned count, int phys); /* osfmk/arm/caches_internal.h */
 +extern int sweet_ufs_diag_write(const char *tag, const void *data, size_t len); /* bsd/dev/sweet_ufs.c */
++extern int sweet_staticfree_dump(char *buf, size_t len); /* osfmk/arm64/machine_routines.c */
 +
 +#define SWEET_FG_MAX_PN	(1u << 18)			/* ppnums: PAs below 4 GiB */
 +static uint32_t sweet_fg_bits[SWEET_FG_MAX_PN / 32];
@@ -250,15 +251,21 @@ legitimately patterns free pages, so the checks stand down when set.
 +		    BootArgs ? (unsigned long long)BootArgs->topOfKernelData : 0,
 +		    (unsigned long long)avail_end);
 +		{
-+			char rec[256];
++			static char rec[3072];
++			int rn;
 +			/* The console ring may never flush again after the panic,
-+			 * so persist through the polled UFS path now. */
-+			snprintf(rec, sizeof(rec),
++			 * so persist through the polled UFS path now. The appended
++			 * static-free table lets the PA be classified without the
++			 * ring (early-boot LAYOUT lines never reach the pull). */
++			rn = snprintf(rec, sizeof(rec),
 +			    "ZCHECK pn 0x%x pa 0x%llx bad %u off +0x%x w0 0x%016llx w1 0x%016llx tokd 0x%llx aend 0x%llx\n",
 +			    pn, (unsigned long long)pa, bad, off, w0, w1,
 +			    BootArgs ? (unsigned long long)BootArgs->topOfKernelData : 0,
 +			    (unsigned long long)avail_end);
-+			sweet_ufs_diag_write("zcheck", rec, strlen(rec));
++			if (rn > 0 && (size_t)rn < sizeof(rec)) {
++				rn += sweet_staticfree_dump(rec + rn, sizeof(rec) - (size_t)rn);
++			}
++			sweet_ufs_diag_write("zcheck", rec, (size_t)rn);
 +		}
 +		panic("SWEET ZCHECK: page was dirty before its first handout "
 +		    "- stray write into the free pool");
@@ -362,10 +369,13 @@ legitimately patterns free pages, so the checks stand down when set.
 +			    (unsigned long long)mach_absolute_time(),
 +			    (unsigned long long)sweet_scan_hits);
 +			if (sweet_scan_hits <= 4) {
-+				char rec[256];
++				static char rec[3072];
++				int rn;
 +				/* Persist the first few hits through the polled UFS
-+				 * path: a later panic can kill the ring flush. */
-+				snprintf(rec, sizeof(rec),
++				 * path: a later panic can kill the ring flush. The
++				 * appended static-free table classifies the PA without
++				 * needing the ring. */
++				rn = snprintf(rec, sizeof(rec),
 +				    "POOLSCAN %s pn 0x%x qs %u color %u pa 0x%llx "
 +				    "off +0x%x w0 0x%016llx w1 0x%016llx t %llu hit %llu "
 +				    "tokd 0x%llx aend 0x%llx\n",
@@ -376,7 +386,10 @@ legitimately patterns free pages, so the checks stand down when set.
 +				    (unsigned long long)sweet_scan_hits,
 +				    BootArgs ? (unsigned long long)BootArgs->topOfKernelData : 0,
 +				    (unsigned long long)avail_end);
-+				sweet_ufs_diag_write("poolscan", rec, strlen(rec));
++				if (rn > 0 && (size_t)rn < sizeof(rec)) {
++					rn += sweet_staticfree_dump(rec + rn, sizeof(rec) - (size_t)rn);
++				}
++				sweet_ufs_diag_write("poolscan", rec, (size_t)rn);
 +			}
 +			if (sweet_scan_mode >= 2) {
 +				panic("SWEET POOLSCAN: free page modified - "
@@ -423,7 +436,7 @@ legitimately patterns free pages, so the checks stand down when set.
  #endif /* ARM64_BOARD_CONFIG_SWEET */
  
  __startup_func
-@@ -3875,6 +4224,17 @@
+@@ -3875,6 +4237,17 @@
  
  	pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
  
@@ -441,7 +454,7 @@ legitimately patterns free pages, so the checks stand down when set.
  	if (__improbable(mem->vmp_realtime)) {
  		if (!page_queues_locked) {
  			vm_page_lock_queues();
-@@ -4538,6 +4898,15 @@
+@@ -4538,6 +4911,15 @@
  					local_freeq = mem;
  					pg_count++;
  
@@ -457,7 +470,7 @@ legitimately patterns free pages, so the checks stand down when set.
  					pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
  				}
  			} else {
-@@ -6790,6 +7159,13 @@
+@@ -6790,6 +7172,13 @@
  	 */
  	assert(vm_page_verify_contiguous(pages, npages));
  
@@ -473,7 +486,46 @@ legitimately patterns free pages, so the checks stand down when set.
  			vm_page_zero_fill(m);
 --- a/osfmk/arm64/machine_routines.c
 +++ b/osfmk/arm64/machine_routines.c
-@@ -1782,6 +1782,7 @@
+@@ -1768,6 +1768,38 @@
+ }
+ 
+ 
++/* SWEET: ml_static_mfree ranges enter the free pool with live
++ * contents below topOfKernelData and are excluded from the never-used
++ * zero canary. Keep the ranges here so every diag record can carry
++ * the table - a hit PA is then classifiable without the console ring
++ * (early-boot lines are gone before the ring exists). */
++#define SWEET_SF_MAX 32
++struct sweet_sfree_range {
++	uint64_t va, size, pa_lo, pa_hi;
++};
++struct sweet_sfree_range sweet_sfree_ranges[SWEET_SF_MAX];
++unsigned int sweet_sfree_count;
++
++extern uint64_t avail_end;
++
++int
++sweet_staticfree_dump(char *buf, size_t len)
++{
++	int n = snprintf(buf, len, "STATICFREE n %u tokd 0x%llx aend 0x%llx\n",
++	    sweet_sfree_count,
++	    BootArgs ? (unsigned long long)BootArgs->topOfKernelData : 0,
++	    (unsigned long long)avail_end);
++	for (unsigned int i = 0; i < sweet_sfree_count && (size_t)n < len; i++) {
++		n += snprintf(buf + n, len - (size_t)n,
++		    "SF%u va 0x%llx sz 0x%llx pa 0x%llx..0x%llx\n", i,
++		    (unsigned long long)sweet_sfree_ranges[i].va,
++		    (unsigned long long)sweet_sfree_ranges[i].size,
++		    (unsigned long long)sweet_sfree_ranges[i].pa_lo,
++		    (unsigned long long)sweet_sfree_ranges[i].pa_hi);
++	}
++	return n;
++}
++
+ /*
+  *	Routine:        ml_static_mfree
+  *	Function:
+@@ -1782,6 +1814,7 @@
  	ppnum_t     ppn;
  	uint32_t    freed_pages = 0;
  	uint32_t    freed_kernelcache_pages = 0;
@@ -481,7 +533,7 @@ legitimately patterns free pages, so the checks stand down when set.
  
  
  	/* It is acceptable (if bad) to fail to free. */
-@@ -1810,6 +1811,9 @@
+@@ -1810,6 +1843,9 @@
  
  
  			vm_page_create(ppn, (ppn + 1));
@@ -491,7 +543,17 @@ legitimately patterns free pages, so the checks stand down when set.
  			freed_pages++;
  			if (paddr_cur >= arm_vm_kernelcache_phys_start && paddr_cur < arm_vm_kernelcache_phys_end) {
  				freed_kernelcache_pages++;
-@@ -1824,6 +1828,15 @@
+@@ -1821,9 +1857,25 @@
+ 	vm_page_wire_count_initial -= freed_pages;
+ 	vm_page_kernelcache_count -= freed_kernelcache_pages;
+ 	vm_page_unlock_queues();
++	if (freed_pages && sweet_sfree_count < SWEET_SF_MAX) {
++		struct sweet_sfree_range *r = &sweet_sfree_ranges[sweet_sfree_count++];
++		r->va = vaddr;
++		r->size = size;
++		r->pa_lo = ptoa_64(first_ppn);
++		r->pa_hi = ptoa_64(ppn);
++	}
  #if     DEBUG
  	kprintf("ml_static_mfree: Released 0x%x pages at VA %p, size:0x%llx, last ppn: 0x%x, +%d bad\n", freed_pages, (void *)vaddr, (uint64_t)size, ppn, bad_page_cnt);
  #endif
@@ -621,7 +683,21 @@ legitimately patterns free pages, so the checks stand down when set.
  	return 0;
  }
  
-@@ -948,23 +951,60 @@
+@@ -891,6 +894,13 @@
+  */
+ #define SWEET_LOG_SIZE          (4u << 20)
+ #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
++/* The last 256 blocks of the on-disk window are reserved for SWEETPAN
++ * records (console-panic transcript at blk 0, diag slots at
++ * SWEET_DIAG_BASE). The ring flusher must not write there, or a live
++ * flush can clobber a persisted diagnostic record. */
++#define SWEET_RING_BLOCKS       (SWEET_LOG_SIZE / UFS_BLOCK - 256)
++#define SWEET_DIAG_BASE         (SWEET_RING_BLOCKS + 1)
++#define SWEET_DIAG_SLOT         8
+ #define SWEET_LOG_SECS          10u
+ 
+ static char sweet_log_ring[SWEET_LOG_SIZE];
+@@ -948,23 +958,66 @@
   * this runs in panic context; the caller passes the panic tag + payload and we
   * drop the host lock (the other CPUs are quiesced while the panic dumps run). */
  int
@@ -657,24 +733,30 @@ legitimately patterns free pages, so the checks stand down when set.
 +
 +/* SWEET: same record path, but safe to call outside panic context -
 + * takes the host lock so it cannot race a live strategy read on the
-+ * bounce buffer. Falls back to the unlocked path while panicking.
-+ * Diag records live in slots ABOVE the console-panic zone (65 blocks
-+ * for the 256K transcript) so panic-time transcript rewrites cannot
-+ * clobber them; each call advances the slot. */
++ * bounce buffer. Falls back to the unlocked path while panicking. */
++/* Diag records go to reserved slots in the top 1MiB of the log
++ * window, one slot per call, so a later console-panic transcript
++ * (blk 0..63) or ring flush can never overwrite them. The panic path
++ * uses the same slot range: only the locking differs. */
 +int
 +sweet_ufs_diag_write(const char *tag, const void *data, size_t len)
 +{
 +	static int diag_slot;
 +	int r, slot;
 +
-+	if (panic_active()) {
-+		return sweet_ufs_panic_write(tag, data, len);
-+	}
-+	slot = 72 + diag_slot * 8;
-+	if (slot + 16 > SWEET_LOG_BLOCKS) {
++	slot = SWEET_DIAG_BASE + diag_slot * SWEET_DIAG_SLOT;
++	if (slot + SWEET_DIAG_SLOT > SWEET_LOG_BLOCKS) {
 +		return -1;
 +	}
 +	diag_slot++;
++	/* One record must fit its slot: cap the payload so header + data
++	 * never spill into the next slot or past the window. */
++	if (len > (SWEET_DIAG_SLOT - 1) * UFS_BLOCK) {
++		len = (SWEET_DIAG_SLOT - 1) * UFS_BLOCK;
++	}
++	if (panic_active()) {
++		return sweet_ufs_record_write((uint64_t)slot, tag, data, len);
++	}
 +	lck_mtx_lock(&sweet_ufs_lock);
 +	r = sweet_ufs_record_write((uint64_t)slot, tag, data, len);
 +	lck_mtx_unlock(&sweet_ufs_lock);
@@ -684,3 +766,38 @@ legitimately patterns free pages, so the checks stand down when set.
  /* SWEET: while panicking, accumulate the console transcript into a static
   * buffer and rewrite the panic record with the growing text on every write.
   * Called from _cnputs (panic context, interrupts off); ufs_write_blocks is
+@@ -981,6 +1034,15 @@
+ 		return;
+ 	}
+ 	size_t n = (size_t)size;
++	if (sweet_panic_len == 0) {
++		/* First panic-time write: persist the layout + static-free table
++		 * into a diag slot, so a hit PA can be classified from the pull
++		 * even though the ring lost the early-boot lines. */
++		extern int sweet_staticfree_dump(char *buf, size_t len);
++		static char lay[3072];
++		int ln = sweet_staticfree_dump(lay, sizeof(lay));
++		sweet_ufs_diag_write("layout", lay, (size_t)ln);
++	}
+ 	if (n > sizeof(sweet_panic_text) - sweet_panic_len) {
+ 		n = sizeof(sweet_panic_text) - sweet_panic_len;
+ 	}
+@@ -1020,8 +1082,16 @@
+ 		while (pos < total && !error) {
+ 			uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
+ 			uint32_t blk = off / UFS_BLOCK;
+-			uint64_t need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
+-			uint32_t n = (uint32_t)MIN(MIN(need, (uint64_t)(SWEET_LOG_SIZE / UFS_BLOCK - blk)),
++			uint64_t need;
++			uint32_t n;
++			if (blk >= SWEET_RING_BLOCKS) {
++				/* Skip the reserved record zone; those ring bytes are
++				 * lost on disk but pos still advances. */
++				pos += SWEET_LOG_SIZE - off;
++				continue;
++			}
++			need = ((uint64_t)off % UFS_BLOCK + (total - pos) + UFS_BLOCK - 1) / UFS_BLOCK;
++			n = (uint32_t)MIN(MIN(need, (uint64_t)(SWEET_RING_BLOCKS - blk)),
+ 			    (uint64_t)(BOUNCE_SIZE / UFS_BLOCK));
+ 			memcpy(bounce, sweet_log_ring + (uint64_t)blk * UFS_BLOCK, n * UFS_BLOCK);
+ 			error = ufs_write_blocks(base + 1 + blk, n);
