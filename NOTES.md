@@ -1575,3 +1575,19 @@ recovery so unreadable; ring log dies with panic so panics never flush.
   SWEETABR) -> repack highmem image -> flash -> panic -> normal reboot
   (shim harvests ba page+pram) -> PitchBlack -> pull
   skip=13045495 count=4353 -> decode trap frame -> fault PC.
+
+### CI GOTCHA: drop_patches input is mandatory context (2026-11-12)
+
+- The known-good kernel builds (43212579684, 43234832624) were dispatched
+  with drop_patches="0161-athens-ufs-diag.patch 0164-athens-ufs-err.patch
+  0165-athens-tidt-assert.patch". Without it, 0161/0164/0165 apply and
+  shift sweet_ufs.c content, so 0175's :798 DMA hunk fails -> whole 0175
+  skipped -> all ZCHECK/POOLSCAN/ufsdma instrumentation missing.
+  ALWAYS pass the same drop_patches + verify_strings when dispatching.
+- verify gotcha: strings that are u64 immediates (0x5357454554414252)
+  never appear as ASCII in the binary; verify_strings needs char[]
+  constants (SWEETABR fixed in 0176 v2, commit 7d61816).
+- Run 43240706339 kernel: SWEETABR present (0176 applied+works), all
+  0175 strings absent (patch skipped) -> unusable for the mailbox test.
+- Rebuild: 43245911553 (@7d61816, drop_patches as above, verify incl
+  SWEETABR). If green -> repack highmem image -> flash test.
