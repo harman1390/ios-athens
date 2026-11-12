@@ -1,0 +1,460 @@
+--- a/iokit/Kernel/arm/VivaPwrap.cpp
++++ b/iokit/Kernel/arm/VivaPwrap.cpp
+@@ -29,6 +29,7 @@
+ #include <IOKit/IODeviceTreeSupport.h>
+ 
+ #include "VivaPMIC.h"
++#include "AthensPMIC.h"
+ 
+ #define PWRAP_INIT_DONE0        0x090
+ #define PWRAP_WACS2_EN          0x09c
+@@ -165,6 +166,15 @@
+ 		for (unsigned int n = 0; r->con0 != 0 && n < r->nregs; n++) {
+ 			uint32_t con = r->con0 + 6 * n;
+ 			if (addr == con + 2 || addr == con + 4 || addr == (uint32_t)(r->sta0 + 2 * n)) {
++				return true;
++			}
++		}
++	}
++	for (unsigned int g = 0; g < kAthensPMICGroupCount; g++) {
++		const AthensPMICGroupRegs *r = &gAthensPMICGroups[g];
++		for (unsigned int n = 0; r->con0 != 0 && n < r->nregs; n++) {
++			uint32_t con = r->con0 + 6 * n;
++			if (addr == con + 2 || addr == con + 4 || addr == (uint32_t)(r->sta0 + 2 * n)) {
+ 				return true;
+ 			}
+ 		}
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -108,6 +108,16 @@
+     "     'IONameMatch'     = 'mediatek,mt6366-keys';"
+     "   },"
+     "   {"
++    "     'IOClass'         = AthensPMIC;"
++    "     'IOProviderClass' = VivaDTNub;"
++    "     'IONameMatch'     = 'mediatek,mt6359-pmic';"
++    "   },"
++    "   {"
++    "     'IOClass'         = AthensPMICKeys;"
++    "     'IOProviderClass' = VivaDTNub;"
++    "     'IONameMatch'     = 'mediatek,mt6359-keys';"
++    "   },"
++    "   {"
+     "     'IOClass'         = VivaGPIO;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+     "     'IONameMatch'     = 'mediatek,mt6781-gpio';"
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -21,6 +21,7 @@
+ iokit/Kernel/arm/VivaPwrap.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/VivaEINT.cpp                                    optional iokitcpp
+ iokit/Kernel/arm/VivaPMIC.cpp                                    optional iokitcpp
++iokit/Kernel/arm/AthensPMIC.cpp                                  optional iokitcpp
+ iokit/Kernel/arm/VivaIO.cpp                                      optional iokitcpp
+ iokit/Kernel/arm/VivaGPU.cpp                                     optional iokitcpp
+ iokit/Kernel/arm/VivaGPUUserClient.cpp                           optional iokitcpp
+@@ -31,6 +32,7 @@
+ iokit/Kernel/arm/hid/SweetHID.cpp                                optional iokitcpp
+ iokit/Kernel/arm/hid/VivaKeypad.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/VivaPMICKeys.cpp                            optional iokitcpp
++iokit/Kernel/arm/hid/AthensPMICKeys.cpp                          optional iokitcpp
+ iokit/Kernel/arm/hid/VivaGT9896.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+diff --git a/iokit/Kernel/arm/AthensPMIC.h b/iokit/Kernel/arm/AthensPMIC.h
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/AthensPMIC.h
+@@ -0,0 +1,88 @@
++/*
++ * athens (MT6853): the PMIC bus for the MediaTek MT6359. Reuses VivaPwrap
++ * (the SoC's PMIC wrapper, pwrap@10026000) for register access; AthensPMIC
++ * owns the PMIC interrupt line (EINT 118 via VivaEINT) and hands PMIC
++ * interrupt groups to its children (AthensPMICKeys).
++ *
++ * Register map is MT6359's own (include/linux/mfd/mt6359/registers.h,
++ * mainline; key semantics from drivers/input/keyboard/mtk-pmic-keys.c
++ * mt6359_regs). It is NOT the MT6358/MT6366 layout VivaPMIC uses: TOPSTATUS
++ * is 0x2a (not 0x28), SWCID at 0xa carries chip id 0x59, and the BUCK/LDO/
++ * SCK/AUD group bases differ. PSC/BM/HK/MISC bases coincide with MT6358.
++ *
++ * Device tree: /arm-io/pwrap/pmic/keys; each level publishes its children
++ * as VivaDTNub nubs, so drivers match them by "compatible" as usual.
++ */
++#ifndef _IOKIT_ARM_ATHENSPMIC_H
++#define _IOKIT_ARM_ATHENSPMIC_H
++
++#include <IOKit/IOService.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IOLocks.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOInterruptEventSource.h>
++
++/* PMIC interrupt groups (MT6359 "sp_top"), in TOP_INT_STATUS0 bit order
++ * (enum mt6359_irq_top_status_shift in mt6359/core.h: identical to MT6358). */
++enum {
++	kAthensPMICGroupBUCK = 0, kAthensPMICGroupLDO = 1, kAthensPMICGroupPSC = 2,
++	kAthensPMICGroupSCK = 3, kAthensPMICGroupBM = 4, kAthensPMICGroupHK = 5,
++	kAthensPMICGroupAUD = 7, kAthensPMICGroupMISC = 8,
++	kAthensPMICGroupCount = 9,
++};
++
++/*
++ * Per group: register n has INT_CON = con0 + 6n (SET +2, CLR +4) and
++ * INT_STATUS = sta0 + 2n (write 1 to clear). con0 == 0: no such group
++ * (bit 6 is XPP, unused). Addresses from mt6359/registers.h; nregs is the
++ * count of 16-bit status words (LDO and BM define CON1/STATUS1 -> 2).
++ */
++struct AthensPMICGroupRegs {
++	uint16_t con0, sta0, nregs;
++	const char *name;
++};
++static const AthensPMICGroupRegs gAthensPMICGroups[kAthensPMICGroupCount] = {
++	{ 0x1418, 0x1424, 1, "BUCK" }, { 0x1b14, 0x1b28, 2, "LDO" }, { 0x0910, 0x091c, 1, "PSC" },
++	{ 0x0528, 0x0534, 1, "SCK" },  { 0x0c32, 0x0c4a, 2, "BM" },  { 0x0f92, 0x0f9e, 1, "HK" },
++	{ 0, 0, 0, "XPP" },            { 0x2328, 0x2334, 1, "AUD" }, { 0x0188, 0x0194, 1, "MISC" },
++};
++
++#define ATHENS_PMIC_TOP_INT_STATUS0 0x19e
++#define ATHENS_PMIC_SWCID          0x00a   /* chip id 0x59 in bits 15:8 */
++#define ATHENS_PMIC_TOPSTATUS      0x02a   /* bit 1 PWRKEY_DEB, bit 3 HOMEKEY_DEB (0 = pressed) */
++
++/* PSC group bits (same positions as MT6358: press, homekey, press_r, homekey_r) */
++#define ATHENS_PMIC_PSC_PWRKEY     (1u << 0)
++#define ATHENS_PMIC_PSC_HOMEKEY    (1u << 1)
++#define ATHENS_PMIC_PSC_PWRKEY_R   (1u << 2)
++#define ATHENS_PMIC_PSC_HOMEKEY_R  (1u << 3)
++
++class VivaPwrap;
++
++class AthensPMIC : public IOService {
++	OSDeclareDefaultStructors(AthensPMIC);
++public:
++	/* Work-loop context: `status` = the group's status register `index` (already acknowledged). */
++	typedef void (*Handler)(OSObject *target, uint32_t group, uint32_t index, uint32_t status);
++
++	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	virtual void free(void) APPLE_KEXT_OVERRIDE;
++	virtual IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE;
++
++	IOReturn read(uint32_t addr, uint32_t *value);
++	/* Enable `bits` of a group's interrupt register `index` and send them to `handler`. */
++	IOReturn registerGroupInterrupt(uint32_t group, uint32_t index, uint32_t bits, OSObject *target, Handler handler);
++
++private:
++	static void interruptOccurred(OSObject *owner, IOInterruptEventSource *src, int count);
++	void service(void);
++
++	VivaPwrap              *fPwrap;
++	IOWorkLoop             *fWorkLoop;
++	IOInterruptEventSource *fInterrupt;
++	OSObject               *fTarget[kAthensPMICGroupCount];
++	Handler                 fHandler[kAthensPMICGroupCount];
++	uint32_t                fInterrupts, fStray;
++};
++
++#endif /* _IOKIT_ARM_ATHENSPMIC_H */
+diff --git a/iokit/Kernel/arm/AthensPMIC.cpp b/iokit/Kernel/arm/AthensPMIC.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/AthensPMIC.cpp
+@@ -0,0 +1,156 @@
++/*
++ * athens (MT6853): MT6359 PMIC on the pwrap bus.
++ * Matches /arm-io/pwrap/pmic ("mediatek,mt6359-pmic").
++ *
++ * Same structure as VivaPMIC (MT6366): the PMIC has one interrupt line
++ * (EINT 118, level high, via VivaEINT.cpp) for all its interrupt groups.
++ * At start every group's interrupts are disabled and pending ones cleared
++ * (LK leaves some on, which would hold the line high), then children
++ * enable only what they handle with registerGroupInterrupt(). pwrap access
++ * sleeps on a lock, so groups are serviced on this driver's work loop
++ * while EINT keeps the line masked.
++ *
++ * PMIC writes go through VivaPwrap::writePMIC, which only accepts the
++ * interrupt enable SET/CLR and status registers (the athens group table
++ * is whitelisted there too).
++ */
++#include <pexpert/arm64/board_config.h>
++
++#if defined(SWEET)
++#include <IOKit/IOLib.h>
++#include "VivaPMIC.h"
++#include "AthensPMIC.h"
++
++OSDefineMetaClassAndStructors(AthensPMIC, IOService);
++
++IOWorkLoop *
++AthensPMIC::getWorkLoop(void) const
++{
++	return fWorkLoop;
++}
++
++bool
++AthensPMIC::start(IOService *provider)
++{
++	fPwrap = OSDynamicCast(VivaPwrap, provider->getProvider());
++	fWorkLoop = IOWorkLoop::workLoop();
++	if (fPwrap == NULL || fWorkLoop == NULL || !IOService::start(provider)) {
++		IOLog("ATHENS PMIC: no pwrap\n");
++		return false;
++	}
++	uint32_t id = 0;
++	if (read(ATHENS_PMIC_SWCID, &id) != kIOReturnSuccess || (id & 0xff00) != 0x5900) {
++		IOLog("ATHENS PMIC: swcid 0x%04x is not an MT6359, not touching it\n", id);
++		return false;
++	}
++
++	/* Everything off and acknowledged; log what LK had left on. */
++	for (unsigned int g = 0; g < kAthensPMICGroupCount; g++) {
++		const AthensPMICGroupRegs *r = &gAthensPMICGroups[g];
++		for (unsigned int n = 0; r->con0 != 0 && n < r->nregs; n++) {
++			uint32_t con = 0, sta = 0;
++			read(r->con0 + 6 * n, &con);
++			read(r->sta0 + 2 * n, &sta);
++			if (con | sta) {
++				IOLog("ATHENS PMIC: %s[%u] was enabled 0x%04x pending 0x%04x\n", r->name, n, con, sta);
++			}
++			fPwrap->writePMIC(r->con0 + 6 * n + 4, 0xffff);
++			fPwrap->writePMIC(r->sta0 + 2 * n, 0xffff);
++		}
++	}
++
++	fInterrupt = IOInterruptEventSource::interruptEventSource(this, &AthensPMIC::interruptOccurred, provider, 0);
++	if (fInterrupt == NULL || fWorkLoop->addEventSource(fInterrupt) != kIOReturnSuccess) {
++		IOLog("ATHENS PMIC: no interrupt\n");
++		return false;
++	}
++	fInterrupt->enable();
++	IOLog("ATHENS PMIC: MT6359 swcid 0x%04x, all PMIC interrupts off, line on\n", id);
++	registerService();
++	VivaDTNub::publishChildren(this, provider);
++	return true;
++}
++
++IOReturn
++AthensPMIC::read(uint32_t addr, uint32_t *value)
++{
++	return fPwrap->readPMIC(addr, value);
++}
++
++void
++AthensPMIC::free(void)
++{
++	if (fInterrupt != NULL) {
++		fInterrupt->disable();
++		if (fWorkLoop != NULL) {
++			fWorkLoop->removeEventSource(fInterrupt);
++		}
++	}
++	OSSafeReleaseNULL(fInterrupt);
++	OSSafeReleaseNULL(fWorkLoop);
++	IOService::free();
++}
++
++IOReturn
++AthensPMIC::registerGroupInterrupt(uint32_t group, uint32_t index, uint32_t bits, OSObject *target, Handler handler)
++{
++	if (group >= kAthensPMICGroupCount || gAthensPMICGroups[group].con0 == 0 ||
++	    index >= gAthensPMICGroups[group].nregs || bits > 0xffff || handler == NULL) {
++		return kIOReturnBadArgument;
++	}
++	const AthensPMICGroupRegs *r = &gAthensPMICGroups[group];
++	IOReturn ret = fWorkLoop->runActionBlock(^IOReturn {
++		fTarget[group] = target;
++		fHandler[group] = handler;
++		fPwrap->writePMIC(r->sta0 + 2 * index, bits);           /* stale ones */
++		return fPwrap->writePMIC(r->con0 + 6 * index + 2, bits); /* enable */
++	});
++	IOLog("ATHENS PMIC: %s[%u] bits 0x%04x -> %s (%d)\n", r->name, index, bits,
++	    target ? target->getMetaClass()->getClassName() : "?", ret);
++	return ret;
++}
++
++void
++AthensPMIC::interruptOccurred(OSObject *owner, IOInterruptEventSource *src __unused, int count __unused)
++{
++	AthensPMIC *self = OSDynamicCast(AthensPMIC, owner);
++	if (self != NULL) {
++		self->service();
++	}
++}
++
++/* Work loop: every pending group, until the PMIC lets the line go. */
++void
++AthensPMIC::service(void)
++{
++	fInterrupts++;
++	for (int round = 0; round < 8; round++) {
++		uint32_t top = 0;
++		if (read(ATHENS_PMIC_TOP_INT_STATUS0, &top) != kIOReturnSuccess || (top & 0x1ff) == 0) {
++			return;
++		}
++		for (unsigned int g = 0; g < kAthensPMICGroupCount; g++) {
++			const AthensPMICGroupRegs *r = &gAthensPMICGroups[g];
++			if (!(top & (1u << g)) || r->con0 == 0) {
++				continue;
++			}
++			for (unsigned int n = 0; n < r->nregs; n++) {
++				uint32_t sta = 0;
++				if (read(r->sta0 + 2 * n, &sta) != kIOReturnSuccess || sta == 0) {
++					continue;
++				}
++				fPwrap->writePMIC(r->sta0 + 2 * n, sta);
++				if (fHandler[g] != NULL) {
++					fHandler[g](fTarget[g], g, n, sta);
++				} else {
++					/* nobody asked for it: off */
++					fStray++;
++					fPwrap->writePMIC(r->con0 + 6 * n + 4, sta);
++					IOLog("ATHENS PMIC: stray %s[%u] 0x%04x disabled\n", r->name, n, sta);
++				}
++			}
++		}
++	}
++	IOLog("ATHENS PMIC: line still pending after 8 rounds\n");
++}
++#endif /* SWEET */
+diff --git a/iokit/Kernel/arm/hid/AthensPMICKeys.cpp b/iokit/Kernel/arm/hid/AthensPMICKeys.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/hid/AthensPMICKeys.cpp
+@@ -0,0 +1,138 @@
++/*
++ * athens (MT6853): the MT6359 PMIC's key inputs as an HID button service.
++ * Matches /arm-io/pwrap/pmic/keys ("mediatek,mt6359-keys"), a child of
++ * AthensPMIC (../AthensPMIC.cpp). On athens PWRKEY is the side (power)
++ * button and HOMEKEY is volume up (Realme dts: kpd-hw-pwrkey /
++ * kpd-hw-rstkey, CONFIG_KPD_PWRKEY_USE_PMIC; mtk-pmic-keys.c mt6359_regs).
++ *
++ * The PMIC raises PSC interrupts on press and release (key_release_irq);
++ * the state is then read from TOPSTATUS (PWRKEY_DEB bit 1, HOMEKEY_DEB
++ * bit 3, 0 = pressed), so a lost edge cannot leave a key stuck. The ADT
++ * property "keymap" = <key usage> pairs: key 0 = PWRKEY, 1 = HOMEKEY,
++ * usage on the HID consumer page.
++ */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOWorkLoop.h>
++
++#include "IOHIDEventService.h"
++#include "IOHIDEvent.h"
++#include "IOHIDUsageTables.h"
++#include "../AthensPMIC.h"
++
++extern "C" uint64_t mach_absolute_time(void);
++
++#define PMIC_KEYS       2
++static const uint32_t kKeyDebBit[PMIC_KEYS] = { 1u << 1, 1u << 3 };    /* TOPSTATUS */
++static const uint32_t kKeyPress[PMIC_KEYS] = { ATHENS_PMIC_PSC_PWRKEY, ATHENS_PMIC_PSC_HOMEKEY };
++static const uint32_t kKeyRelease[PMIC_KEYS] = { ATHENS_PMIC_PSC_PWRKEY_R, ATHENS_PMIC_PSC_HOMEKEY_R };
++
++class AthensPMICKeys : public IOHIDEventService {
++	OSDeclareDefaultStructors(AthensPMICKeys);
++
++public:
++	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	virtual IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE;
++
++protected:
++	virtual UInt32 getPrimaryUsagePage() APPLE_KEXT_OVERRIDE { return kHIDPage_Consumer; }
++	virtual UInt32 getPrimaryUsage() APPLE_KEXT_OVERRIDE { return kHIDUsage_Csmr_ConsumerControl; }
++	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 0x6359; }
++	virtual OSString *getProduct() APPLE_KEXT_OVERRIDE { return OSString::withCString("MT6359 keys"); }
++
++private:
++	static void pmicInterrupt(OSObject *target, uint32_t group, uint32_t index, uint32_t status);
++	void update(uint32_t status);
++	void send(unsigned int key, bool down);
++
++	AthensPMIC *fPMIC;
++	UInt32    fUsage[PMIC_KEYS];
++	bool      fDown[PMIC_KEYS];
++	uint32_t  fEvents;
++};
++
++OSDefineMetaClassAndStructors(AthensPMICKeys, IOHIDEventService);
++
++/* The PMIC's work loop: interrupts and HID clients are serialized on it. */
++IOWorkLoop *
++AthensPMICKeys::getWorkLoop(void) const
++{
++	return fPMIC ? fPMIC->getWorkLoop() : NULL;
++}
++
++bool
++AthensPMICKeys::start(IOService *provider)
++{
++	fPMIC = OSDynamicCast(AthensPMIC, provider->getProvider());
++	if (fPMIC == NULL || !IOHIDEventService::start(provider)) {
++		IOLog("ATHENS PMIC KEYS: no PMIC\n");
++		return false;
++	}
++	fUsage[0] = kHIDUsage_Csmr_Power;
++	fUsage[1] = kHIDUsage_Csmr_VolumeIncrement;
++	OSData *map = OSDynamicCast(OSData, provider->getProperty("keymap"));
++	if (map != NULL) {
++		const uint32_t *cells = (const uint32_t *)map->getBytesNoCopy();
++		for (unsigned int i = 0; i + 1 < map->getLength() / sizeof(uint32_t); i += 2) {
++			if (cells[i] < PMIC_KEYS) {
++				fUsage[cells[i]] = cells[i + 1];
++			}
++		}
++	}
++	uint32_t top = 0;
++	fPMIC->read(ATHENS_PMIC_TOPSTATUS, &top);
++	for (unsigned int k = 0; k < PMIC_KEYS; k++) {
++		fDown[k] = (top & kKeyDebBit[k]) == 0;
++	}
++	IOReturn ret = fPMIC->registerGroupInterrupt(kAthensPMICGroupPSC, 0,
++	    ATHENS_PMIC_PSC_PWRKEY | ATHENS_PMIC_PSC_HOMEKEY | ATHENS_PMIC_PSC_PWRKEY_R | ATHENS_PMIC_PSC_HOMEKEY_R,
++	    this, &AthensPMICKeys::pmicInterrupt);
++	IOLog("ATHENS PMIC KEYS: power -> 0x%x, home -> 0x%x, topstatus 0x%04x (%d)\n",
++	    (unsigned)fUsage[0], (unsigned)fUsage[1], top, ret);
++	if (ret != kIOReturnSuccess) {
++		return false;
++	}
++	registerService();
++	return true;
++}
++
++void
++AthensPMICKeys::pmicInterrupt(OSObject *target, uint32_t group __unused, uint32_t index __unused, uint32_t status)
++{
++	AthensPMICKeys *self = OSDynamicCast(AthensPMICKeys, target);
++	if (self != NULL) {
++		self->update(status);
++	}
++}
++
++void
++AthensPMICKeys::send(unsigned int k, bool down)
++{
++	fDown[k] = down;
++	fEvents++;
++	IOLog("ATHENS PMIC KEYS: key 0x%x %s\n", (unsigned)fUsage[k], down ? "down" : "up");
++	IOHIDEvent *event = IOHIDEvent::keyboardEvent(mach_absolute_time(), kHIDPage_Consumer, fUsage[k], down);
++	if (event != NULL) {
++		dispatchEvent(event);
++		event->release();
++	}
++}
++
++/* Work loop. State from TOPSTATUS; a press and release that both happened before we looked is a tap. */
++void
++AthensPMICKeys::update(uint32_t status)
++{
++	uint32_t top = 0;
++	if (fPMIC->read(ATHENS_PMIC_TOPSTATUS, &top) != kIOReturnSuccess) {
++		return;
++	}
++	for (unsigned int k = 0; k < PMIC_KEYS; k++) {
++		bool down = (top & kKeyDebBit[k]) == 0;
++		if (down != fDown[k]) {
++			send(k, down);
++		} else if (!down && (status & kKeyPress[k]) && (status & kKeyRelease[k])) {
++			send(k, true);
++			send(k, false);
++		}
++	}
++}
