@@ -75,6 +75,9 @@ HIGHMEM RUN 1 RESULT (commit bc850d1 image 5b0c10b6):
   (last_lba = 13044965 for this device; skip = 13043684).
   Decode: SHIMPRAM header then 1 MiB of pram verbatim; panic strings
   are printable runs inside it.
+- BUGFIX bc850d1->next: shim ufs.c used Qualcomm UFS_BASE 0x1d84000;
+  MediaTek is ufshci@0x11270000 (ATHENS.md). Takeover always failed ->
+  zero harvest zone on the first harvest attempt.
 - GOTCHA: drop_patches is SPACE-separated FULL FILENAMES:
   -f "drop_patches=0161-athens-ufs-diag.patch 0164-athens-ufs-err.patch
   0165-athens-tidt-assert.patch". Runs 43205794257 (runner never
