@@ -82,6 +82,30 @@ fallback. `ATHENS_CMDLINE` replaces the whole command line.
 8. ⬜ GUI usable: unlock, home screen, Settings/CC/notification center
 9. ⬜ Identity: serial/model/region/MLB/UDID in Settings → About (mkadt ATHENS_IDENTITY)
 10. ⬜ Storage fills userdata (~50+ GiB visible in Settings)
+
+## Live-dt decisive evidence (adb harvest 2026-11-12)
+
+- `reserved-memory/reserve-memory-dram_r1_dummy_read` alloc-ranges =
+  `0xc0000000 + 0x3fe60000` → the dummy-read engine can allocate/write
+  ANYWHERE in `[0xc0000000, 0xffe60000)` = the entire former XNU pool.
+  run6's stray hit at `0xe0000000` sits inside it. r0's range is
+  `[0x56000000, 0x5ff00000)`. The highmem window `[0x100000000,
+  0x1bffff000)` is outside BOTH engines' reach — the move is
+  evidence-backed, not a guess. (Writer identity still inferred: range
+  proves the engine *can* write there, not that it *does*.)
+- `reserve-memory-dram_rX_dummy_read` sizes are 0x1000 with alignment
+  0x1000 — the engine DMAs 4 KiB dummy reads for DRAM calibration.
+- `/chosen/linux,initrd-start` = 0x47c80000 → LK ramdisk base is the
+  same 0x47c80000 as viva (mkboot payload guard verified).
+- DRAM is ONE bank reg=<0x40000000 0x180000000> (6 GiB, ends
+  0x1bfffffff); lowmem and highmem windows are slices of it.
+- Touch (spi4@0x11018000 child `touchscreen@0`): compat `oppo,tp_noflash`,
+  chip-name `OPPO_TP_NOFLASH` → SPI driver `novatek,nf_nt36672c`;
+  irq-gpio 14 (EINT14), reset-gpio 33, spi-max 9.6 MHz, 1080x2400,
+  16TXx36RX, 10-pt, incell. Fingerprint goodix_fp on spi5@0x11019000.
+- dsi@0x14013000 has 4 panel children; this unit boots
+  `jdi,nt36672c,dphy,vdo,120` (cmdline `lcm=`). toprgu@0x10007000
+  matches the shim's TOPRGU address (verified).
 11. ⬜ (stretch) Metal on Mali-G57 MC3 via viva-gpu; Wi-Fi via connac work
 
 ## Handoff (2026-11-06, Phase 0 partial — device session 1)

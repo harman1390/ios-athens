@@ -70,14 +70,56 @@ UNVERIFIED ASSUMPTIONS (flagged; fix or prove before relying on them):
 - athens-mkboot.sh payload-size bound uses VIVA's LK ramdisk/DTB addrs
   (0x47c80000/0x4bc80000), marked MEASURE, never confirmed on athens.
   Guard only; payload ~17 MiB works in practice — low risk.
+  UPDATE 2026-11-12: `/chosen/linux,initrd-start` on the live device =
+  0x47c80000 → ramdisk base VERIFIED (matches viva by design).
 - `ufsdma=0xfd000000` low-bank DMA carve: guessed PA, boot-arg
   relocatable, never exercised (kernel dies before ufs init).
+  UPDATE 2026-11-12: live reserved-memory map shows 0xfd000000 falls
+  inside the free gap [0x80000000,0xbfe00000) minus atf/atf-log/mbist
+  pockets — 0xfd000000 is inside DRAMC r1 alloc-range? NO: r1 range is
+  [0xc0000000,0xffe60000) so 0xfd000000 IS within reach of the
+  dummy-read engine. RELOCATE to a pocket the engine can't use, or keep
+  in high bank — still guessed, must verify before ufs-rw.
 - panic_scan region 0x1bdf00000: stale hardcoded PA, harmless scan.
 - CKPT_MAGIC 0xc256bf00: lowmem-era PA, kernel never writes (dead diag).
 - CPU clock-frequency props in ADT (2.4/2.0 GHz): descriptive only.
 - athens_devices peripheral nodes: addresses from mt6853.dts, driver
   register semantics partly from viva MT6781 — untested until boot.
 - 0176 mailbox itself: compiles/applies cleanly, hardware test pending.
+
+LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
+- DRAM: single contiguous bank reg=<0x40000000 0x180000000> = 6 GiB,
+  0x40000000-0x1bfffffff. Our low/high windows are slices of ONE bank.
+- dram_r1_dummy_read alloc-ranges = 0xc0000000+0x3fe60000 → engine can
+  write ANYWHERE in [0xc0000000,0xffe60000) = the entire old lowmem
+  pool (run6 hit 0xe0000000 inside it). r0 range [0x56000000,0x5ff00000).
+  Highmem window [0x100000000,0x1bffff000) is outside BOTH → stray-writer
+  hypothesis upgraded to EVIDENCE-BACKED (range proven, writer identity
+  still inferred — the engine *may* write, not proven that it *does*).
+- Touch: spi4@11018000 child touchscreen@0 compat "oppo,tp_noflash"
+  (chip-name OPPO_TP_NOFLASH → novatek nf_nt36672c SPI driver),
+  irq-gpio 14 (EINT14), reset-gpio 33, spi-max 9.6 MHz, 1080x2400,
+  16TXx36RX, 10-pt, incell_screen. Driver binds on live device.
+- Panel: dsi@14013000 lists 4 variants; this unit's cmdline lcm=
+  nt36672c_fhdp_dsi_vdo_dphy_jdi_120 → JDI NT36672C 120 Hz confirmed.
+  atag videolfb-lcmname showed nt3595/nt50358 (different-variant dtbo).
+- ufs: ufshci@11270000 reg size 0x2300, lanes-per-direction=2,
+  ufs_mphy@0x11fa0000. androidboot.boot_devices confirms 11270000.ufshci.
+- toprgu@0x10007000 → shim TOPRGU_WDT_MODE address VERIFIED correct.
+- spi5@0x11019000 = goodix_fp fingerprint (oppo,oppo_fp).
+- /chosen/linux,initrd-start = 0x47c80000 → LK ramdisk base verified.
+- atag videolfb blob embeds fb base 0x77e20000 (ours, verified) AND a
+  separate fb_base_l=0x7e605000 (kernel-side fb?); shim's 0x77e20000
+  is the working LK fb.
+- ram_console@0x4d000000 (64 KiB, no-map), pstore/ramoops@0x4d010000
+  (0xe0000, cmdline ramoops.*), log_store@0x7ffbf000 (0x40000) —
+  MTK warm-reset log buffers, candidates for extra panic capture.
+- pwrap@0x10026000, spmi@0x10027000, gpio@0x10005000, apxgpt@0x10008000,
+  emimpu@0x10226000, dramc@0x10230000, sspm@0x10400000, scp@0x10500000 —
+  all live addresses for peripheral drivers.
+- i2c buses populated live: 2-8 (devices at 18/1a/1c/50/52/54, 08/63,
+  1a/1b/51, 1a/34/4e/64, 3e/58, 0a/55, 10 — map to PMIC/camera/charge/
+  audio; touch is NOT on i2c).
 
 ## Boot chain
 
