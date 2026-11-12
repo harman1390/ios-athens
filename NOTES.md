@@ -58,6 +58,23 @@ HIGHMEM BUILD READY (run 43212579684, commit eea384f):
   (ends 0x1bffff000, below reserved dramc-rk1 page).
 - UFS DMA: kmem_alloc_contig <4G fails (pool all >4G) -> fallback
   ml_io_map carve at ufsdma=0xfd000000 (boot-arg relocates).
+
+HIGHMEM RUN 1 RESULT (commit bc850d1 image 5b0c10b6):
+- Panic on screen: "Unaligned kernel data abort", esr 0x96000061,
+  far 0xfffffe301551040, kernel_task tid 101 -- BEFORE sweet_ufs_init
+  (sdc59 tail all zeros). NOT the stray-writer signature; looks like a
+  deterministic highmem-path bug (truncated-PA pointer or early-VM code
+  that assumed the window base). Panic text VAs are at +0x800000000 vs
+  Mach-O (gVirtBase moved with the high bank).
+- New persistence channel: shim ufs_harvest_pram() copies the previous
+  boot's pram panic log to UFS on every boot: zone = userdata
+  [last_lba-1281, last_lba-1026] (header "SHIMPRAM" at -1281, data at
+  [-1280,-1026]), below the kernel's own 1025-block tail so the kernel
+  never clobbers it. Pull BOTH with:
+    dd bs=4096 skip=<last_lba-1281> count=2306
+  (last_lba = 13044965 for this device; skip = 13043684).
+  Decode: SHIMPRAM header then 1 MiB of pram verbatim; panic strings
+  are printable runs inside it.
 - GOTCHA: drop_patches is SPACE-separated FULL FILENAMES:
   -f "drop_patches=0161-athens-ufs-diag.patch 0164-athens-ufs-err.patch
   0165-athens-tidt-assert.patch". Runs 43205794257 (runner never
