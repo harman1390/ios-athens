@@ -3,7 +3,27 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
-## >>> ATHENS HANDOFF 2026-11-12f - EARLY BOOT COMPLETE; RO ROOT WAS THE WALL (read first) <<<
+## >>> ATHENS HANDOFF 2026-11-12g - RW BOOT REACHES APPLE LOGO + BAR (read first) <<<
+
+RUN-8 (ufsrw=1 rootrw=1, kernel 3119523f): mount panic gone; boot
+reached the **Apple logo with a moving progress bar** - the iOS
+kernel bootscreen rendering on the LK framebuffer. Waited 30+ min,
+bar still moving slowly (CPU-rendered console + first-RW-boot fs
+chores). User then rebooted to recovery - end state unknown: the
+pull only had run-7's stale panic tail (run-8 produced no panic ->
+no panic flush, and the shim pram harvest only catches panic logs).
+
+VISIBILITY FIX: sweetlog=1 (patch 0047 ring) now enabled - needs
+ufsrw, which we have. Every console byte (kernel + /dev/console
+daemon output) flushes to the userdata tail zone every 5 s, so a
+HUNG boot leaves a complete console log - no more blind spots.
+
+IMAGE f3466ce7 (same kernel): cmdline = RW set + sweetlog=1
+ufslogsecs=5. Flash -> wait at bar -> recovery -> pull
+skip=13045495 count=4353 -> decode ring with tools/sweet-log.py.
+Pull zone for SWEETLOG = same tail blocks we already pull.
+
+## >>> ATHENS HANDOFF 2026-11-12f - EARLY BOOT COMPLETE; RO ROOT WAS THE WALL (superseded) <<<
 
 RUN-7 RESULT (unentitled_ios_sim_launch=1 fixed it): **launchd ran
 the ENTIRE early-boot sequence.** Pulled kernel log tail shows:
