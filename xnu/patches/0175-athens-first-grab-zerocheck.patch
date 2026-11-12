@@ -1,28 +1,6 @@
 --- a/osfmk/vm/vm_resident.c
 +++ b/osfmk/vm/vm_resident.c
-@@ -1041,20 +1041,39 @@
- 	}
- }
- 
-+/* Stale-translation differential: flush all EL1 TLB entries on every
-+ * page hand-out. If corruption stops, a stale/aliased mapping was the
-+ * writer - narrow the flush afterward. sweettlbi=0 disables. */
-+static int sweet_tlbi_mode = -1;
-+static inline void
-+sweet_tlbi_flush(void)
-+{
-+	if (sweet_tlbi_mode < 0) {
-+		sweet_tlbi_mode = 1;
-+		PE_parse_boot_argn("sweettlbi", &sweet_tlbi_mode, sizeof(sweet_tlbi_mode));
-+	}
-+	if (sweet_tlbi_mode) {
-+		__asm__ volatile("tlbi vmalle1is; dsb ish; isb" ::: "memory");
-+	}
-+}
-+
- /* Assert at the point a page leaves the allocator, not at detection
-  * time: a page handed out while still queue-linked or wired is the
-  * double-allocation case - the other owner keeps writing VM bookkeeping
+@@ -1047,14 +1047,17 @@
   * into memory the new owner believes is private. */
  #define SWEET_CHECK_HANDOUT(m)                                              \
  	MACRO_BEGIN                                                         \
@@ -48,15 +26,7 @@
  	MACRO_END
  
  /* Same assert at the zone boundary: every page a zone just obtained
-@@ -1063,6 +1082,7 @@
- void
- sweet_check_zone_pages(vm_offset_t addr, uint32_t npages)
- {
-+	sweet_tlbi_flush();
- 	for (uint32_t i = 0; i < npages; i++, addr += PAGE_SIZE) {
- 		ppnum_t pn = pmap_find_phys(kernel_pmap, addr);
- 		if (!pn) {
-@@ -1081,6 +1101,365 @@
+@@ -1081,6 +1084,365 @@
  		}
  	}
  }
@@ -422,7 +392,7 @@
  #endif /* ARM64_BOARD_CONFIG_SWEET */
  
  __startup_func
-@@ -3858,6 +4237,17 @@
+@@ -3858,6 +4220,17 @@
  
  	pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
  
@@ -440,7 +410,7 @@
  	if (__improbable(mem->vmp_realtime)) {
  		if (!page_queues_locked) {
  			vm_page_lock_queues();
-@@ -4521,6 +4911,15 @@
+@@ -4521,6 +4894,15 @@
  					local_freeq = mem;
  					pg_count++;
  
@@ -456,7 +426,7 @@
  					pmap_clear_noencrypt(VM_PAGE_GET_PHYS_PAGE(mem));
  				}
  			} else {
-@@ -6773,6 +7172,13 @@
+@@ -6773,6 +7155,13 @@
  	 */
  	assert(vm_page_verify_contiguous(pages, npages));
  
@@ -555,15 +525,6 @@
  }
  
  /*
-@@ -2065,7 +2117,7 @@
- nonspeculative_timebase(void)
- {
- #if defined(HAS_ACNTVCT)
--	return __builtin_arm_rsr64("S3_4_c15_c10_6");
-+	return __builtin_arm_rsr64("ACNTVCT_EL0");
- #elif __ARM_ARCH_8_6__
- 	return __builtin_arm_rsr64("CNTVCTSS_EL0");
- #else
 --- a/osfmk/arm/pmap/pmap.c
 +++ b/osfmk/arm/pmap/pmap.c
 @@ -2629,7 +2629,17 @@
@@ -669,60 +630,6 @@
  
  #define REG_CAP         0x00
  #define REG_IS          0x20
-@@ -313,7 +314,7 @@
- 	}
- 	if (memcmp(b, "EFI PART", 8) != 0) {
- 		printf("SWEET UFS: LUN %u has no GPT\n", su.lun);
--		return ENXIO;
-+		return 63;
- 	}
- 	uint64_t entry_lba;
- 	uint32_t nent, esz;
-@@ -322,7 +323,7 @@
- 	memcpy(&esz, b + 84, 4);
- 	if (esz != 128 || nent == 0 || nent * esz > BOUNCE_SIZE) {
- 		printf("SWEET UFS: unsupported GPT entries %u x %u\n", nent, esz);
--		return ENXIO;
-+		return 64;
- 	}
- 	error = ufs_read_blocks(entry_lba, (nent * esz + UFS_BLOCK - 1) / UFS_BLOCK);
- 	if (error) {
-@@ -347,7 +348,7 @@
- 		memcpy(&first, e + 32, 8);
- 		memcpy(&last, e + 40, 8);
- 		if (last < first) {
--			return ENXIO;
-+			return 65;
- 		}
- 		*firstp = first;
- 		*nblocksp = last - first + 1;
-@@ -548,7 +549,7 @@
- 	uint32_t hce = ufs_rd(REG_HCE), hcs = ufs_rd(REG_HCS);
- 	if (!(hce & 1) || !(hcs & HCS_DP) || !(hcs & HCS_UTRLRDY)) {
- 		printf("SWEET UFS: host not ready (hce 0x%x hcs 0x%x)\n", hce, hcs);
--		return ENXIO;
-+		return 62;
- 	}
- 	if (ufs_rd(REG_UTRLDBR)) {
- 		printf("SWEET UFS: requests outstanding from the bootloader\n");
-@@ -558,7 +559,7 @@
- 	if (((su.dma_pa + DMA_SIZE - 1) >> 32) && !(ufs_rd(REG_CAP) & CAP_64AS)) {
- 		printf("SWEET UFS: DMA memory at 0x%llx but the host has no 64-bit addressing\n",
- 		    su.dma_pa);
--		return ENXIO;
-+		return 69;
- 	}
- 	ufs_wr(REG_IE, 0);                      /* polled operation */
- 	ufs_wr(REG_IS, ufs_rd(REG_IS));
-@@ -785,7 +786,7 @@
- 	    SecureDTGetProperty(node, "reg", (void const **)&reg, &size) != kSuccess ||
- 	    size < 2 * sizeof(uintptr_t)) {
- 		printf("SWEET UFS: no /sweet-ufs node in the device tree\n");
--		return ENXIO;
-+		return 61;
- 	}
- 	PE_parse_boot_argn("ufsroot", want, sizeof(want));
- 	uint32_t rw = 0;
 @@ -798,17 +799,31 @@
  
  	su.regs = ml_io_map(reg[0], reg[1]);
@@ -763,33 +670,7 @@
  	su.secsize = DEV_BSIZE;
  	uint32_t lun_arg = UINT32_MAX;
  	PE_parse_boot_argn("ufslun", &lun_arg, sizeof(lun_arg));
-@@ -832,7 +847,10 @@
- 			break;
- 		}
- 		if (lun == lun_last) {
--			error = ENXIO;
-+			/* Preserve the real per-LUN error (62 host, 63 no GPT, 64
-+			 * bad entries, 65 bad bounds, ENOENT missing part, or the
-+			 * scsi/transport error) instead of masking it with 66. */
-+			error = lun_error;
- 		}
- 	}
- 	lck_mtx_unlock(&sweet_ufs_lock);
-@@ -842,11 +860,11 @@
- 
- 	su.bmajor = bdevsw_add(-1, &sweet_ufs_bdevsw);
- 	if (su.bmajor < 0) {
--		return ENXIO;
-+		return 67;
- 	}
- 	su.cmajor = cdevsw_add_with_bdev(-1, &sweet_ufs_cdevsw, su.bmajor);
- 	if (su.cmajor < 0) {
--		return ENXIO;
-+		return 68;
- 	}
- 	su.bdev = makedev(su.bmajor, 0);
- 	devfs_make_node(su.bdev, DEVFS_BLOCK, UID_ROOT, GID_OPERATOR, 0640, "ufsroot0");
-@@ -870,6 +888,8 @@
+@@ -870,6 +885,8 @@
  	sweet_usb_probe();
  	/* Stray-writer tripwire: canary pages + scanner (bsd/dev/sweet_watch.c). */
  	sweet_watch_start();
@@ -798,7 +679,7 @@
  	return 0;
  }
  
-@@ -888,6 +908,13 @@
+@@ -888,6 +905,13 @@
   */
  #define SWEET_LOG_SIZE          (4u << 20)
  #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
@@ -812,7 +693,7 @@
  #define SWEET_LOG_SECS          10u
  
  static char sweet_log_ring[SWEET_LOG_SIZE];
-@@ -945,23 +972,66 @@
+@@ -945,23 +969,66 @@
   * this runs in panic context; the caller passes the panic tag + payload and we
   * drop the host lock (the other CPUs are quiesced while the panic dumps run). */
  int
@@ -881,7 +762,7 @@
  /* SWEET: while panicking, accumulate the console transcript into a static
   * buffer and rewrite the panic record with the growing text on every write.
   * Called from _cnputs (panic context, interrupts off); ufs_write_blocks is
-@@ -978,6 +1048,15 @@
+@@ -978,6 +1045,15 @@
  		return;
  	}
  	size_t n = (size_t)size;
@@ -897,7 +778,7 @@
  	if (n > sizeof(sweet_panic_text) - sweet_panic_len) {
  		n = sizeof(sweet_panic_text) - sweet_panic_len;
  	}
-@@ -1017,8 +1096,16 @@
+@@ -1017,8 +1093,16 @@
  		while (pos < total && !error) {
  			uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
  			uint32_t blk = off / UFS_BLOCK;
