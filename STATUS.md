@@ -1,0 +1,78 @@
+# Athens bring-up status board
+
+**GOAL**: native iOS (xnu-8796, iOS 16 era) boot to GUI with working touch on
+**realme Narzo 30 Pro 5G / realme 7 5G — RMX2117 "athens", Indian variant**
+(MediaTek MT6853 / Dimensity 800U). Root lives in the existing `userdata`
+partition (no GPT changes). Android user data is expendable; bootloaders,
+recovery, modem, persist and `backup/` partition dumps must stay intact.
+
+This file is the current-state matrix — what works, what is broken, what is
+untested, and which commit/build last verified it. `NOTES.md` is the
+chronological log; `ATHENS.md` is the hardware reference. Update this board
+on every verified change so later work (touch, GPU, wifi, …) can spot
+regressions immediately.
+
+Legend: ✅ verified working · ⚠️ partially working/known-buggy ·
+❌ broken/regressed · ⬜ not started/untested
+
+## Boot chain
+
+| Item | Status | Evidence / last verified |
+|---|---|---|
+| Stock boot path | ✅ | `fastboot flash boot` reliable; `fastboot boot` silently fails on this device — always flash |
+| Shim loads at LK handoff | ✅ | EL2 → EL1 drop, watchdog kick, con output on LK fb (all runs) |
+| Shim 64-bit loader | ✅ | payload/segments/ADT/boot_args 64-bit clean (audited + highmem boot reached XNU) |
+| Shim → UFS write | ✅ | MediaTek `ufshci@0x11270000` (NOT Qualcomm 0x1d84000); `SHIMPRAM`/`SHIMFB` headers verified on disk |
+| Shim pram harvest | ✅ | `ufs_harvest_pram()` dumps pram regions to userdata [last-1280,last-1026] |
+| Shim fb dump | ⚠️ | `ufs_dump_fb()` works mechanically but captures LK's *fresh* splash — LK always redraws fb before shim runs, so it CANNOT recover panic screens |
+| Shim ba-page dump | ⬜ | `ufs_dump_ba()` in loader_boot, writes ba page [last-4352,last-4349] before zero64 — pending first capture |
+
+## Kernel / memory
+
+| Item | Status | Evidence / last verified |
+|---|---|---|
+| XNU reaches launchd (LOWMEM window) | ✅ | run-6-era boot: launchd tasks, fsck, mount-phase-1/2, FIPS POST in pram log |
+| ZCHECK/POOLSCAN/STATICFREE diag | ✅ | CI 43212579684 verified strings; run-6 pull decoded clean records |
+| Stray writer on LOWMEM | ❌ unfixed | run-6: 4 contiguous free pages dirtied at PA 0xe0000000 (~191 bad qwords each, t≈29 s) inside `dram_r1_dummy_read` alloc-range — suspect MTK DRAMC/SPM engine, roams per boot |
+| HIGHMEM window (0x100000000–0x1bfeff000) | ❌ broken | unaligned kernel data abort, esr 0x96000061, kernel_task tid 101, BEFORE panic/debug-log/UFS init — fault PC unknown, trap-frame capture build 43232381650 in progress |
+| HIGHMEM = writer containment? | ⬜ | can't evaluate until kernel survives the early abort |
+| Trap-frame mailbox | ⬜ | patch 0176: `panic_with_thread_kernel_state` copies saved_state to ba page tail ("SWEETABR"), shim persists it — pending CI kernel + flash |
+| UFS DMA carve | ⬜ | `ufsdma=0xfd000000` fallback for >4G pool; untested (dies before ufs init) |
+
+## Logging / persistence (the discipline that must not regress)
+
+| Item | Status | Notes |
+|---|---|---|
+| Kernel → UFS log tail | ✅ | 1025-block tail [13048823,13049847] (device LBA = first_block+nblocks−1025; sdc59 is partition-relative) |
+| Shim → UFS harvest | ✅ | zones below kernel tail — see zone map in NOTES.md |
+| Pull offsets | ✅ | **13,049,848 blocks exactly**; pull all zones: `dd if=/dev/block/sdc59 bs=4096 skip=13045495 count=4353` |
+| Panic screen capture | ❌ | impossible across reboot — LK redraws fb; fb dump removed as a capture path (left in shim, harmless) |
+| Screenshots | last resort only | all state should land in the UFS pull |
+
+## Storage / filesystem
+
+| Item | Status | Notes |
+|---|---|---|
+| `sweet_ufs` host driver | ⚠️ | works on lowmem boots (log tail writes verified); highmem path untested |
+| userdata GPT discovery | ✅ | LUN 2, partition 58 (sdc59), first LBA 0x272800 |
+| iOS root in userdata | ⬜ | iosroot/ios16-root.img exists; mount not yet exercised on highmem |
+
+## Peripherals (not started — do not regress the above when adding)
+
+| Item | Status | Reference |
+|---|---|---|
+| Framebuffer console | ✅ | LK fb 0x77e20000 1080×2400 stride 4352 (ARBG) — panic UI renders |
+| IOMobileFramebuffer / CoreAnimation | ⬜ | ios-sweet upstream has the full software-render stack to adapt |
+| Touch | ⬜ | GT9886 over i2c0@11e00000 (+apdma 0x10217080), SPI 112; populated node TBD on device |
+| Keys (PWR/VOL) | ⬜ | MT6359 via pwrap@10026000, EINT 118 |
+| Battery/charger | ⬜ | MT6359 FGADC + MT6360 |
+| Wi‑Fi/BT | ⬜ | CONNSYS MT6781+MT6631 — viva has the registry work |
+| GPU (Mali G57-MC3 @0x13000000) | ⬜ | out of scope until GUI stable; CPU rendering first |
+
+## Non-regression rules
+
+1. Writes stay inside `userdata` tail zones only — never other partitions.
+2. `backup/` images restore Android: boot/recovery/dtbo/lk/vbmeta untouched.
+3. Every build gets `verify_strings` in CI; every flash gets a recovery pull.
+4. `git status` may show unrelated WIP (AGENTS.md/LICENSE/docs) — don't treat as intended changes; don't stage them into diag commits.
+5. Pull offsets come from the 13,049,848-block count — recheck before trusting an "empty" read.
