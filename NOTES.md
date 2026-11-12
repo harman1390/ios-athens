@@ -1,5 +1,52 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+## >>> ATHENS HANDOFF 2026-11-12 - HIGHMEM MOVE, PATCH REBASED ON TRUE CI TREE (read first) <<<
+
+STRATEGY: move the XNU window to the high DRAM bank so every known
+32-bit-addressable MediaTek firmware engine physically cannot write it.
+Run 6 gave the clean stray-writer signal: 4 contiguous free pages at
+PA 0xe0000000-0xe0010000 (inside dram_r1_dummy_read alloc-range)
+dirtied ~29 s into boot, ~191 bad qwords each. Engine writes roam
+per boot -> reservation cannot fix this; moving the pool above 4G can.
+
+HIGHMEM STATE (all landed):
+- tools/mkadt.py: --athens --highmem => dram-base 0x100000000,
+  dram-size 0xbfeff000 (ends 0x1bffff000, below reserved dramc-rk1
+  page). FIXED BUG: output was nested under --athens-mem so plain
+  invocation wrote nothing (older runs silently reused stale ADTs).
+- mkpayload reads dram-base/size from ADT -> one flag relocates all.
+- shim/loader.c: verified 64-bit clean (uintptr_t/uint64_t).
+- kernel (0175): SWEET_FG_MAX_PN 1<<18 -> 1<<19 (covers high ppnums),
+  poison pn field widened to 24 bits, fixed low-bank DMA carve
+  (sweet_ufs kmem_alloc_contig falls back to ml_io_map'd fixed PA
+  window at 0xc4000000 when the general pool is all >4G; CAP_64AS
+  check retained).
+
+PATCH FAILURE + FIX (2026-11-12):
+- Run 43200619575 verify gate caught MISSING: SWEET ZCHECK --
+  patch failed to apply at sweet_ufs.c:799. Root cause: hand-built
+  .old.lf baselines had drifted from CI's real tree (earlier patches
+  like 0167 also touch the file). Fix: downloaded xnu-buildtree
+  artifact from last-good run 43192237918, reverse-applied the
+  4ec33a8 patch -> true pre-0175 baselines, regenerated diffs
+  (NOTE: repo files are CRLF, must tr -d '\r' before diffing vs LF
+  buildtree). Verified: applies clean + byte-identical on all 6 files.
+- Commit 3a0bd0b. IMPORTANT: plain `git push` (https) hangs/no auth;
+  push with `git push https://x-access-token:$(gh auth token)@github.com/
+  harman1390/ios-athens HEAD:athens`. Local `git status` shows
+  "ahead N" vs a stale origin ref -- check remote sha via
+  `gh api repos/.../branches/athens`.
+- BUILD IN FLIGHT: CI run 43205794257 (workflow_dispatch, athens,
+  drop 0161,0164,0165). If verify passes: artifact -> mkadt
+  --athens --athens-ufs --athens-bare --highmem -> mkpayload ->
+  athens-mkboot.sh -> `fastboot flash boot` (boot is reliable,
+  `fastboot boot` silently fails on this device) -> recovery ->
+  pull sdc59 tail -> decode SWEETPAN records.
+- Reading the result: no ZCHECK/POOLSCAN hit = writer is 32-bit
+  constrained, highmem is the containment -> continue to GUI.
+  Hit at pa>=0x100000000 = engine reaches high bank (worse);
+  hit below 4G = low-bank DMA region targeted (check carve).
+
 ## >>> ATHENS HANDOFF 2026-11-10 - 0175 ZERO-CANARY BUILT + MMIO AUDIT (read first) <<<
 
 Claude's split experiment (free pages: stray writer vs owner bug) is
