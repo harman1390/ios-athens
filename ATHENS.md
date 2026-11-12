@@ -103,6 +103,34 @@ fallback. `ATHENS_CMDLINE` replaces the whole command line.
   chip-name `OPPO_TP_NOFLASH` → SPI driver `novatek,nf_nt36672c`;
   irq-gpio 14 (EINT14), reset-gpio 33, spi-max 9.6 MHz, 1080x2400,
   16TXx36RX, 10-pt, incell. Fingerprint goodix_fp on spi5@0x11019000.
+- **Live FDT pulled from PitchBlack recovery 2026-11-12 (verified):**
+  - spi4@11018000: compatible `mediatek,mt6765-spi`, reg size 0x100,
+    GIC SPI 163 (+32 = INTID 195, /proc/interrupts shows GICv3 195
+    `11018000.spi4` level), clocks parent/sel/spi-clk,
+    `mediatek,pad-select`=0.
+  - touchscreen@0: `oppo,tp_noflash`/`OPPO_TP_NOFLASH`, irq-gpio
+    <2,14,0x2002> = EINT14 edge, reset-gpio <2,33,0>, spi-max-frequency
+    0x927c00 = 9.6 MHz, tx-rx 16x36, max-num 10, coords 1080x2400,
+    pinctrl default/suspend states.
+  - SPI4 pins (pinctrl/spimode_default/pins_cmd_dat): pinmux
+    <0xc02 0xd02 0x6102 0x6202> = GPIO12 MI, GPIO13 MO, GPIO97 CLK,
+    GPIO98 CSB, drive-strength 4.
+  - `/proc/interrupts` live: `mt-eint 14 Edge touchpanel` (firing),
+    `GICv3 195 11018000.spi4`, `mt-eint 80 Edge mtk-kpd-vol-down`,
+    `GICv3 106 Edge mtk-kpd` (= SPI 74 + 32, confirms SPI+32 convention),
+    `mt-eint 118 Level mt6358-irq` with children `mt6358-irq 48 pwrkey`,
+    `49 homekey`, `50 pwrkey_r`, `51 homekey_r` (PMIC key IRQs live).
+  - input devices: event1 `mtk-kpd` (10010000.kp), event2 `touchpanel`,
+    event3 `touchpanel_kpd`, event4 `qwerty`.
+  - **Buttons architecture (verified, changes earlier guess):**
+    volume-down = EINT 80 GPIO key (NOT the KP matrix); power = MT6359
+    PWRKEY; volume-up = MT6359 HOMEKEY (standard MTK mapping); the KP
+    matrix hw-init-map is ALL ZEROS (114 entries) -> matrix scan unused.
+    kp node compatible is `mediatek,kp` (not mt6781-keypad), key-debounce
+    0x400, pinctrl states named `volume_up_as_int`/`volume_down_as_int`.
+  - PMIC: `pwrap@10026000` has child `mt6359-pmic`; also
+    `pwraphal@10026000`, `pwrap_mpu@10026000` siblings; i2c5 has
+    `subpmic@34` + `subpmic_ldo@64` + `subpmic_pmic@1a` (MT6360 companion).
 - dsi@0x14013000 has 4 panel children; this unit boots
   `jdi,nt36672c,dphy,vdo,120` (cmdline `lcm=`). toprgu@0x10007000
   matches the shim's TOPRGU address (verified).

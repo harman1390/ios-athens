@@ -1792,3 +1792,31 @@ recovery so unreadable; ring log dies with panic so panics never flush.
 - TOUCH still untouched: needs MTK SPI4 host @11018000 + Novatek
   NT36672C noflash (139KB fw, EINT14 irq, GPIO33 reset, 9.6MHz, 1080x2400
   10pt). No SPI driver exists in tree - biggest remaining driver task.
+
+### RECOVERY DATA PULL + RUN-9 SWEETLOG (2026-11-12)
+
+- PitchBlack recovery ADB: live FDT + /proc/interrupts + input devices
+  dumped (all recorded in ATHENS.md "Live FDT" block - verified facts).
+- BUTTONS (verified, supersedes earlier guess): power=MT6359 PWRKEY,
+  vol-up=MT6359 HOMEKEY (both PSC irq via mt-eint 118, IRQs 48-51 on
+  mt6358-irq chip), vol-down=EINT 80 GPIO key (mtk-kpd-vol-down).
+  KP matrix hw-init-map is ALL ZEROS -> matrix scan unused; kp node
+  compat is mediatek,kp. => AthensPMICKeys (0178) covers power+vol-up;
+  vol-down still needs a small EINT-key driver (TODO patch 0179).
+  ADT keymap (0=POWER,1=VOL_UP) already correct.
+- TOUCH (verified): spi4 = mediatek,mt6765-spi @11018000 size 0x100,
+  GIC INTID 195 (SPI163+32), pins GPIO12 MI/13 MO/97 CLK/98 CSB
+  drive-str 4, child oppo,tp_noflash OPPO_TP_NOFLASH EINT14 irq
+  GPIO33 reset 9.6MHz 16x36 10pt 1080x2400. Needs: MTK SPI master
+  driver (spi-mt6765 register map) + NT36672C noflash protocol.
+- RUN-9 SWEETLOG decoded (logs/athens-run9-pull.bin, ring total
+  0x511a44): boot was ALIVE at 16:06:39 - launchd spawning user-domain
+  daemons at pid ~1030 (assistantd, tccd, wifianalyticsd, cryptexd).
+  NOT hung - user restarted mid-boot. Daemons crash-loop on missing
+  /var/run (cryptexd ns18/code2 ENOENT) and assistantd SIGABRT -
+  userspace issues to fix later, not boot blockers.
+- LESSON: 4MiB ring wraps in ~7min of userspace spam; early kernel
+  probe logs (VIVA KP/VIVA PWRAP/ATHENS PMIC) get evicted. For driver
+  verification rely on key-EVENT logs (post-boot) or add UFS snapshot.
+- GIC convention confirmed: DT stores SPI# (74->INTID106, 163->195);
+  mkadt spi() writes DT-style numbers - keypad/eint nodes correct.
