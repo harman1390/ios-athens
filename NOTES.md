@@ -36,8 +36,29 @@ PATCH FAILURE + FIX (2026-11-12):
   harman1390/ios-athens HEAD:athens`. Local `git status` shows
   "ahead N" vs a stale origin ref -- check remote sha via
   `gh api repos/.../branches/athens`.
-- BUILD IN FLIGHT: CI run 43209835164 (workflow_dispatch, athens).
-  GOTCHA: drop_patches is SPACE-separated FULL FILENAMES:
+HIGHMEM BUILD READY (run 43212579684, commit eea384f):
+- Root cause of the two verify-gate misses found: (1) my hand-built
+  baselines drifted; (2) dxb's own machine_routines.patch sorts after
+  0175-*.patch and flips ACNTVCT_EL0->S3_4_c15_c10_6 itself, so a hunk
+  copied from the apply tree (which lacks dxb patches) mismatched at
+  apply time and git apply skipped the WHOLE 0175 patch. Apply tree
+  also carries dropped-patch edits (0164 ENXIO->errcodes, 0174 tlbi
+  flush) that leaked into the diff. Final patch = pre-0175 buildtree
+  + 4ec33a8 + intended edits only. All 7 verify strings confirmed.
+- Kernel: run 43212579684 artifact, sha256
+  4475c6ead7f0797afe6a1439677cd17f94b92a36dd1ec682f1f8f48f4612fc0f
+- Image: shim/out/athens-boot-highmem.img sha256
+  d72fe4653d4193a2b184aef818381f3ca5f950945f7e2f14bbef0cfe37b5d50d
+  built via: PATH shim for `python`->python3 + ATHENS_HIGHMEM=1
+  tools/athens-mkboot.sh KERNEL backup/boot.img ufs-ro (script gained
+  ATHENS_HIGHMEM env -> adds --highmem to ADT_FLAGS; repack ran
+  viva-bootimg.py directly because WSL lacks clang for shim rebuild -
+  shim unchanged, loader already 64-bit clean).
+- Payload header verified: phys_base 0x100000000, mem_size 0xbfeff000
+  (ends 0x1bffff000, below reserved dramc-rk1 page).
+- UFS DMA: kmem_alloc_contig <4G fails (pool all >4G) -> fallback
+  ml_io_map carve at ufsdma=0xfd000000 (boot-arg relocates).
+- GOTCHA: drop_patches is SPACE-separated FULL FILENAMES:
   -f "drop_patches=0161-athens-ufs-diag.patch 0164-athens-ufs-err.patch
   0165-athens-tidt-assert.patch". Runs 43205794257 (runner never
   acquired - macos capacity) and 43208372029 (comma list broke rm)

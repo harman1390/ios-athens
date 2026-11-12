@@ -28,6 +28,10 @@ ufs-rw) ADT_FLAGS=(--athens --athens-ufs)
 	CMDLINE="$BASE ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 launchd_unsecure_cache=1" ;;
 *) echo "unknown stage $STAGE" >&2; exit 2 ;;
 esac
+# ATHENS_HIGHMEM=1 puts the XNU pool in the high DRAM bank (>4G): MTK
+# firmware engines whose reserved-memory alloc-ranges are 32-bit cannot
+# write there (run-6 hit at 0xe0000000 was inside dram_r1's range).
+[ "${ATHENS_HIGHMEM-0}" = 1 ] && ADT_FLAGS+=(--highmem)
 CMDLINE=${ATHENS_CMDLINE:-$CMDLINE}
 # ATHENS_EXTRA="cpus=6": set/replace single boot-args (XNU uses the first match)
 for arg in ${ATHENS_EXTRA-cpus=8}; do
