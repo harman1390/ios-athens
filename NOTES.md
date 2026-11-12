@@ -3,6 +3,55 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-12i - RUN-10: FACTORY ROOTFS WAS THE WALL; TWEAKED IMAGE REPACKING <<<
+
+RUN-10 PULL (logs/athens-run10-pull.txt, image 260f0d4c kernel 0179):
+boot was ALIVE at pull time - launchd spawning daemons at pid ~6485,
+12-min ring window (17:20:34->17:32:51 fake-epoch). NOT a kernel hang.
+- SpringBoard/backboardd: ZERO log output in window; AXSpringBoardServer
+  lookup fails every ~5 s from AccessibilityUI -> SpringBoard never
+  became functional.
+- "Crash loops" were mostly graceful exits: bluetoothd exit(0) ~70 ms
+  after spawn; imagent/identityservicesd/MobileInternetSharing/etc
+  exit(78) EX_CONFIG; launchd throttles+respawns (10 s backoff).
+- ROOT CAUSE (proven by mounting iosroot/ios16-root.img locally):
+  the flashed rootfs is the FACTORY build - Preferences/ had ONLY
+  .GlobalPreferences.plist; NO com.apple.migration.plist, NO
+  purplebuddy/springboard prefs, NO /private/var/containers. All
+  sweet-root-tweaks changes absent -> DataMigration ran (the ~60 min
+  bar) and half of userspace died on missing dirs.
+- Missing paths from ring (all ENOENT, exit 78): /var/run (73),
+  /tmp -> private/var/tmp (146), /var/mobile/Library/Caches (73),
+  /private/var/log/com.apple.xpc.launchd/launchd.log fopen (15153).
+  /var->private/var and /tmp->private/var/tmp symlinks DO exist in
+  the OS DMG; the TARGET dirs were never seeded.
+- accountsd CRASH sig 6, CommCenter CRASH sig 6 (expected, no
+  baseband). Poolscan: 4 never-used pages pa 0xe0000000+ in 12 min -
+  noise level, boot kept running; not the stall cause.
+- No SMP sample lines in retained ring (wrapped out or sampler
+  printf not reaching console ring).
+
+FIX APPLIED (local, no CI rebuild needed):
+- Mounted ios16-root.img (fsck -fy first), ran
+  tools/sweet-root-tweaks.py /mnt/iosroot -> all prefs landed
+  (migration LastSystemVersion=20H392, purplebuddy SetupDone/
+  SetupVersion=11, springboard BKNoWatchdogs, mini-buddy flags,
+  VirtualAudio disabled, StartRecorderServer off, containers/).
+- Created missing runtime dirs: private/var/{run,tmp(1777),log/
+  com.apple.xpc.launchd}, mobile/Library/Caches (501:501), and
+  chown'd Preferences dir+plists to 501:501 so cfprefsd can write.
+- sweet-root-tweaks.py gained runtime_dirs() (33 lines) so future
+  CI rootfs builds seed these permanently - commit pending.
+- Repacked via /tmp/stream-img2simg.py (viva-img2simg.py OOMs: it
+  buffers all chunks; streaming variant writes incrementally) ->
+  iosroot/ios16-root-tweaked.simg.
+
+NEXT: fastboot flash userdata ios16-root-tweaked.simg (device in
+PitchBlack recovery now; needs reboot to fastboot or flash via
+recovery dd of raw img). Then boot kernel 260f0d4c - expect the
+bar to move FAST past migration (LastSystemVersion present) and
+services to stay up. Watch for next missing-dir layer.
+
 ## >>> ATHENS HANDOFF 2026-11-12h - BUTTONS DONE (0178+0179), IMAGE READY; TOUCH+GPU RESEARCHED <<<
 
 CURRENT IMAGE: shim/out/athens-boot-highmem.img =
@@ -59,16 +108,14 @@ analysis - all checked against repo + CI logs, NOT guesses):
   security-status tuple (0,0,1,1) -> mobileactivationd takes the
   native Hactivation "Activated" branch (covers the data ark that
   sweet-root-tweaks skipped: "no mobileactivationd system container").
-- Flashed ios16-root.img provenance: local iosroot/ios16-root.img
-  (Nov 7 06:10) matches CI rootfs run 42305909620 (finished
-  2026-11-07T00:33Z). Its log shows sweet-root-tweaks.py RAN:
-  'pref com.apple.migration [DMUserDataDisposition,
-  LastSystemVersion]', purplebuddy SetupDone/SetupFinishedAllSteps/
-  SetupVersion, springboard BKNoWatchdogs, VirtualAudio disabled,
-  mini-buddy flags off. => the migration-skip + Setup-skip ARE in
-  the flashed image. The later rootfs run 42361811996 used
-  factory=true (0 tweak lines, 17ms fsck->simg gap) - DO NOT flash
-  that artifact; it has none of the bring-up tweaks.
+- Flashed ios16-root.img provenance - CORRECTED 12i: local
+  iosroot/ios16-root.img is the FACTORY build (run 42361811996,
+  factory=true; verified by mounting: Preferences had only
+  .GlobalPreferences.plist, no tweak plists, no containers/). NONE
+  of the sweet bring-up tweaks were on the device. Run
+  42305909620's artifact DID have them but was not what got flashed.
+  The tweaked image now exists locally as
+  iosroot/ios16-root-tweaked.simg (see 12i).
 - Patch 0056 (sweetfb 10 Hz throttle) is in xnu/patches, applied.
 - sweetscan: vm_resident.c defaults sweet_scan_mode=1 (report) with
   no boot arg - pool scanner already on.
