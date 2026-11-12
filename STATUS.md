@@ -146,7 +146,8 @@ LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
 | Kernel UFS host takeover | ✅ works | run-6 (0177): takeover + LUN scan + GPT probe + **rootfs mount + launchd exec attempted** — the whole storage chain works read-only |
 | Kernel reaches launchd | ✅ | run-6: pid 1 init exec'd /sbin/launchd — died only at the signature stage (below) |
 | launchd exec | ✅ | run-7: `unentitled_ios_sim_launch=1` fixed the WRONG_PLATFORM kill — launchd ran the full early-boot task chain (fsck→mount→FIPS POST→keybagd→usermanagerd→cache loader→"Early boot complete"→SpringBoard+xpcproxy spawns) |
-| Read-write root | ⬜ next | run-7 died `mount[3] exited status 1` — RO root can't create /tmp, /var/run, launchd.log; a mount phase hits EROFS on `mount -uw /`. RW image `8042501c` ready to flash |
+| Read-write root | ✅ boots | run-8 (ufsrw=1 rootrw=1): mount panic gone — boot reached **Apple logo + moving progress bar** (first iOS UI on hardware; kernel bootscreen rendering works) |
+| GUI stage | ⬜ in progress | run-8 booting to GUI — progress bar alive. Next known walls from upstream: IOMobileFramebuffer/display driver, then SpringBoard UI |
 | UFS DMA carve | ⚠️ replaced | `ufsdma=0xfd000000` sat INSIDE dram_r1 alloc-range — flawed. 0177: CAP_64AS (bit24 set in real read) → DMA from managed >4G pool; fallback moved to 0x4e000000 (below both dummy-read ranges) |
 | ufs_scsi silent-spin risk | ⚠️ patched | 0177: 2²⁸ hard poll cap + host-state dump — a stuck command now times out loudly instead of hanging |
 
