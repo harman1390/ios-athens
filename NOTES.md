@@ -1252,3 +1252,24 @@ recovery so unreadable; ring log dies with panic so panics never flush.
   ml_static_mfree range under DEVELOPMENT; record_write bzeros its extent.
 - Rebuilding: CI run 43191529298 (supersedes 43190643922).
 
+
+### Slot fix v2 + offline static-free check (commit 4ec33a8, CI 43192237918)
+
+- SLOT BUG FOUND in first fix: diag slots 72+ landed inside the live ring
+  flush region (base+1..base+1024), and panic-context diag_write still
+  wrote blk 0 where console-panic rewrites land. Both would lose records.
+- Now: top 256 blocks of the log window are reserved; ring flusher caps at
+  SWEET_RING_BLOCKS=768 and skips reserved blocks; diag slots at 769+8n in
+  BOTH locked and panic paths; record payload capped to slot size.
+- ml_static_mfree ranges kept in sweet_sfree_ranges[32]; every zcheck/
+  poolscan record appends the table; first panic console write emits a
+  "layout" record. Hit PAs now classifiable without the ring.
+
+- OFFLINE CHECK settled the PTD question: physmap delta = 0xfffffdef5e000000
+  (from node VA 0xfffffdf020694460 <-> pa 0xc2694460). ml_static_mfree #1636
+  frees physmap [gPhysBase, pa_of___TEXT) = ALL managed memory below the
+  kernel image. PTD pa 0xc2694460 sits in [0xc0000000,~0xc6ff0000) -> inside
+  static-free range 1. Legitimate pool usage; also THE population that can
+  false-trip ZCHECK. All ml_static_mfree targets are below topOfKernelData
+  by construction, so the tokd gate covers all three ranges.
+
