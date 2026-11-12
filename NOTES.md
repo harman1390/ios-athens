@@ -1,5 +1,8 @@
 # iOS 16 on sweet (Redmi Note 10 Pro, SM7150) - working notes
 
+**STATUS.md = the live status board (goal + per-subsystem verified/broken
+matrix). Update it on every verified change. This file stays the log.**
+
 ## >>> ATHENS HANDOFF 2026-11-12c - TRAP-FRAME MAILBOX (read first) <<<
 
 RUN-4 PULL (logs/athens-highmem-run4-pull.bin): all three zones present
