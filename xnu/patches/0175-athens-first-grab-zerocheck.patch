@@ -109,7 +109,7 @@ legitimately patterns free pages, so the checks stand down when set.
 +extern int sweet_ufs_diag_write(const char *tag, const void *data, size_t len); /* bsd/dev/sweet_ufs.c */
 +extern int sweet_staticfree_dump(char *buf, size_t len); /* osfmk/arm64/machine_routines.c */
 +
-+#define SWEET_FG_MAX_PN	(1u << 18)			/* ppnums: PAs below 4 GiB */
++#define SWEET_FG_MAX_PN	(1u << 19)			/* ppnums: PAs below 8 GiB (athens high bank) */
 +static uint32_t sweet_fg_bits[SWEET_FG_MAX_PN / 32];
 +static uint32_t sweet_pz_bits[SWEET_FG_MAX_PN / 32];	/* "is poisoned now" */
 +static int sweet_fg_mode = -1;
@@ -142,7 +142,7 @@ legitimately patterns free pages, so the checks stand down when set.
 +static inline uint64_t
 +sweet_poison(ppnum_t pn, uint32_t i)
 +{
-+	return SWEET_POISON_TOP | ((uint64_t)(pn & 0xffff) << 16) | i;
++	return SWEET_POISON_TOP | ((uint64_t)pn << 16) | i;
 +}
 +
 +static int sweet_poison_mode = -1;
@@ -674,7 +674,45 @@ legitimately patterns free pages, so the checks stand down when set.
  
  #define REG_CAP         0x00
  #define REG_IS          0x20
-@@ -873,6 +874,8 @@
+@@ -799,16 +800,30 @@
+ 	su.regs = ml_io_map(reg[0], reg[1]);
+ 	/* A host without 64-bit addressing gets DMA memory below 4 GiB. */
+ 	ppnum_t max_pnum = (ppnum_t)(atop_64(1ULL << 32) - 1); /* always <4GiB: CAP read can lie early */
++	uint64_t ufsdma = 0xfd000000;	/* low-bank bounce for a >4G pool (old window, unmanaged) */
++	PE_parse_boot_argn("ufsdma", &ufsdma, sizeof(ufsdma));
+ 	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, max_pnum, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+-		printf("SWEET UFS: no contiguous DMA memory\n");
+-		return ENOMEM;
+-	}
+-	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)su.dma);
+-	if (!pn) {
+-		return ENOMEM;
++		/* With the whole managed pool above 4 GiB there is no <4G page to
++		 * allocate. Fall back to a fixed low-bank region outside the pool:
++		 * the old window is left unmanaged, so nothing else owns it. The
++		 * dram_r1 engine can still reach it (it is inside its alloc-range),
++		 * but it dodges the observed target; ufsdma= relocates if hit. */
++		su.dma = (vm_offset_t)ml_io_map((vm_map_address_t)ufsdma, DMA_SIZE);
++		if (!su.dma) {
++			printf("SWEET UFS: no DMA memory\n");
++			return ENOMEM;
++		}
++		su.dma_pa = ufsdma;
++		printf("SWEET UFS: fixed low-bank DMA region at 0x%llx\n",
++		    (unsigned long long)ufsdma);
++	} else {
++		ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)su.dma);
++		if (!pn) {
++			return ENOMEM;
++		}
++		su.dma_pa = ptoa_64(pn);
+ 	}
+-	su.dma_pa = ptoa_64(pn);
+ 	su.secsize = DEV_BSIZE;
+ 	uint32_t lun_arg = UINT32_MAX;
+ 	PE_parse_boot_argn("ufslun", &lun_arg, sizeof(lun_arg));
+@@ -873,6 +888,8 @@
  	sweet_usb_probe();
  	/* Stray-writer tripwire: canary pages + scanner (bsd/dev/sweet_watch.c). */
  	sweet_watch_start();
@@ -683,7 +721,7 @@ legitimately patterns free pages, so the checks stand down when set.
  	return 0;
  }
  
-@@ -891,6 +894,13 @@
+@@ -891,6 +908,13 @@
   */
  #define SWEET_LOG_SIZE          (4u << 20)
  #define SWEET_LOG_BLOCKS        (1 + SWEET_LOG_SIZE / UFS_BLOCK)
@@ -697,7 +735,7 @@ legitimately patterns free pages, so the checks stand down when set.
  #define SWEET_LOG_SECS          10u
  
  static char sweet_log_ring[SWEET_LOG_SIZE];
-@@ -948,23 +958,66 @@
+@@ -948,23 +972,66 @@
   * this runs in panic context; the caller passes the panic tag + payload and we
   * drop the host lock (the other CPUs are quiesced while the panic dumps run). */
  int
@@ -766,7 +804,7 @@ legitimately patterns free pages, so the checks stand down when set.
  /* SWEET: while panicking, accumulate the console transcript into a static
   * buffer and rewrite the panic record with the growing text on every write.
   * Called from _cnputs (panic context, interrupts off); ufs_write_blocks is
-@@ -981,6 +1034,15 @@
+@@ -981,6 +1048,15 @@
  		return;
  	}
  	size_t n = (size_t)size;
@@ -782,7 +820,7 @@ legitimately patterns free pages, so the checks stand down when set.
  	if (n > sizeof(sweet_panic_text) - sweet_panic_len) {
  		n = sizeof(sweet_panic_text) - sweet_panic_len;
  	}
-@@ -1020,8 +1082,16 @@
+@@ -1020,8 +1096,16 @@
  		while (pos < total && !error) {
  			uint32_t off = (uint32_t)(pos % SWEET_LOG_SIZE);
  			uint32_t blk = off / UFS_BLOCK;

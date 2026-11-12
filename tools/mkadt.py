@@ -70,6 +70,12 @@ VIVA_UFS, VIVA_UFS_SIZE = 0x11270000, 0x4000
 # changing pmap/zone panics. viva's window needed no such cut because all of
 # its carve-outs stayed below 0xc0000000.
 ATHENS_PHYS_BASE, ATHENS_MEM_SIZE = 0xc0000000, 0xffe60000 - 0xc0000000  # verified live FDT
+# --athens --highmem: the upper DDR bank 0x100000000-0x1bffff000.
+# Every MTK reserved-memory / alloc-range (incl. dram_r1_dummy_read, whose
+# engine scribbled a free page at 0xe0000000 - run6) is a 32-bit region:
+# moving XNU's pool above 4 GiB puts it out of reach of every firmware
+# stray writer. dramc-rk1 at 0x1bffff000 sits above the top.
+ATHENS_HIGH_BASE, ATHENS_HIGH_SIZE = 0x100000000, 0x1bffff000 - 0x100000000
 # --athens-mem BASE SIZE overrides the window (DRAM-bisection tests).
 ATHENS_GICD, ATHENS_GICD_SIZE = 0x0c000000, 0x40000          # dts
 ATHENS_GICR, ATHENS_GICR_SIZE = 0x0c040000, 0x200000         # dts
@@ -406,7 +412,10 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False,
     if viva:
         phys_base, mem_size = VIVA_PHYS_BASE, VIVA_MEM_SIZE
     elif athens:
-        phys_base, mem_size = ATHENS_PHYS_BASE, ATHENS_MEM_SIZE
+        if highmem:
+            phys_base, mem_size = ATHENS_HIGH_BASE, ATHENS_HIGH_SIZE
+        else:
+            phys_base, mem_size = ATHENS_PHYS_BASE, ATHENS_MEM_SIZE
     # Carve the panic log off the top so the kernel never allocates over it.
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
     mem_size -= PANIC_LOG_SIZE
@@ -609,13 +618,13 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False,
 
 
 if __name__ == '__main__':
+    if '--athens-mem' in sys.argv:
+        i = sys.argv.index('--athens-mem')
+        ATHENS_PHYS_BASE, ATHENS_MEM_SIZE = int(sys.argv[i+1], 0), int(sys.argv[i+2], 0)
     root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
                  viva='--viva' in sys.argv, viva_ufs='--ufs' in sys.argv,
                  athens='--athens' in sys.argv, athens_ufs='--athens-ufs' in sys.argv,
                  athens_bare='--athens-bare' in sys.argv)
-if '--athens-mem' in sys.argv:
-    i = sys.argv.index('--athens-mem')
-    ATHENS_PHYS_BASE, ATHENS_MEM_SIZE = int(sys.argv[i+1], 0), int(sys.argv[i+2], 0)
     blob = adt.serialize(root)
     open(sys.argv[1], 'wb').write(blob)
     if '--dump' in sys.argv:
