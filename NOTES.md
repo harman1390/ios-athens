@@ -1541,3 +1541,37 @@ recovery so unreadable; ring log dies with panic so panics never flush.
   (stale VA/owner bug), not a firmware engine. That is the differential.
 - Image build: mkadt --athens --athens-ufs --highmem; same repack.
 
+
+### RUN-4 HIGHMEM BOOT + UFS LOG PIPELINE (2026-11-12)
+
+- run4 image 3d5b57f7: kernel 4475c6ea + shim ufs harvest + fb dump.
+  Boot: "Unaligned kernel data abort" panic, esr 0x96000061,
+  far 0xfffffe301551040, kernel_task tid 101 (photo; digits approximate).
+- Tail pull (sdc59 = 13,049,848 blocks EXACT - earlier ~13,044,966 math
+  was wrong, correct pull = skip=13045751 count=4097):
+  SHIMFB at 0, SHIMPRAM at 0xaff000, SWEETPAN at 0xc00000.
+- Shim ufs.c originally used Qualcomm 0x1d84000 -> dead. Fixed to
+  MediaTek 0x11270000 (dt: ufshci@11270000, reg 0x2300, lanes=2,
+  ufs_mphy@0x11fa0000). Writes verified on disk (commit f1722eb).
+- pram @0x1bfeff000 = pure DRAM garbage: highmem kernel died BEFORE its
+  panic log init. SWEETPAN/ZCHECK records in kernel zone are run-6
+  leftovers (tokd 0xc25cc000/aend 0xffd60000/pa 0xe0000000 = lowmem run).
+- fb dump rendered panic-screen.png = LK realme splash, NOT panic: LK
+  redraws fb each boot -> fb capture is a dead path for panic screens.
+- NEW capture path (commit fcd71c6, patch 0176): sleh.c
+  panic_with_thread_kernel_state copies arm_saved_state64 + "SWEETABR"
+  magic into boot_args page tail (topOfKernelData-0x4000+0x3f00, inside
+  physmap, survives warm reset). Shim ufs_dump_ba() writes the 16K ba
+  page to userdata [last-4352,last-4349] in loader_boot BEFORE zero64().
+- CI gotcha: SWEETABR as u64 immediate never appears as ASCII in the
+  binary -> verify_strings can't find it. Must be a char[] constant.
+- Live-dt harvest (adb/PitchBlack, in ATHENS.md): dram_r1_dummy_read
+  alloc-ranges = 0xc0000000+0x3fe60000 covers the ENTIRE old lowmem pool
+  -> stray-writer hypothesis now evidence-backed; highmem [0x100000000,
+  0x1bffff000) is outside both engines. Touch = novatek nf_nt36672c on
+  spi4@0x11018000 (gpio14 irq, gpio33 reset, 9.6MHz, 1080x2400 incell).
+  LK initrd base 0x47c80000 verified. toprgu 0x10007000 verified.
+- NEXT: gated build 43238787255 (@fcd71c6, verify_strings incl
+  SWEETABR) -> repack highmem image -> flash -> panic -> normal reboot
+  (shim harvests ba page+pram) -> PitchBlack -> pull
+  skip=13045495 count=4353 -> decode trap frame -> fault PC.
