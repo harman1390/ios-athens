@@ -51,6 +51,36 @@ string mt6853-mali, MT6359 rails (VGPU=buck_vproc1 EN 0x1708/VOSEL
 0x172e, VSRAM=ldo_vsram_md EN 0x1f2c/VOSEL 0x1b46, constraint
 0-350mV), MFG power domains (MFG0/1/2/3/5), OPP table.
 
+ROOTFS/GUI VERIFICATION (2026-11-12, vs external "what's left"
+analysis - all checked against repo + CI logs, NOT guesses):
+- /chosen identity: mkadt.py athens emits unique-chip-id (synthetic
+  ECID) + chip-id 0x8015 -> IOPlatformUUID derivation OK -> ByHost
+  prefs OK -> LastSystemVersion actually records. Also emits the
+  security-status tuple (0,0,1,1) -> mobileactivationd takes the
+  native Hactivation "Activated" branch (covers the data ark that
+  sweet-root-tweaks skipped: "no mobileactivationd system container").
+- Flashed ios16-root.img provenance: local iosroot/ios16-root.img
+  (Nov 7 06:10) matches CI rootfs run 42305909620 (finished
+  2026-11-07T00:33Z). Its log shows sweet-root-tweaks.py RAN:
+  'pref com.apple.migration [DMUserDataDisposition,
+  LastSystemVersion]', purplebuddy SetupDone/SetupFinishedAllSteps/
+  SetupVersion, springboard BKNoWatchdogs, VirtualAudio disabled,
+  mini-buddy flags off. => the migration-skip + Setup-skip ARE in
+  the flashed image. The later rootfs run 42361811996 used
+  factory=true (0 tweak lines, 17ms fsck->simg gap) - DO NOT flash
+  that artifact; it has none of the bring-up tweaks.
+- Patch 0056 (sweetfb 10 Hz throttle) is in xnu/patches, applied.
+- sweetscan: vm_resident.c defaults sweet_scan_mode=1 (report) with
+  no boot arg - pool scanner already on.
+- sweetsample: sweet_sample_start() runs unconditionally after UFS
+  mount; samples SpringBoard+backboardd 40x @120 s after 90 s delay
+  - 'SMP --- sample' + 'bt' stack lines will be in the ring.
+- Consequence: the near-full bar is probably NOT the classic
+  missing-LastSystemVersion migration wall (that fix is present).
+  Candidates: residual first-boot work, daemon crash loops
+  (cryptexd /var/run ENOENT, assistantd, mediaserverd), or a
+  backboardd/display wait. The ring tail + SMP stacks decide.
+
 NEXT ACTIONS: (1) user flashes 260f0d4c, tests buttons, long boot;
 (2) recovery pull -> decode ring for boot progress + key events;
 (3) if Hello reached -> touch driver work (SPI4+NT36672C); (4) GPU
