@@ -36,8 +36,12 @@ PATCH FAILURE + FIX (2026-11-12):
   harman1390/ios-athens HEAD:athens`. Local `git status` shows
   "ahead N" vs a stale origin ref -- check remote sha via
   `gh api repos/.../branches/athens`.
-- BUILD IN FLIGHT: CI run 43205794257 (workflow_dispatch, athens,
-  drop 0161,0164,0165). If verify passes: artifact -> mkadt
+- BUILD IN FLIGHT: CI run 43209835164 (workflow_dispatch, athens).
+  GOTCHA: drop_patches is SPACE-separated FULL FILENAMES:
+  -f "drop_patches=0161-athens-ufs-diag.patch 0164-athens-ufs-err.patch
+  0165-athens-tidt-assert.patch". Runs 43205794257 (runner never
+  acquired - macos capacity) and 43208372029 (comma list broke rm)
+  failed before building. If verify passes: artifact -> mkadt
   --athens --athens-ufs --athens-bare --highmem -> mkpayload ->
   athens-mkboot.sh -> `fastboot flash boot` (boot is reliable,
   `fastboot boot` silently fails on this device) -> recovery ->
