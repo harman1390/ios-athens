@@ -3,7 +3,34 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
-## >>> ATHENS HANDOFF 2026-11-12e - LAUNCHD REACHED; WRONG_PLATFORM (read first) <<<
+## >>> ATHENS HANDOFF 2026-11-12f - EARLY BOOT COMPLETE; RO ROOT WAS THE WALL (read first) <<<
+
+RUN-7 RESULT (unentitled_ios_sim_launch=1 fixed it): **launchd ran
+the ENTIRE early-boot sequence.** Pulled kernel log tail shows:
+fsck, mount-phase-1/2 (bindfs firmware ENOENT tolerated), data-
+protection, FIPS POST all PASSED, keybagd MKB_INIT, usermanagerd
+(user sessions + personas loaded), dirs_cleaner, init_featureflags,
+tzinit, sysstatuscheck, prng_seedctl, launchd_cache_loader ->
+"Early boot complete. Continuing system boot" -> user/501 domain,
+SpringBoard + ~50 xpcproxy spawns. Then panic:
+    mount[3] exited -- (signal 0, exit status 1)
+Root cause inference (well-supported): the root is mounted READ-ONLY
+(ufsrw absent). Log shows the fallout: "/tmp: No such file",
+"/var/run" missing, launchd.log fopen fails, init_featureflags can't
+create dirs. A later mount phase trying `mount -uw /` gets EROFS ->
+exit 1 -> launchd panic. RW root is required for launchd regardless.
+
+RW IMAGE (local repack, same kernel 3119523f):
+shim/out/athens-boot-highmem.img =
+8042501cf982a5bc5e7f36d902c89d0245a06e140ed4bed1697509b364c8353e
+cmdline adds ufsrw=1 rootrw=1 (keeps unentitled_ios_sim_launch=1,
+launchd_unsecure_cache=1, ignition_level=1, cpus=8). userdata is the
+approved iOS space; rootfs reflashing recovers any corruption.
+
+NOTE: the boot-args in the pull log printed cpus=1 - the launchd log
+echoes what mkpayload wrote; cpus=8 was in the actual arg list.
+
+## >>> ATHENS HANDOFF 2026-11-12e - LAUNCHD REACHED; WRONG_PLATFORM (superseded) <<<
 
 RUN-6 BOOT RESULT (kernel 3119523f with 0177, cpus=8): **the whole
 storage chain works.** UFS takeover + LUN scan + GPT + rootfs mount +

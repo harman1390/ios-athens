@@ -145,7 +145,8 @@ LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
 | Trap-frame mailbox | ✅ wired | patch 0176 in kernel cbb29270 ("SWEETABR" verified in binary); run-5 ba zone correctly empty (hang ≠ panic — mailbox only fires on exceptions) |
 | Kernel UFS host takeover | ✅ works | run-6 (0177): takeover + LUN scan + GPT probe + **rootfs mount + launchd exec attempted** — the whole storage chain works read-only |
 | Kernel reaches launchd | ✅ | run-6: pid 1 init exec'd /sbin/launchd — died only at the signature stage (below) |
-| launchd exec | ❌ WRONG_PLATFORM | run-6 panic: `unexpected SIGKILL of launchd (CS_KILLED) namespace 9` = OS_REASON_EXEC — iOS binary refused w/o `unentitled_ios_sim_launch` (solved upstream, NOTES:978). cmdline lacked it — repacked with it |
+| launchd exec | ✅ | run-7: `unentitled_ios_sim_launch=1` fixed the WRONG_PLATFORM kill — launchd ran the full early-boot task chain (fsck→mount→FIPS POST→keybagd→usermanagerd→cache loader→"Early boot complete"→SpringBoard+xpcproxy spawns) |
+| Read-write root | ⬜ next | run-7 died `mount[3] exited status 1` — RO root can't create /tmp, /var/run, launchd.log; a mount phase hits EROFS on `mount -uw /`. RW image `8042501c` ready to flash |
 | UFS DMA carve | ⚠️ replaced | `ufsdma=0xfd000000` sat INSIDE dram_r1 alloc-range — flawed. 0177: CAP_64AS (bit24 set in real read) → DMA from managed >4G pool; fallback moved to 0x4e000000 (below both dummy-read ranges) |
 | ufs_scsi silent-spin risk | ⚠️ patched | 0177: 2²⁸ hard poll cap + host-state dump — a stuck command now times out loudly instead of hanging |
 
