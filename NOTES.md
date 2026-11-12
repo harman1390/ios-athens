@@ -1284,3 +1284,54 @@ recovery so unreadable; ring log dies with panic so panics never flush.
 - fastboot boot ~10:08Z; device left fastboot. Watch screen / pull tail via
   PitchBlack. Expect records: layout, zcheck/poolscan slots, console-panic.
 
+
+### RUN 6 - CLEAN STRAY-WRITER HIT (the real signal)
+
+- Pull logs/athens-0175-run6-pull.txt.bin; decoded logs/run6-records.txt.
+- Slot layout worked: 4x poolscan + zcheck + layout + console-panic all
+  persisted in reserved zone.
+- 4 CONTIGUOUS pages dirtied: pn 0x38000-0x38003 = pa 0xe0000000..0xe0010000
+  (64KB block). Each dirty from offset +0x0, ~191 bad qwords/page.
+  tokd 0xc25cc000 < hit < aend 0xffd60000: inside scrubbed window, NOT
+  static-free -> real stray writer.
+- qwords look structured: 0xd8c001dfd34060c0, 0x00000038014d4d4d (8/MMM),
+  other pages w0 all differ - a writer filling a 4-page buffer, per-page
+  from offset 0. Possibly DMA descriptor/data region at a round 0xe0000000.
+- Same page later hit ZCHECK at handout (bad 191) -> panic @1281.
+- STATICFREE table: only 3 ranges logged (SF0-2 inside kernel image pa
+  0xc1b9../0xc215..) - hmm, range #1636 (everything below image) MISSING?
+  Only 3 ml_static_mfree calls hit? Check: n=3 but #1636 frees [gPhysBase,
+  segLOWEST) - maybe vm_page_create found no managed pages there, or it
+  ran before counting? first_ppn==0 if freed_pages==0 -> not recorded.
+  The three ranges recorded: 0xc1b90000,0xc1b98000,0xc2150000..0xc2198000
+  = __KLD gap, __KLDDATA gap, __BOOTDATA (image-internal frees).
+
+- NEXT: identify what owns pa 0xe0000000. Nothing in reserved-mem dump
+  maps it. Check shim/ADT reserved regions and any fixed-PA carveout
+  near 0xe0000000; check if EMI/dram dummy engine writes there.
+
+
+### RUN 6 analysis - writer profile
+
+- Writer hit 4 CONTIGUOUS 16K pages at pa 0xe0000000 (= window_base
+  +0x20000000, round programmed-looking base), each from offset +0x0,
+  ~191 nonzero qwords/page, while the pages sat on the FREE queue.
+  t~562M ticks @19.2MHz ~= 29.3s into boot; ZCHECK then panicked when
+  pn 0x38000 was handed out.
+- 0xe0000000 is inside reserve-memory-dram_r1_dummy_read alloc-range
+  [0xc0000000,0xffe60000) - the ONLY reserved region overlapping our
+  window. MTK driver programs dram_rank*_addr into the SPM/DRAMC
+  dummy-read engine; engine state persists across reboot from the
+  Android-era boot. Unified theory: leftover engine writes at a stale
+  programmed address -> explains the ROAMING corruption PAs across
+  prior runs (ptd_free_list, task_id_token, kalloc.12288).
+- su.dma ruled out: kmem_alloc_contig pages are wired+grabbed, not free.
+- STATICFREE n=3 (image-internal frees only; range-1 freed 0 managed
+  pages since kernel image starts at window base). tokd gate sound.
+- aend 0xffd60000 = window top minus 1MB panic-log carve. Consistent.
+
+- NEXT: identify what programs dram_rank1_addr / whether the engine can
+  be disabled in the shim (DRAMC/EMI/SPM registers), or reserve the page
+  it targets. Also consider: is the 0xe0000000 writer actually an SPM
+  write-verify pattern or a data buffer from another firmware agent.
+
