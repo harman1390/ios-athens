@@ -1,6 +1,6 @@
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -468,6 +468,25 @@
+@@ -468,6 +468,26 @@
  	ss_valid = is_saved_state64(ss);
  	arm_saved_state64_t *state = saved_state64(ss);
  
@@ -23,6 +23,7 @@
 +			mb[1 + i] = sr[i];
 +	}
 +#endif
- 
++
  	os_atomic_cmpxchg(&original_faulting_state, NULL, state, seq_cst);
  
+ 	// rdar://80659177
