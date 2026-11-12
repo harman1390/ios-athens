@@ -1,6 +1,6 @@
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
-@@ -468,6 +468,23 @@
+@@ -468,6 +468,25 @@
  	ss_valid = is_saved_state64(ss);
  	arm_saved_state64_t *state = saved_state64(ss);
  
@@ -10,17 +10,19 @@
 +	 * physmap since arm_vm_init; DRAM survives a warm reset). The next
 +	 * boot's shim dumps the page to UFS - needed for panics that fire
 +	 * before the panic log / debug log / UFS stack exist. ba_pa =
-+	 * topOfKernelData - 16 KiB by loader convention. */
++	 * topOfKernelData - 16 KiB by loader convention. The magic must be
++	 * a string constant (a u64 immediate never appears as ASCII in the
++	 * binary, which the CI verify_strings gate greps). */
++	static const char sweet_abr_magic[] = "SWEETABR";
 +	if (BootArgs && avail_end) {
 +		volatile uint64_t *mb = (volatile uint64_t *)phystokv(
 +		    BootArgs->topOfKernelData - 0x4000 + 0x3f00);
 +		const uint64_t *sr = (const uint64_t *)state;
++		memcpy((void *)mb, sweet_abr_magic, 8);
 +		for (unsigned i = 0; i < sizeof(*state) / sizeof(uint64_t); i++)
 +			mb[1 + i] = sr[i];
-+		mb[0] = 0x5357454554414252ULL;	/* "SWEETABR" */
 +	}
 +#endif
-+
+ 
  	os_atomic_cmpxchg(&original_faulting_state, NULL, state, seq_cst);
  
- 	// rdar://80659177
