@@ -1,0 +1,228 @@
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -118,6 +118,11 @@
+     "     'IONameMatch'     = 'mediatek,mt6359-keys';"
+     "   },"
+     "   {"
++    "     'IOClass'         = AthensGpioKeys;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'athens,gpio-keys';"
++    "   },"
++    "   {"
+     "     'IOClass'         = VivaGPIO;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+     "     'IONameMatch'     = 'mediatek,mt6781-gpio';"
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -33,6 +33,7 @@
+ iokit/Kernel/arm/hid/VivaKeypad.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/VivaPMICKeys.cpp                            optional iokitcpp
+ iokit/Kernel/arm/hid/AthensPMICKeys.cpp                          optional iokitcpp
++iokit/Kernel/arm/hid/AthensGpioKeys.cpp                          optional iokitcpp
+ iokit/Kernel/arm/hid/VivaGT9896.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+diff --git a/iokit/Kernel/arm/hid/AthensGpioKeys.cpp b/iokit/Kernel/arm/hid/AthensGpioKeys.cpp
+new file mode 100644
+--- /dev/null
++++ b/iokit/Kernel/arm/hid/AthensGpioKeys.cpp
+@@ -0,0 +1,199 @@
++/*
++ * athens (MT6853): GPIO keys read through the pio controller.
++ * Matches /arm-io/gpio-keys ("athens,gpio-keys").
++ *
++ * On athens the volume-down key is a GPIO/EINT line: the live Android
++ * kernel shows "mt-eint 80  mtk-kpd-vol-down" and the KP matrix init map
++ * is all zeros, so the matrix (VivaKeypad) does not carry it. Power and
++ * volume-up are MT6359 PMIC keys instead (AthensPMICKeys.cpp).
++ *
++ * LK already ran its boot volume check on this pin, so it is left in
++ * GPIO input mode with its pull; we only read GPIO_DIN through
++ * VivaGPIO. Buttons are active-low; "active-low" = <0> in the node
++ * overrides. ADT properties:
++ *   key-gpios : <pin>...            GPIO numbers (EINT n == GPIO n on
++ *                                   this SoC for the AP domain - MEASURE)
++ *   keymap    : <index usage>...    HID consumer usages, default below
++ *   active-low: bool, default true
++ *
++ * Polled at 16 ms with debounce; volume keys do not need edge latency and
++ * this cannot stick a key down the way a missed edge can.
++ */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOTimerEventSource.h>
++
++#include "IOHIDEventService.h"
++#include "IOHIDEvent.h"
++#include "IOHIDUsageTables.h"
++#include "../VivaIO.h"
++
++extern "C" uint64_t mach_absolute_time(void);
++
++#define ATHENS_GPIO_KEYS   4
++#define POLL_NS            16000000ULL      /* 16 ms */
++#define DEBOUNCE           3                /* ~48 ms stable */
++
++class AthensGpioKeys : public IOHIDEventService {
++	OSDeclareDefaultStructors(AthensGpioKeys);
++
++public:
++	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	virtual void free(void) APPLE_KEXT_OVERRIDE;
++	virtual IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE;
++
++protected:
++	virtual UInt32 getPrimaryUsagePage() APPLE_KEXT_OVERRIDE { return kHIDPage_Consumer; }
++	virtual UInt32 getPrimaryUsage() APPLE_KEXT_OVERRIDE { return kHIDUsage_Csmr_ConsumerControl; }
++	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 0x6853; }
++	virtual OSString *getProduct() APPLE_KEXT_OVERRIDE { return OSString::withCString("MT6853 gpio keys"); }
++
++private:
++	static void pollCallout(OSObject *target, IOTimerEventSource *timer);
++	void poll(void);
++	void send(unsigned int k, bool down);
++
++	IOWorkLoop       *fWorkLoop;
++	IOTimerEventSource *fTimer;
++	VivaGPIO         *fGPIO;
++	uint32_t          fPins[ATHENS_GPIO_KEYS];
++	UInt32            fUsage[ATHENS_GPIO_KEYS];
++	bool              fActiveLow;
++	unsigned int      fCount;
++	bool              fDown[ATHENS_GPIO_KEYS];
++	bool              fRaw[ATHENS_GPIO_KEYS];
++	uint8_t           fSame[ATHENS_GPIO_KEYS];
++};
++
++OSDefineMetaClassAndStructors(AthensGpioKeys, IOHIDEventService);
++
++IOWorkLoop *
++AthensGpioKeys::getWorkLoop(void) const
++{
++	return fWorkLoop;
++}
++
++bool
++AthensGpioKeys::start(IOService *provider)
++{
++	if (!IOHIDEventService::start(provider)) {
++		return false;
++	}
++	fGPIO = VivaGPIO::wait();
++	if (fGPIO == NULL) {
++		IOLog("ATHENS GPIO KEYS: no gpio service\n");
++		return false;
++	}
++	OSData *gpios = OSDynamicCast(OSData, provider->getProperty("key-gpios"));
++	if (gpios == NULL) {
++		IOLog("ATHENS GPIO KEYS: no key-gpios\n");
++		return false;
++	}
++	const uint32_t *pins = (const uint32_t *)gpios->getBytesNoCopy();
++	fCount = gpios->getLength() / sizeof(uint32_t);
++	if (fCount > ATHENS_GPIO_KEYS) {
++		fCount = ATHENS_GPIO_KEYS;
++	}
++	for (unsigned int i = 0; i < fCount; i++) {
++		fPins[i] = pins[i];
++		fUsage[i] = kHIDUsage_Csmr_VolumeDecrement;    /* default: vol-down */
++	}
++	OSData *map = OSDynamicCast(OSData, provider->getProperty("keymap"));
++	if (map != NULL) {
++		const uint32_t *cells = (const uint32_t *)map->getBytesNoCopy();
++		for (unsigned int i = 0; i + 1 < map->getLength() / sizeof(uint32_t) && i / 2 < fCount; i += 2) {
++			fUsage[cells[i]] = cells[i + 1];
++		}
++	}
++	fActiveLow = provider->getProperty("active-low") == NULL
++	    || ((OSBoolean *)provider->getProperty("active-low"))->isTrue();
++
++	fWorkLoop = IOWorkLoop::workLoop();
++	if (fWorkLoop == NULL) {
++		return false;
++	}
++	fTimer = IOTimerEventSource::timerEventSource(this, &AthensGpioKeys::pollCallout);
++	if (fTimer == NULL || fWorkLoop->addEventSource(fTimer) != kIOReturnSuccess) {
++		return false;
++	}
++	fTimer->setTimeout(POLL_NS);
++
++	/* Prime the debounced state so an already-held key does not fire. */
++	for (unsigned int i = 0; i < fCount; i++) {
++		bool high = true;
++		fGPIO->getInput(fPins[i], &high);
++		fRaw[i] = fActiveLow ? !high : high;
++		fDown[i] = fRaw[i];
++		fSame[i] = 0;
++	}
++	IOLog("ATHENS GPIO KEYS: %u keys, active-%s, pins", fCount, fActiveLow ? "low" : "high");
++	for (unsigned int i = 0; i < fCount; i++) {
++		IOLog(" %u->0x%x", (unsigned)fPins[i], (unsigned)fUsage[i]);
++	}
++	IOLog("\n");
++	registerService();
++	return true;
++}
++
++void
++AthensGpioKeys::free(void)
++{
++	if (fTimer != NULL && fWorkLoop != NULL) {
++		fWorkLoop->removeEventSource(fTimer);
++	}
++	if (fTimer != NULL) {
++		fTimer->release();
++	}
++	if (fWorkLoop != NULL) {
++		fWorkLoop->release();
++	}
++	IOHIDEventService::free();
++}
++
++void
++AthensGpioKeys::pollCallout(OSObject *target, IOTimerEventSource *timer)
++{
++	AthensGpioKeys *self = OSDynamicCast(AthensGpioKeys, target);
++	if (self != NULL) {
++		self->poll();
++	}
++	timer->setTimeout(POLL_NS);
++}
++
++void
++AthensGpioKeys::poll(void)
++{
++	for (unsigned int i = 0; i < fCount; i++) {
++		bool high = true;
++		if (fGPIO->getInput(fPins[i], &high) != kIOReturnSuccess) {
++			continue;
++		}
++		bool raw = fActiveLow ? !high : high;
++		if (raw == fDown[i]) {
++			fSame[i] = 0;
++			continue;
++		}
++		if (raw == fRaw[i]) {
++			if (++fSame[i] >= DEBOUNCE) {
++				send(i, raw);
++				fSame[i] = 0;
++			}
++		} else {
++			fRaw[i] = raw;
++			fSame[i] = 1;
++		}
++	}
++}
++
++void
++AthensGpioKeys::send(unsigned int k, bool down)
++{
++	fDown[k] = down;
++	IOLog("ATHENS GPIO KEYS: key 0x%x %s\n", (unsigned)fUsage[k], down ? "down" : "up");
++	IOHIDEvent *event = IOHIDEvent::keyboardEvent(mach_absolute_time(), kHIDPage_Consumer, fUsage[k], down);
++	if (event != NULL) {
++		dispatchEvent(event);
++		event->release();
++	}
++}

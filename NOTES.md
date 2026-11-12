@@ -1841,3 +1841,29 @@ recovery so unreadable; ring log dies with panic so panics never flush.
 - CAVEAT: probe-time IOLogs get evicted from 4MiB ring by userspace
   spam; key-EVENT logs post-boot survive. If no PMIC lines at all,
   check whether pwrap init itself failed (VIVA PWRAP logs).
+
+### 0179: VOL-DOWN GPIO KEY (2026-11-12)
+
+- Live-FDT facts (recovery pull): vol-down = mt-eint 80 "mtk-kpd-vol-down",
+  KP matrix unused (kpd-hw-init-map all zeros). Power/vol-up = MT6359
+  PWRKEY/HOMEKEY (covered by 0178 AthensPMICKeys).
+- NEW iokit/Kernel/arm/hid/AthensGpioKeys.cpp: IOHIDEventService matching
+  "athens,gpio-keys"; polls GPIO_DIN via VivaGPIO::wait()->getInput()
+  every 16 ms, 48 ms debounce, active-low, emits HID consumer usages.
+  Chosen over EINT edge because a single EINT line cannot give both
+  press+release edges (VivaEINT supports one edge or one level only)
+  and a missed edge sticks the key down.
+- mkadt.py: new /arm-io/gpio-keys node key-gpios=<80> keymap=<0,0xea>
+  (HID_CSMR_VOLUME_DOWN). GPIO number == EINT number on MT6853 AP domain
+  is a MEASURE assumption - verify pin toggles on device; if not, find
+  the eint->gpio mux in pinctrl-mt6853.c.
+- ALSO fixed in mkadt.py (live-FDT corrections): removed the disproven
+  Goodix/gt9896s i2c0 touch child (real panel = Novatek NT36672C on
+  SPI4@11018000, needs SPI host driver - not yet written); gpio
+  output-pins 15->33 (NT36672C reset GPIO per live FDT); keypad keymap
+  removed (matrix unused).
+- Patch 0179 verified applies clean to post-0178 buildtree baseline.
+- TOUCH status: research done (SPI4 regs/pins/irq/EINT14/GPIO33/9.6MHz/
+  16x36/10pt/1080x2400 all in ATHENS.md). Still needs: MTK SPI master
+  driver for spi-mt6765 @0x11018000 + Novatek nf_nt36672c protocol.
+  No SPI driver exists in tree - biggest remaining task.

@@ -296,15 +296,25 @@ def athens_devices(ph, phandle, gic_ph, ecid):
     io = lambda pa, size: u64(pa - SOC_BASE, size)
     eint_ph = next(phandle)
     return [
-        # MediaTek keypad (kp@10010000, SPI 74 edge): same block as viva's,
-        # driver matching extended to mt6853 by the athens patch series.
+        # MediaTek keypad (kp@10010000, SPI 74 edge): same block as viva's.
+        # NOTE (live FDT + /proc/interrupts): the KP matrix is NOT used on
+        # athens - kpd-hw-init-map is all zeros and volume-down arrives on
+        # mt-eint 80 instead (see gpio-keys below). Node kept for the block.
         node('keypad', [
             ph(),
             ('compatible', cstr('mediatek,mt6781-keypad')),
             ('reg', io(0x10010000, 0x1000)),
             ('interrupt-parent', u32(gic_ph)),
             ('interrupts', spi(0x4a, IRQ_EDGE_RISING)),
-            ('keymap', u32(0, HID_CSMR_VOLUME_DOWN)),  # MEASURE: kpd-hw-init-map
+        ]),
+        # Volume-down: GPIO/EINT key (live: mt-eint 80 "mtk-kpd-vol-down").
+        # Polled by AthensGpioKeys (iokit/.../hid/AthensGpioKeys.cpp) through
+        # VivaGPIO. GPIO number == EINT number on this SoC - MEASURE on device.
+        node('gpio-keys', [
+            ph(),
+            ('compatible', cstr('athens,gpio-keys')),
+            ('key-gpios', u32(80)),
+            ('keymap', u32(0, HID_CSMR_VOLUME_DOWN)),
         ]),
         # External interrupts (apirq/eint@1000b000; pio's own GIC SPI 212 level):
         # interrupt controller under the GIC; children use <EINT flags>.
@@ -345,15 +355,20 @@ def athens_devices(ph, phandle, gic_ph, ecid):
             ]),
         ])]),
         # GPIO (pio/pinctrl@10005000): only pins that must be driven go here.
+        # 33 = NT36672C touch reset (live FDT novatek reset-gpio; the earlier
+        # guess of 15 came from the disproven Goodix population).
         node('gpio', [
             ph(),
             ('compatible', cstr('mediatek,mt6781-gpio')),
             ('reg', io(0x10005000, 0x1000)),
-            ('output-pins', u32(15)),  # touch reset (cust_mt6853_touch dtsi)
+            ('output-pins', u32(33)),
         ]),
         # I2C0 (i2c0@11e00000, SPI 112 level, 400 kHz): second reg is the APDMA
         # channel (0x10217080); SCL GPIO 97, SDA GPIO 98 (dts). Source clock and
-        # IMP_IIC_WRAP gate are MEASURE items (clk-mt6853).
+        # IMP_IIC_WRAP gate are MEASURE items (clk-mt6853). No children: the
+        # touch panel is NOT on i2c0 - live FDT shows Novatek NT36672C
+        # (oppo,tp_noflash) on SPI4 @0x11018000, which needs an MTK SPI host
+        # driver that does not exist yet (see ATHENS.md touch section).
         node('i2c0', [
             ph(),
             ('compatible', cstr('mediatek,mt6781-i2c')),
@@ -364,22 +379,6 @@ def athens_devices(ph, phandle, gic_ph, ecid):
             ('clock-div', u32(5)),
             ('scl-gpio', u32(97)),
             ('sda-gpio', u32(98)),
-        ], [
-            # Goodix GT9886 touch (gt9886@5d on i2c0): interrupt GPIO14 falling
-            # edge, reset GPIO15, rail = MT6359 VTP LDO (no avdd/dvdd GPIO
-            # switches in the cust dtsi). The alternative population is a
-            # GT9896s on spi4@11018000 — the live FDT says which. Register map
-            # (reg-coor/reg-pid) comes from the vendor goodix cfg blob.
-            node('touch', [
-                ph(),
-                ('compatible', cstr('goodix,gt9896s')),
-                ('i2c-address', u32(0x5d)),
-                ('interrupt-parent', u32(eint_ph)),
-                ('interrupts', u32(14, IRQ_EDGE_FALLING)),
-                ('reset-gpio', u32(15)),
-                ('max-x', u32(1080)),
-                ('max-y', u32(2400)),
-            ]),
         ]),
         # Mali-G57 MC3 (mali@13000000; GPU/MMU/JOB/EVENT/PWR = SPI 364-368
         # level high): power domains SCP_SYS_MFG0-5 (scpsys/spm@10006000),
