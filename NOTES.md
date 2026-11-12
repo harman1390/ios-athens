@@ -3,6 +3,59 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-12h - BUTTONS DONE (0178+0179), IMAGE READY; TOUCH+GPU RESEARCHED <<<
+
+CURRENT IMAGE: shim/out/athens-boot-highmem.img =
+260f0d4cd8d1405761d058a1fc829112b92e57e71b5735c1c420e56dd8360905
+(kernel 0179, CI 43290178829). Config: highmem adt, ufs-rw, cpus=8,
+sweetlog=1 ufslogsecs=5, unentitled_ios_sim_launch=1,
+launchd_unsecure_cache=1. Flash via fastboot, boot, press buttons,
+recovery -> pull -> decode ring (tools/sweet-log.py).
+
+WHERE BOOT IS: run-9 (image f3466ce7, pre-buttons) reached deep
+userspace - SWEETLOG ring showed launchd spawning user daemons at
+pid ~1030, 6+ min in, SpringBoard+backboardd exec'd, still alive when
+user restarted (was NOT hung). Boot needs 30-45+ min uninterrupted.
+Next pull will show if it reaches Hello or where it parks.
+
+BUTTONS - ALL THREE COVERED (verified live-FDT architecture):
+- power = MT6359 PWRKEY, vol-up = MT6359 HOMEKEY -> AthensPMIC +
+  AthensPMICKeys (patch 0178, NEW files iokit/Kernel/arm/AthensPMIC.*,
+  hid/AthensPMICKeys.cpp; matches mediatek,mt6359-pmic/-keys).
+- vol-down = GPIO/EINT key, mt-eint 80 "mtk-kpd-vol-down", KP matrix
+  UNUSED (hw-init-map all zeros) -> AthensGpioKeys (patch 0179,
+  hid/AthensGpioKeys.cpp; polls GPIO80 via VivaGPIO 16ms/48ms debounce).
+- mkadt.py emits /arm-io/gpio-keys {key-gpios=<80>, keymap=<0,0xea>}.
+- MEASURE: GPIO80==EINT80 assumed; if vol-down silent, check eint->gpio
+  mux in pinctrl-mt6853.c or dump live FDT volume-down gpio property.
+- Expected logs: 'ATHENS PMIC KEYS: key 0x.. down/up',
+  'ATHENS GPIO KEYS: key 0xea down/up'.
+
+TOUCH - RESEARCH DONE, DRIVER NOT WRITTEN (biggest remaining task):
+- Panel = Novatek NT36672C "oppo,tp_noflash" on SPI4 @0x11018000
+  (mediatek,mt6765-spi). NOT Goodix/i2c0 - that ADT node was removed.
+- Verified: GIC INTID 195 (SPI163+32), pins GPIO12 MI/13 MO/97 CLK/
+  98 CSB drive4, EINT14 irq edge, GPIO33 reset, 9.6MHz max, 16x36,
+  10pt, 1080x2400, 139392-byte fw download.
+- spi-mt65xx register map + PIO transfer algo + mt6765_compat flags
+  extracted to ATHENS.md "Touch bring-up notes". Still needed:
+  spi_clk_hz source, clock-gating CG bits (clk-mt6853), pinmux decode,
+  NT36672C noflash protocol (OPPO vendor driver, NOT mainline - the
+  hard part). No SPI driver exists in tree.
+
+GPU - RESEARCH ONLY per user instruction (do NOT implement until
+buttons+touch confirmed on device): docs/ATHENS-GPU.md. Mali-G57
+MC3 == viva's MC2 IP; ~4200-line VivaGPU.cpp + whole Metal/Mesa/
+Panfrost stack (PIANO-GPU.md G3-G9) transfers. Port surface = match
+string mt6853-mali, MT6359 rails (VGPU=buck_vproc1 EN 0x1708/VOSEL
+0x172e, VSRAM=ldo_vsram_md EN 0x1f2c/VOSEL 0x1b46, constraint
+0-350mV), MFG power domains (MFG0/1/2/3/5), OPP table.
+
+NEXT ACTIONS: (1) user flashes 260f0d4c, tests buttons, long boot;
+(2) recovery pull -> decode ring for boot progress + key events;
+(3) if Hello reached -> touch driver work (SPI4+NT36672C); (4) GPU
+port only after buttons+touch confirmed.
+
 ## >>> ATHENS HANDOFF 2026-11-12g - RW BOOT REACHES APPLE LOGO + BAR (read first) <<<
 
 RUN-8 (ufsrw=1 rootrw=1, kernel 3119523f): mount panic gone; boot

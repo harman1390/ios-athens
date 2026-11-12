@@ -147,7 +147,8 @@ LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
 | Kernel reaches launchd | ✅ | run-6: pid 1 init exec'd /sbin/launchd — died only at the signature stage (below) |
 | launchd exec | ✅ | run-7: `unentitled_ios_sim_launch=1` fixed the WRONG_PLATFORM kill — launchd ran the full early-boot task chain (fsck→mount→FIPS POST→keybagd→usermanagerd→cache loader→"Early boot complete"→SpringBoard+xpcproxy spawns) |
 | Read-write root | ✅ boots | run-8 (ufsrw=1 rootrw=1): mount panic gone — boot reached **Apple logo + moving progress bar** (first iOS UI on hardware; kernel bootscreen rendering works) |
-| GUI stage | ⬜ in progress | run-8 booting to GUI — progress bar alive. Next known walls from upstream: IOMobileFramebuffer/display driver, then SpringBoard UI |
+| GUI stage | ⬜ in progress | run-9: boot alive 6+ min spawning user daemons (SpringBoard+backboardd exec'd, pid ~1030) when user restarted — needs 30-45+ min uninterrupted; next pull shows Hello or stall point |
+| Buttons (PWR/VOL) | ✅ drivers built, untested | 0178 AthensPMIC/Keys (PWRKEY=power, HOMEKEY=vol-up via MT6359) + 0179 AthensGpioKeys (vol-down=GPIO80 polled); image 260f0d4c; verify via SWEETLOG key-event lines |
 | UFS DMA carve | ⚠️ replaced | `ufsdma=0xfd000000` sat INSIDE dram_r1 alloc-range — flawed. 0177: CAP_64AS (bit24 set in real read) → DMA from managed >4G pool; fallback moved to 0x4e000000 (below both dummy-read ranges) |
 | ufs_scsi silent-spin risk | ⚠️ patched | 0177: 2²⁸ hard poll cap + host-state dump — a stuck command now times out loudly instead of hanging |
 
@@ -175,11 +176,11 @@ LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
 |---|---|---|
 | Framebuffer console | ✅ | LK fb 0x77e20000 1080×2400 stride 4352 (ARBG) — panic UI renders |
 | IOMobileFramebuffer / CoreAnimation | ⬜ | ios-sweet upstream has the full software-render stack to adapt |
-| Touch | ⬜ | GT9886 over i2c0@11e00000 (+apdma 0x10217080), SPI 112; populated node TBD on device |
-| Keys (PWR/VOL) | ⬜ | MT6359 via pwrap@10026000, EINT 118 |
+| Touch | ⬜ researched, driver not written | Novatek NT36672C "oppo,tp_noflash" on SPI4@0x11018000 (mt6765-spi); GIC195, GPIO12/13/97/98, EINT14, GPIO33 reset, 9.6MHz, 16x36, 10pt, 1080x2400, 139KB fw — needs MTK SPI host + vendor protocol (ATHENS.md notes) |
+| Keys (PWR/VOL) | ✅ built (see Buttons row above) | PWRKEY/HOMEKEY=MT6359 PMIC keys (EINT118), vol-down=EINT80 GPIO key; KP matrix unused (hw-init-map zeros) |
 | Battery/charger | ⬜ | MT6359 FGADC + MT6360 |
 | Wi‑Fi/BT | ⬜ | CONNSYS MT6781+MT6631 — viva has the registry work |
-| GPU (Mali G57-MC3 @0x13000000) | ⬜ | out of scope until GUI stable; CPU rendering first |
+| GPU (Mali G57-MC3 @0x13000000) | 🔬 researched, gated | docs/ATHENS-GPU.md — same Valhall IP as viva MC2; port = match string + MT6359 rails + MFG domains; DO NOT implement until buttons+touch confirmed on device |
 
 ## Non-regression rules
 
