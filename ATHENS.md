@@ -41,7 +41,7 @@ identity/storage decisions). Device runbook: `docs/athens-flash.md`.
 | Battery | MT6359 internal gauge (FGADC/auxadc via pwrap), 5000 mAh, 30 W Dart (MT6360 charger companion) | mt6853.dts; regs TBD |
 | GPU | Mali-G57 MC3 @0x13000000, SPI 364–368 (GPU/MMU/JOB/EVENT/PWR), SCP_SYS_MFG0-5 domains | mt6853.dts |
 | USB | ssusb xhci0@0x11200000, usb0phy@0x11e40000 — NOT the musb viva's link used | mt6853.dts; link port TBD |
-| Wi-Fi | MT663x connac combo (same family as viva's in-progress driver) | later |
+| Wi-Fi | On-die CONNSYS_6853 (connac2x2): `wifi@0x18000000` `mediatek,wifi` (SPI 377) + `consys@0x18002000` `mediatek,mt6853-consys` (SPI 378/79/379); MT6359 VCN33_1/2 rails, 4+6 MB reserve pools; BT `btif@0x1100c000` | stock mt6853.dtb + k6853v1_64_defconfig; later |
 | Recovery | unofficial TWRP 3.7.0 for athens (adb root, decryption) | XDA 4584321 |
 
 ## Safety

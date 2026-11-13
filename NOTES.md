@@ -3,54 +3,113 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
-## >>> ATHENS HANDOFF 2026-11-12i - RUN-10: FACTORY ROOTFS WAS THE WALL; TWEAKED IMAGE REPACKING <<<
+## >>> ATHENS HANDOFF 2026-11-13j - "PANIC REGRESSION" = LOWMEM TEST IMAGES, NOT A KERNEL BUG; TOUCH BUILD FIXED <<<
 
-RUN-10 PULL (logs/athens-run10-pull.txt, image 260f0d4c kernel 0179):
-boot was ALIVE at pull time - launchd spawning daemons at pid ~6485,
-12-min ring window (17:20:34->17:32:51 fake-epoch). NOT a kernel hang.
-- SpringBoard/backboardd: ZERO log output in window; AXSpringBoardServer
-  lookup fails every ~5 s from AccessibilityUI -> SpringBoard never
-  became functional.
-- "Crash loops" were mostly graceful exits: bluetoothd exit(0) ~70 ms
-  after spawn; imagent/identityservicesd/MobileInternetSharing/etc
-  exit(78) EX_CONFIG; launchd throttles+respawns (10 s backoff).
-- ROOT CAUSE (proven by mounting iosroot/ios16-root.img locally):
-  the flashed rootfs is the FACTORY build - Preferences/ had ONLY
-  .GlobalPreferences.plist; NO com.apple.migration.plist, NO
-  purplebuddy/springboard prefs, NO /private/var/containers. All
-  sweet-root-tweaks changes absent -> DataMigration ran (the ~60 min
-  bar) and half of userspace died on missing dirs.
-- Missing paths from ring (all ENOENT, exit 78): /var/run (73),
-  /tmp -> private/var/tmp (146), /var/mobile/Library/Caches (73),
-  /private/var/log/com.apple.xpc.launchd/launchd.log fopen (15153).
-  /var->private/var and /tmp->private/var/tmp symlinks DO exist in
-  the OS DMG; the TARGET dirs were never seeded.
-- accountsd CRASH sig 6, CommCenter CRASH sig 6 (expected, no
-  baseband). Poolscan: 4 never-used pages pa 0xe0000000+ in 12 min -
-  noise level, boot kept running; not the stall cause.
-- No SMP sample lines in retained ring (wrapped out or sampler
-  printf not reaching console ring).
+USER REPORT: "no apple logo, panics instead, falling back." DIAGNOSIS
+(verified against pulled logs + image bytes, NOT a guess):
 
-FIX APPLIED (local, no CI rebuild needed):
-- Mounted ios16-root.img (fsck -fy first), ran
-  tools/sweet-root-tweaks.py /mnt/iosroot -> all prefs landed
-  (migration LastSystemVersion=20H392, purplebuddy SetupDone/
-  SetupVersion=11, springboard BKNoWatchdogs, mini-buddy flags,
-  VirtualAudio disabled, StartRecorderServer off, containers/).
-- Created missing runtime dirs: private/var/{run,tmp(1777),log/
-  com.apple.xpc.launchd}, mobile/Library/Caches (501:501), and
-  chown'd Preferences dir+plists to 501:501 so cfprefsd can write.
-- sweet-root-tweaks.py gained runtime_dirs() (33 lines) so future
-  CI rootfs builds seed these permanently - commit pending.
-- Repacked via /tmp/stream-img2simg.py (viva-img2simg.py OOMs: it
-  buffers all chunks; streaming variant writes incrementally) ->
-  iosroot/ios16-root-tweaked.simg.
+ROOT CAUSE - the notouch/verbose test images were built LOWMEM:
+- shim/out/athens-notouch.adt + athens-low.adt both have
+  dram-base 0xc0000000 dram-size 0x3fd60000 = LOW window.
+- shim/out/athens.adt (feeds athens-boot.img) has dram-base
+  0x100000000 = HIGH window. Same for every proven run-8/9/10 image.
+- The low 4G window is inside the MTK firmware engines' 32-bit
+  alloc-ranges -> the known stray writer (pa ~0xe0000000) scribbles
+  freed kalloc objects -> `[data.kalloc.8192]: element modified after
+  free` panics (panic-notouch.bin off:1216, postpanic-pull off:1088).
+- HIGHMEM (0x100000000+) is unreachable by that engine -> clean.
+  The panics are the KNOWN lowmem stray-writer, re-exposed because the
+  variant payloads were built by hand WITHOUT --highmem.
 
-NEXT: fastboot flash userdata ios16-root-tweaked.simg (device in
-PitchBlack recovery now; needs reboot to fastboot or flash via
-recovery dd of raw img). Then boot kernel 260f0d4c - expect the
-bar to move FAST past migration (LastSystemVersion present) and
-services to stay up. Watch for next missing-dir layer.
+WHAT THE LOGS SHOW (logs/athens-postpanic-pull.bin, 17.8 MB):
+- Both lowmem boots got PAST UFS/root/launchd into userspace spawning
+  (backboardd, wifid, amfid, identityservicesd...) before the kalloc
+  UAF panic - same depth as the good highmem runs. NOT an early-boot
+  or touch failure.
+- The stale ring inside that pull is the 0179-kernel (athens-boot.img)
+  boot: reached deep userspace, NO panic. So the good image is fine.
+
+IMAGE PROVENANCE (payload string scan, verified):
+- athens-payload.bin -> athens-boot.img = 0179 kernel (260f0d4c):
+  NO NT36672C/AthensSPI strings, HAS POOLSCAN+ZCHECK (0175 applied via
+  dispatch 43290178829 drop 0161/0164/0165). HIGHMEM adt. = GOOD.
+- athens-notouch/v-payload.bin -> notouch+verbose imgs = dfcd5d0d
+  kernel: HAS touch strings, NO POOLSCAN/ZCHECK (push build skipped
+  0174/0175/0177 - drop_patches absent on push). LOWMEM adt. = panics.
+- TOUCH WAS NEVER TESTED: no booted image ever had the spi4/touch ADT
+  node. dfcd5d0d's touch driver also lacks init() (added in a08bbbc).
+
+CI FAILURE ROOT CAUSE (run 43436026809, a08bbbc) - FIXED:
+- ONLY compile error in whole build: `AthensNT36672C.cpp:599:1:
+  error: cannot combine with previous 'bool' declaration specifier`
+  = literal `bool\nbool\nAthensNT36672C::start` in the patch.
+- ALSO fixed a malformed KernelConfigTables hunk (@@ counts off by 2).
+- All 6 hunks now count-consistent -> patch applies + compiles.
+
+PIPELINE FIX (prevents recurrence):
+- tools/mkadt.py: --athens now IMPLIES --highmem; --lowmem is the
+  explicit escape hatch for low-window diagnostics. Verified:
+  --athens --athens-ufs -> dram-base 0x100000000; +--lowmem -> 0xc0000000.
+- tools/athens-mkboot.sh: ATHENS_LOWMEM=1 env added (adds --lowmem);
+  ATHENS_HIGHMEM=1 kept (now redundant but harmless).
+- NOTE: mkadt --athens (current) emits the spi4+touch node BY DEFAULT;
+  --athens-notouch drops it. dfcd5d0d kernel has touch code w/o init()
+  fix -> do NOT pair it with a spi4-node ADT (crash on failed match).
+
+NEXT (in order):
+1. Commit bool+hunk+mkadt/mkboot fixes; push; workflow_dispatch xnu.yml
+   with drop_patches="0161 0164 0165" + verify_strings for
+   NT36672C,AthensSPI,POOLSCAN,ZCHECK,SWEETABR,takeover hce,AthensPMIC,
+   MT6359,ATHENS GPIO KEYS (push builds skip 0174/5/7 - always dispatch).
+2. Restore logo NOW with known-good athens-boot.img (0179 kernel,
+   highmem, proven) via fastboot flash boot - confirms diagnosis on
+   device while CI builds (~9 min).
+3. New kernel -> athens-mkboot.sh ufs-rw (now highmem by default,
+   spi4 node present) -> fastboot flash boot -> expect touch probe
+   logs + Apple logo. fw blob nt36672c_jdi.bin must be in rootfs
+   /usr/share/firmware/touch/ (check sweet-root-tweaks/rootfs).
+4. Pull logs, decode, update STATUS.md.
+
+## >>> ATHENS HANDOFF 2026-11-12i - RUN-10 PULLED: MISSING /var DIRS = RESPAWN STORM; ROOTFS FIXED <<<
+
+RUN-10 PULL (logs/athens-run10-pull.txt, ring wrapped -> only last
+~12 min of userspace survived, 17:20:34-17:32:51 fake-RTC):
+- Boot was ALIVE at pull time: launchd still spawning services
+  (pid ~6485 imagent/identityservicesd/MobileInternetSharing).
+- SpringBoard NEVER spawned (com.apple.accessibility.AXSpringBoardServer
+  lookup fails every ~5 s from AccessibilityUI = "No such process").
+  backboardd ZERO mentions in window. No DataMigration/checkIn lines.
+- ROOT CAUSE of the storm: launchd "Service could not initialize:
+  Unable to set current working directory" ENOENT for /tmp (146x),
+  /var/run (73x), /var/mobile/Library/Caches (73x) -> exit(78)
+  respawn loops: imagent, identityservicesd, MobileInternetSharing,
+  nanoregistryd (~1460 events each in 12 min). Also mDNSResponder
+  exit(255), bluetoothd/fairplayd.H2/biomed/analyticsd cycling.
+  launchd's own launchd.log fopen ENOENT every line.
+- /tmp -> private/var/tmp and /var -> private/var symlinks exist in
+  the image, but the TARGET dirs were never created: iOS keeps them
+  on the data volume; our single HFS root has no data volume.
+- NOT the cause: the Nov-7 "last sparse chunk failed -> recovery dd"
+  repair was sha256-verified; fs serves files fine (launchd read all
+  plists). POOLSCAN hit at end: never-used pn 0x38000 pa 0xe0000000
+  written (w0 0xd8c001dfd34060c0 w1 0x..4d4d4d) hit 1 - stray-writer
+  tripwire fired once; watch on next pull, not proven harmful yet.
+
+ROOTFS FIX (image-side, no kernel change): iosroot/ios16-root.img
+(local copy of the flashed Nov-7 image) already had tweaks from
+run 42305909620; someone added run/Caches/launchd.log dirs at
+20:49-20:50 today -> ios16-root-tweaked.simg (21:39). I verified by
+mounting: added remaining standard /private/var skeleton dirs
+(empty 0555, select, root 0700, audit, networkd, preferences, vm,
+wireless, logs, MobileSoftwareUpdate, Managed Preferences,
+MobileDevice, lockdownd) + mobile/Library {Cookies,Logs,WebKit,
+SyncedPreferences,Favorites}. fsck.hfsplus -fy OK. Rebuilt sparse:
+iosroot/ios16-root-fixed.simg (img2simg). FLASH THIS, not the
+Nov-7 ios16-root.simg and not factory-run 42361811996's artifact.
+
+NEXT: fastboot flash userdata ios16-root-fixed.simg -> boot 260f0d4c
+kernel -> 30-45+ min -> recovery pull -> check SpringBoard/backboardd
+spawn + remaining ENOENT paths. Buttons test still pending (0179).
 
 ## >>> ATHENS HANDOFF 2026-11-12h - BUTTONS DONE (0178+0179), IMAGE READY; TOUCH+GPU RESEARCHED <<<
 
@@ -108,14 +167,16 @@ analysis - all checked against repo + CI logs, NOT guesses):
   security-status tuple (0,0,1,1) -> mobileactivationd takes the
   native Hactivation "Activated" branch (covers the data ark that
   sweet-root-tweaks skipped: "no mobileactivationd system container").
-- Flashed ios16-root.img provenance - CORRECTED 12i: local
-  iosroot/ios16-root.img is the FACTORY build (run 42361811996,
-  factory=true; verified by mounting: Preferences had only
-  .GlobalPreferences.plist, no tweak plists, no containers/). NONE
-  of the sweet bring-up tweaks were on the device. Run
-  42305909620's artifact DID have them but was not what got flashed.
-  The tweaked image now exists locally as
-  iosroot/ios16-root-tweaked.simg (see 12i).
+- Flashed ios16-root.img provenance: local iosroot/ios16-root.img
+  (Nov 7 06:10) matches CI rootfs run 42305909620 (finished
+  2026-11-07T00:33Z). Its log shows sweet-root-tweaks.py RAN:
+  'pref com.apple.migration [DMUserDataDisposition,
+  LastSystemVersion]', purplebuddy SetupDone/SetupFinishedAllSteps/
+  SetupVersion, springboard BKNoWatchdogs, VirtualAudio disabled,
+  mini-buddy flags off. => the migration-skip + Setup-skip ARE in
+  the flashed image. The later rootfs run 42361811996 used
+  factory=true (0 tweak lines, 17ms fsck->simg gap) - DO NOT flash
+  that artifact; it has none of the bring-up tweaks.
 - Patch 0056 (sweetfb 10 Hz throttle) is in xnu/patches, applied.
 - sweetscan: vm_resident.c defaults sweet_scan_mode=1 (report) with
   no boot arg - pool scanner already on.

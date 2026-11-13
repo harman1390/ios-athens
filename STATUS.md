@@ -179,7 +179,7 @@ LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
 | Touch | ⬜ researched, driver not written | Novatek NT36672C "oppo,tp_noflash" on SPI4@0x11018000 (mt6765-spi); GIC195, GPIO12/13/97/98, EINT14, GPIO33 reset, 9.6MHz, 16x36, 10pt, 1080x2400, 139KB fw — needs MTK SPI host + vendor protocol (ATHENS.md notes) |
 | Keys (PWR/VOL) | ✅ built (see Buttons row above) | PWRKEY/HOMEKEY=MT6359 PMIC keys (EINT118), vol-down=EINT80 GPIO key; KP matrix unused (hw-init-map zeros) |
 | Battery/charger | ⬜ | MT6359 FGADC + MT6360 |
-| Wi‑Fi/BT | ⬜ | CONNSYS MT6781+MT6631 — viva has the registry work |
+| Wi‑Fi/BT | ⬜ | on-die CONNSYS_6853 connac2x2 (wifi@0x18000000 SPI377, consys@0x18002000, btif@0x1100c000 — stock mt6853.dtb) — viva's connac driver/registry work is the reference to adapt |
 | GPU (Mali G57-MC3 @0x13000000) | 🔬 researched, gated | docs/ATHENS-GPU.md — same Valhall IP as viva MC2; port = match string + MT6359 rails + MFG domains; DO NOT implement until buttons+touch confirmed on device |
 
 ## Non-regression rules

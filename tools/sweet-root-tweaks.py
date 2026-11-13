@@ -95,44 +95,49 @@ def containers(root):
             print('mkdir', d)
 
 
-def runtime_dirs(root):
-    """Runtime dirs iOS expects but the sealed OS volume does not ship.
-
-    Evidence (athens run-10 SWEETLOG): services died exit(78) on
-    WorkingDirectory /var/run, /tmp, /var/mobile/Library/Caches
-    (ENOENT) and launchd.log fopen() failed ENOENT, because the image
-    only had what mkiosroot.sh seeded. /tmp -> private/var/tmp,
-    /var -> private/var are already symlinks in the OS DMG.
-    """
-    v = os.path.join(root, 'private/var')
-    for d, uid, gid, mode in (
-            ('run', 0, 0, 0o755),
-            ('tmp', 0, 0, 0o1777),
-            ('log', 0, 0, 0o755),
-            ('log/com.apple.xpc.launchd', 0, 0, 0o755)):
-        p = os.path.join(v, d)
-        if not os.path.isdir(p):
-            os.makedirs(p, exist_ok=True)
-        os.chown(p, uid, gid)
-        os.chmod(p, mode)
-        print('mkdir', p)
-    caches = os.path.join(v, 'mobile/Library/Caches')
-    if not os.path.isdir(caches):
-        os.makedirs(caches)
-    os.chown(caches, MOBILE, MOBILE)
-    os.chmod(caches, 0o755)
-    prefs = os.path.join(v, 'mobile/Library/Preferences')
-    if os.path.isdir(prefs):
-        os.chown(prefs, MOBILE, MOBILE)
-        os.chmod(prefs, 0o755)
-
-
 def find_container(root, kind, identifier):
     for meta in glob.glob(os.path.join(root, 'private/var/containers', kind, '*',
                                        '.com.apple.mobile_container_manager.metadata.plist')):
         if load(meta).get('MCMMetadataIdentifier') == identifier:
             return os.path.dirname(meta)
     return None
+
+
+def vardirs(root):
+    """Runtime dirs that live on the data volume on real iOS. Our single
+    HFS root has no separate data volume, so without these every service
+    whose plist sets WorkingDirectory to /tmp, /var/run, /var/mobile/
+    Library/Caches etc. fails to initialize (ENOENT -> launchd exit 78
+    respawn storm; seen on athens run-10)."""
+    for rel, uid, gid, mode in (
+            ('private/var/tmp', 0, 0, 0o1777),
+            ('private/var/run', 0, 0, 0o755),
+            ('private/var/empty', 0, 0, 0o555),
+            ('private/var/select', 0, 0, 0o755),
+            ('private/var/root', 0, 0, 0o700),
+            ('private/var/audit', 0, 0, 0o755),
+            ('private/var/networkd', 0, 0, 0o755),
+            ('private/var/preferences', 0, 0, 0o755),
+            ('private/var/vm', 0, 0, 0o755),
+            ('private/var/wireless', 0, 0, 0o755),
+            ('private/var/logs', 272, 272, 0o755),
+            ('private/var/MobileSoftwareUpdate', 0, 0, 0o755),
+            ('private/var/Managed Preferences', 0, 0, 0o755),
+            ('private/var/MobileDevice', 0, 0, 0o755),
+            ('private/var/lockdownd', 0, 0, 0o755),
+            ('private/var/log/com.apple.xpc.launchd', 0, 0, 0o755),
+            ('private/var/mobile/Library/Caches', MOBILE, MOBILE, 0o755),
+            ('private/var/mobile/Library/Cookies', MOBILE, MOBILE, 0o755),
+            ('private/var/mobile/Library/Logs', MOBILE, MOBILE, 0o755),
+            ('private/var/mobile/Library/WebKit', MOBILE, MOBILE, 0o755),
+            ('private/var/mobile/Library/SyncedPreferences', MOBILE, MOBILE, 0o755),
+            ('private/var/mobile/Library/Favorites', MOBILE, MOBILE, 0o755)):
+        d = os.path.join(root, rel)
+        if not os.path.isdir(d):
+            os.makedirs(d)
+            os.chown(d, uid, gid)
+            os.chmod(d, mode)
+            print('vardir', rel)
 
 
 def activation(root):
@@ -173,7 +178,7 @@ def main():
     root = sys.argv[1]
     launchd(root)
     containers(root)
-    runtime_dirs(root)
+    vardirs(root)
     activation(root)
     audio(root)
     merge_pref(root, 'com.apple.migration', {
