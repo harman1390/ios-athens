@@ -172,6 +172,27 @@ def audio(root):
         print('StartRecorderServer off', os.path.relpath(conf, root))
 
 
+def firmware(root):
+    """Install the NT36672C touch firmware the kernel driver loads.
+
+    AthensNT36672C opens fw-path /usr/share/firmware/touch/nt36672c_jdi.bin
+    (tools/mkadt.py) on the mounted root. Source blob lives in the repo at
+    firmware/touch/; copy it root-owned into the image. Missing source is a
+    warning, not fatal - rootfs builds without the blob still work."""
+    src_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           os.pardir, 'firmware', 'touch')
+    dst_dir = os.path.join(root, 'usr/share/firmware/touch')
+    for name in os.listdir(src_dir) if os.path.isdir(src_dir) else []:
+        if not name.endswith('.bin'):
+            continue
+        os.makedirs(dst_dir, exist_ok=True)
+        dst = os.path.join(dst_dir, name)
+        shutil.copyfile(os.path.join(src_dir, name), dst)
+        os.chown(dst, 0, 0)
+        os.chmod(dst, 0o644)
+        print('firmware', os.path.relpath(dst, root))
+
+
 def main():
     if len(sys.argv) != 2 or not os.path.isdir(os.path.join(sys.argv[1], 'System/Library/xpc')):
         sys.exit(__doc__)
@@ -181,6 +202,7 @@ def main():
     vardirs(root)
     activation(root)
     audio(root)
+    firmware(root)
     merge_pref(root, 'com.apple.migration', {
         'LastSystemVersion': BUILD,
         'DMUserDataDisposition': {'SyntheticDidUpgrade': False, 'buildVersion': BUILD}})
