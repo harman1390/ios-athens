@@ -364,7 +364,7 @@ new file mode 100644
 index 0000000..7ed29f2
 --- /dev/null
 +++ b/iokit/Kernel/arm/hid/AthensNT36672C.cpp
-@@ -0,0 +1,765 @@
+@@ -0,0 +1,764 @@
 +/*
 + * athens (MT6853): Novatek NT36672C "noflash" touch controller, the built-in
 + * touch screen. Matches /arm-io/spi4/touch ("novatek,nt36672c"), a child of
@@ -963,7 +963,6 @@ index 0000000..7ed29f2
 +}
 +
 +bool
-+bool
 +AthensNT36672C::start(IOService *provider)
 +{
 +	fPrevMap = 0;
@@ -1134,7 +1133,7 @@ diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
 index 0000000..0000000 100644
 --- a/iokit/KernelConfigTables.cpp
 +++ b/iokit/KernelConfigTables.cpp
-@@ -135,6 +135,16 @@ const char * gIOKernelConfigTables =
+@@ -135,8 +135,18 @@ const char * gIOKernelConfigTables =
      "   {"
      "     'IOClass'         = VivaGT9896;"
      "     'IOProviderClass' = VivaDTNub;"

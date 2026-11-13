@@ -2,7 +2,8 @@
 """Build the minimal Apple Device Tree that the SWEET xnu needs to boot.
 
 Only what the early boot path actually reads (see NOTES.md); every MMIO
-address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--viva [--ufs]]
+address comes from the sweet live FDT. Usage:  mkadt.py OUT.adt [--dump] [--qemu] [--highmem] [--lowmem] [--viva [--ufs]]
+(--athens implies --highmem; --lowmem forces the dangerous low window for diagnostics.)
 """
 import hashlib, os, struct, sys
 
@@ -662,7 +663,13 @@ if __name__ == '__main__':
     if '--athens-mem' in sys.argv:
         i = sys.argv.index('--athens-mem')
         ATHENS_PHYS_BASE, ATHENS_MEM_SIZE = int(sys.argv[i+1], 0), int(sys.argv[i+2], 0)
-    root = build(qemu='--qemu' in sys.argv, highmem='--highmem' in sys.argv,
+    # --athens defaults to the high DRAM bank: the low window sits inside the
+    # MTK firmware engines' 32-bit alloc-ranges and gets scribbled on (run-6
+    # stray writer; the notouch/verbose images panicked on it). --lowmem is the
+    # explicit escape hatch for low-window diagnostics only.
+    highmem = ('--highmem' in sys.argv or
+               ('--athens' in sys.argv and '--lowmem' not in sys.argv))
+    root = build(qemu='--qemu' in sys.argv, highmem=highmem,
                  viva='--viva' in sys.argv, viva_ufs='--ufs' in sys.argv,
                  athens='--athens' in sys.argv, athens_ufs='--athens-ufs' in sys.argv,
                  athens_bare='--athens-bare' in sys.argv)
