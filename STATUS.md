@@ -147,8 +147,8 @@ LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
 | Kernel reaches launchd | ✅ | run-6: pid 1 init exec'd /sbin/launchd — died only at the signature stage (below) |
 | launchd exec | ✅ | run-7: `unentitled_ios_sim_launch=1` fixed the WRONG_PLATFORM kill — launchd ran the full early-boot task chain (fsck→mount→FIPS POST→keybagd→usermanagerd→cache loader→"Early boot complete"→SpringBoard+xpcproxy spawns) |
 | Read-write root | ✅ boots | run-8 (ufsrw=1 rootrw=1): mount panic gone — boot reached **Apple logo + moving progress bar** (first iOS UI on hardware; kernel bootscreen rendering works) |
-| GUI stage | ⬜ in progress | run-9: boot alive 6+ min spawning user daemons (SpringBoard+backboardd exec'd, pid ~1030) when user restarted — needs 30-45+ min uninterrupted; next pull shows Hello or stall point |
-| Buttons (PWR/VOL) | ✅ drivers built, untested | 0178 AthensPMIC/Keys (PWRKEY=power, HOMEKEY=vol-up via MT6359) + 0179 AthensGpioKeys (vol-down=GPIO80 polled); image 260f0d4c; verify via SWEETLOG key-event lines |
+| GUI stage | ⚠️ renders, panel black | 0179-recheck pull (ring 553982B, unwrapped): **no panic**, 1966 execs deep into userspace, SpringBoard+backboardd spawned clean. backboardd opened IOCoreSurfaceRoot, made 1125x2436 BGRA surface, double-buffered, **`SWEET FB: swap 1..5` real frames composited** → then `display off`. **The GUI IS rendering; the physical panel shows black** = DSI scan-out/backlight bring-up gap, NOT a boot failure. Same end-state as run-9/10; run-8's longer logo was the kernel boot logo now flashing by faster (rootfs vardirs fix). |
+| Buttons (PWR/VOL) | ✅ drivers built, untested | 0178 AthensPMIC/Keys (PWRKEY=power, HOMEKEY=vol-up via MT6359) + 0179 AthensGpioKeys (vol-down=GPIO80 polled); verify via SWEETLOG key-event lines |
 | UFS DMA carve | ⚠️ replaced | `ufsdma=0xfd000000` sat INSIDE dram_r1 alloc-range — flawed. 0177: CAP_64AS (bit24 set in real read) → DMA from managed >4G pool; fallback moved to 0x4e000000 (below both dummy-read ranges) |
 | ufs_scsi silent-spin risk | ⚠️ patched | 0177: 2²⁸ hard poll cap + host-state dump — a stuck command now times out loudly instead of hanging |
 
@@ -176,7 +176,7 @@ LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
 |---|---|---|
 | Framebuffer console | ✅ | LK fb 0x77e20000 1080×2400 stride 4352 (ARBG) — panic UI renders |
 | IOMobileFramebuffer / CoreAnimation | ⬜ | ios-sweet upstream has the full software-render stack to adapt |
-| Touch | ⬜ researched, driver not written | Novatek NT36672C "oppo,tp_noflash" on SPI4@0x11018000 (mt6765-spi); GIC195, GPIO12/13/97/98, EINT14, GPIO33 reset, 9.6MHz, 16x36, 10pt, 1080x2400, 139KB fw — needs MTK SPI host + vendor protocol (ATHENS.md notes) |
+| Touch | ⚠️ driver built, image ready, untested | 0180: AthensSPI (spi4@0x11018000, mt6765-spi, INTID195, GPIO12/13/97/98, 9.6MHz) + AthensNT36672C (fw header parser, trim-id memmap, hw_crc select, non-CRC download, ISR slot/cksum/recovery). Kernel ae66f3b (CI 43462608788, all markers verified) + image `shim/out/athens-boot-touch.img` (highmem+spi4 node) built. NT36672C fw `nt36672c_jdi.bin` ready; needs it in flashed rootfs `/usr/share/firmware/touch/` for fwUpdate. Driver binding verifiable via SWEETLOG even with black panel. See docs/ATHENS-TOUCH.md |
 | Keys (PWR/VOL) | ✅ built (see Buttons row above) | PWRKEY/HOMEKEY=MT6359 PMIC keys (EINT118), vol-down=EINT80 GPIO key; KP matrix unused (hw-init-map zeros) |
 | Battery/charger | ⬜ | MT6359 FGADC + MT6360 |
 | Wi‑Fi/BT | ⬜ | on-die CONNSYS_6853 connac2x2 (wifi@0x18000000 SPI377, consys@0x18002000, btif@0x1100c000 — stock mt6853.dtb) — viva's connac driver/registry work is the reference to adapt |

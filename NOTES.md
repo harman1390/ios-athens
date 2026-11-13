@@ -3,6 +3,64 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-13k - 0179 HIGHMEM BOOTS CLEAN TO GUI-RENDER; BLACK SCREEN = PANEL, NOT BOOT <<<
+
+VERIFIED ON DEVICE (logs/athens-0179-recheck.txt, ring total 553982B,
+flush #96, NOT wrapped):
+- Flashed athens-boot-0179-good.img (sha 260f0d4c = the proven 0179
+  kernel + highmem ADT) via fastboot. Boot is CLEAN - zero panic,
+  zero SWEETABR. Confirms the "panic regression" was LOWMEM test
+  images, not a kernel bug.
+- Reached DEEP userspace: 1966 execs, SpringBoard (513) + backboardd
+  (594) + runningboardd spawned, neither crashed. Daemon CRASH lines
+  (2072) are the usual missing-baseboard/env noise.
+- DISPLAY: `SWEET FB: display on` (l2274) -> backboardd opened
+  IOCoreSurfaceRoot, created surface 2 1125x2436 BGRA, double-buffered
+  0x77e20000/0x7920c000 -> `swap 1..5` real frames composited -> then
+  `display off` (l2425) and stayed off. THE GUI IS RENDERING FRAMES;
+  the physical panel shows black = DSI scan-out/backlight bring-up
+  gap, NOT a boot failure. This is the same state run-9/10 reached;
+  run-8's persistent logo+bar was the kernel boot logo which now
+  flashes by faster (rootfs vardirs fix -> quicker userspace handoff).
+- USER-VISIBLE: "logo for ~1s then black" = boot logo -> backboardd
+  takes display -> panel black. No panic anywhere.
+
+BUILD PIPELINE FIXES LANDED (commits 56bb24f, a846d43, ae66f3b, 7bc69e9):
+- 0180 patch: removed literal `bool\nbool` before AthensNT36672C::start
+  (the ONLY a08bbbc compile error, CI log line: "cannot combine with
+  previous 'bool' declaration specifier") + fixed KernelConfigTables
+  hunk @@ counts (were off by 2). All 6 hunks count-consistent now.
+- mkadt.py: --athens IMPLIES --highmem; --lowmem = explicit diagnostic
+  escape hatch. athens-mkboot.sh: ATHENS_LOWMEM=1 env added.
+- shim/build-athens.sh: added ufs.c back to OBJS (link was failing on
+  undefined ufs_dump_fb/ufs_dump_ba/ufs_harvest_pram; ufsdump.c stays
+  out). NOTE: pass ABSOLUTE stock boot.img path (script cds to shim/).
+- sweet-root-tweaks.py: firmware() installs firmware/touch/*.bin ->
+  /usr/share/firmware/touch/ (nt36672c_jdi.bin for the touch driver).
+
+TOUCH KERNEL BUILT + IMAGE READY:
+- CI run 43462608788 (workflow_dispatch, drop 0161/0164/0165,
+  verify_strings all markers) SUCCESS 10m26s. kernel.development.sweet
+  sha256 371fa3b7... has NT36672C/AthensSPI/POOLSCAN/ZCHECK/SWEETABR/
+  takeover hce/AthensPMIC/MT6359/ATHENS GPIO KEYS - ALL present.
+  Downloaded to logs/kernel-ae66f3b/.
+- Built shim/out/athens-boot-touch.img sha cf9abe49... = ae66f3b
+  kernel + highmem ADT + spi4/nt36672c node (mkadt now emits it by
+  default) + proven cmdline. Touch driver WILL probe; fw blob NOT yet
+  in flashed rootfs -> fwUpdate fails soft (logs error, no crash).
+- athens-boot.img was overwritten by the touch build; the proven 0179
+  image is preserved as shim/out/athens-boot-0179-good.img.
+
+NEXT:
+- Flash athens-boot-touch.img -> pull SWEETLOG -> verify AthensSPI
+  probe + NT36672C match + fw-load attempt (works even with black
+  screen; binding is in the log). Then get nt36672c_jdi.bin into the
+  flashed rootfs (inject into ios16-root.img via WSL hfsprogs, or next
+  rootfs CI build now carries it via firmware()).
+- DISPLAY is the real GUI blocker now: panel shows black while
+  backboardd swaps frames. Separate investigation (DSI init, panel
+  timing, backlight). NOT a regression - pre-existing bring-up gap.
+
 ## >>> ATHENS HANDOFF 2026-11-13j - "PANIC REGRESSION" = LOWMEM TEST IMAGES, NOT A KERNEL BUG; TOUCH BUILD FIXED <<<
 
 USER REPORT: "no apple logo, panics instead, falling back." DIAGNOSIS
