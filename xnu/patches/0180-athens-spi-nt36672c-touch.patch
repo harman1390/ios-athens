@@ -1,0 +1,1173 @@
+diff --git a/iokit/Kernel/arm/AthensSPI.cpp b/iokit/Kernel/arm/AthensSPI.cpp
+new file mode 100644
+index 0000000..a59c0e7
+--- /dev/null
++++ b/iokit/Kernel/arm/AthensSPI.cpp
+@@ -0,0 +1,294 @@
++/*
++ * athens (MT6853): MediaTek SPI host driver (see AthensSPI.h).
++ *
++ * Register map and protocol from Xiaomi's spi-mt65xx.c (mt6765 compat):
++ *   CFG0 0x00  [sck_high:0-7 sck_low:8-15 cs_hold:16-23 cs_setup:24-31]
++ *   CFG1 0x04  [cs_idle:0-7 packet_loop:8-15 packet_len:16-25]
++ *   TX_SRC 0x08 / RX_DST 0x0c (DMA phys addrs), TX_DATA 0x10 / RX_DATA 0x14
++ *   CMD 0x18   ACT=b0 RESUME=b1 RST=b2 PAUSE_EN=b4 DEASSERT=b5 SAMPLE_SEL=b6
++ *              CS_POL=b7 CPHA=b8 CPOL=b9 RX_DMA=b10 TX_DMA=b11 TXMSBF=b12
++ *              RXMSBF=b13 RX_ENDIAN=b14 TX_ENDIAN=b15 FINISH_IE=b16 PAUSE_IE=b17
++ *   STATUS0 0x1c (busy=b0)  STATUS1 0x20  PAD_SEL 0x24  CFG2 0x28
++ * FIFO 32 B, DMA packet <= 1024 B, packet_loop <= 255.
++ *
++ * Bus setup (live FDT / clk-mt6853.c): spi_sel mux -> msdcpll_d4 ~96 MHz
++ * (topckgen CLK_CFG_6+0x70 lsb16 w2, update reg +0x04 bit26), bus gate
++ * ifrao_spi4 (infracfg_ao +0xa4 set bit25). SPI4 pins SCK=12 MISO=13
++ * MOSI=97 CS=98 all func2 - the bootloader/pinctrl already muxes them
++ * (verified working in recovery); chip conf mode 0 MSB, sck high=low=5
++ * (~9.6 MHz of the ~96 MHz source, matching the 9.6 MHz DT max).
++ */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOBufferMemoryDescriptor.h>
++#include <libkern/OSByteOrder.h>
++#include "AthensSPI.h"
++
++#define SPI_CFG0        0x00
++#define SPI_CFG1        0x04
++#define SPI_TX_SRC      0x08
++#define SPI_RX_DST      0x0c
++#define SPI_TX_DATA     0x10
++#define SPI_RX_DATA     0x14
++#define SPI_CMD         0x18
++#define SPI_STATUS0     0x1c
++#define SPI_STATUS1     0x20
++#define SPI_PAD_SEL     0x24
++#define SPI_CFG2        0x28
++
++#define SPI_CMD_ACT         (1u << 0)
++#define SPI_CMD_RESUME      (1u << 1)
++#define SPI_CMD_RST         (1u << 2)
++#define SPI_CMD_PAUSE_EN    (1u << 4)
++#define SPI_CMD_DEASSERT    (1u << 5)
++#define SPI_CMD_SAMPLE_SEL  (1u << 6)
++#define SPI_CMD_CS_POL      (1u << 7)
++#define SPI_CMD_CPHA        (1u << 8)
++#define SPI_CMD_CPOL        (1u << 9)
++#define SPI_CMD_RX_DMA      (1u << 10)
++#define SPI_CMD_TX_DMA      (1u << 11)
++#define SPI_CMD_TXMSBF      (1u << 12)
++#define SPI_CMD_RXMSBF      (1u << 13)
++#define SPI_CMD_FINISH_IE   (1u << 16)
++
++#define SPI_STATUS0_BUSY    (1u << 0)
++#define SPI_PACKET_SIZE     1024u
++
++/* topckgen CLK_CFG_6 spi_sel mux (reg1): lsb 16, width 2, value 3 = msdcpll_d4 */
++#define CLK_CFG6            0x070
++#define CLK_CFG6_SET        0x074
++#define CLK_CFG6_CLR        0x078
++#define CLK_CFG_UPDATE      0x004
++#define SPI_SEL_LSB         16
++#define SPI_SEL_VAL         3u
++#define TOP_MUX_SPI_SHIFT   26
++/* infracfg_ao ifrao_spi4 gate (reg2): set ofs 0xa4, bit 25 */
++#define IFRAO4_CG_SET       0x0a4
++#define IFRAO_SPI4_BIT      25
++
++OSDefineMetaClassAndStructors(AthensSPI, IOService);
++
++static AthensSPI *gSPI;
++
++AthensSPI *
++AthensSPI::wait(void)
++{
++	for (int i = 0; i < 200 && gSPI == NULL; i++) {
++		IOSleep(10);
++	}
++	return gSPI;
++}
++
++IOWorkLoop *
++AthensSPI::getWorkLoop(void) const
++{
++	return fWorkLoop;
++}
++
++void
++AthensSPI::initHW(void)
++{
++	/* soft reset, then static config: mode 0 MSB, ~9.6 MHz, cs_idle 2,
++	 * finish intr (we poll STATUS0 busy instead), no pause/deassert. */
++	wr32(SPI_CMD, rd32(SPI_CMD) | SPI_CMD_RST);
++	IODelay(10);
++	wr32(SPI_CMD, rd32(SPI_CMD) & ~SPI_CMD_RST);
++	wr32(SPI_CFG0, (5 << 0) | (5 << 8) | (0 << 16) | (0 << 24));
++	wr32(SPI_CFG1, (2 - 1) << 0);        /* cs_idletime 2 -> field value 1 */
++	wr32(SPI_PAD_SEL, 0);
++	wr32(SPI_CMD, SPI_CMD_TXMSBF | SPI_CMD_RXMSBF | SPI_CMD_FINISH_IE);
++}
++
++bool
++AthensSPI::waitBusy(uint32_t timeoutUs)
++{
++	while (rd32(SPI_STATUS0) & SPI_STATUS0_BUSY) {
++		if (timeoutUs == 0) {
++			return false;
++		}
++		IODelay(5);
++		timeoutUs--;
++	}
++	return true;
++}
++
++bool
++AthensSPI::init(OSDictionary *props)
++{
++	if (!IOService::init(props)) {
++		return false;
++	}
++	/* Zero everything free() may touch: start() bails before assigning
++	 * fGate/fRegs, and a failed match still frees the instance. */
++	fMap = fTopMap = fInfraMap = NULL;
++	fRegs = fTopRegs = fInfraRegs = 0;
++	fWorkLoop = NULL;
++	fGate = NULL;
++	fDMA = NULL;
++	fDMAPhys = 0;
++	fErrors = 0;
++	return true;
++}
++
++bool
++AthensSPI::start(IOService *provider)
++{
++	if (!IOService::start(provider)) {
++		return false;
++	}
++	fMap = provider->mapDeviceMemoryWithIndex(0);
++	fTopMap = provider->mapDeviceMemoryWithIndex(1);
++	fInfraMap = provider->mapDeviceMemoryWithIndex(2);
++	fWorkLoop = IOWorkLoop::workLoop();
++	fDMA = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
++	    kIODirectionInOut | kIOMemoryPhysicallyContiguous, kDMASize,
++	    (mach_vm_address_t)(0xFFFFFFFFULL) << 32);
++	if (fMap == NULL || fWorkLoop == NULL || fDMA == NULL) {
++		IOLog("ATHENS SPI: missing regs map, work loop or DMA buffer\n");
++		return false;
++	}
++	fRegs = fMap->getVirtualAddress();
++	fTopRegs = fTopMap != NULL ? fTopMap->getVirtualAddress() : 0;
++	fInfraRegs = fInfraMap != NULL ? fInfraMap->getVirtualAddress() : 0;
++	fDMAPhys = (uint32_t)fDMA->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
++	fGate = IOCommandGate::commandGate(this);
++	if (fGate == NULL || fWorkLoop->addEventSource(fGate) != kIOReturnSuccess) {
++		IOLog("ATHENS SPI: no gate\n");
++		return false;
++	}
++
++	/* spi_sel mux -> msdcpll_d4 (~96 MHz) and the bus gate ifrao_spi4.
++	 * Both are one-off: if the bases aren't in the ADT the block keeps
++	 * whatever the bootloader left (recovery shows the defaults work). */
++	if (fTopRegs != 0) {
++		volatile uint32_t *top = (volatile uint32_t *)fTopRegs;
++		top[CLK_CFG6_CLR / 4] = SPI_SEL_VAL << SPI_SEL_LSB;
++		top[CLK_CFG6_SET / 4] = SPI_SEL_VAL << SPI_SEL_LSB;
++		top[CLK_CFG_UPDATE / 4] = 1u << TOP_MUX_SPI_SHIFT;
++	}
++	if (fInfraRegs != 0) {
++		*(volatile uint32_t *)(fInfraRegs + IFRAO4_CG_SET) = 1u << IFRAO_SPI4_BIT;
++	}
++	initHW();
++	IOLog("ATHENS SPI: %s ready (cfg0 %08x cfg1 %08x cmd %08x)\n",
++	    provider->getName(), rd32(SPI_CFG0), rd32(SPI_CFG1), rd32(SPI_CMD));
++	registerService();
++	gSPI = this;
++	VivaDTNub::publishChildren(this, provider);
++	return true;
++}
++
++void
++AthensSPI::free(void)
++{
++	if (gSPI == this) {
++		gSPI = NULL;
++	}
++	if (fWorkLoop != NULL && fGate != NULL) {
++		fWorkLoop->removeEventSource(fGate);
++	}
++	OSSafeReleaseNULL(fGate);
++	OSSafeReleaseNULL(fDMA);
++	OSSafeReleaseNULL(fMap);
++	OSSafeReleaseNULL(fTopMap);
++	OSSafeReleaseNULL(fInfraMap);
++	OSSafeReleaseNULL(fWorkLoop);
++	IOService::free();
++}
++
++IOReturn
++AthensSPI::transfer(const uint8_t *txbuf, uint8_t *rxbuf, uint32_t len)
++{
++	if (len == 0 || len > kDMASize || (txbuf == NULL && rxbuf == NULL)) {
++		return kIOReturnBadArgument;
++	}
++	return fGate->runActionBlock(^IOReturn {
++		return transferGated(txbuf, rxbuf, len);
++	});
++}
++
++/*
++ * spi-mt65xx.c mtk_spi_transfer_one: one CS frame. <=32 B FIFO PIO; larger
++ * frames go through the controller's own DMA regs (TX_SRC/RX_DST +
++ * TX_DMA/RX_DMA), not the AP-DMA engine.
++ */
++IOReturn
++AthensSPI::transferGated(const uint8_t *txbuf, uint8_t *rxbuf, uint32_t len)
++{
++	uint32_t packet = 0, loop = 0, cfg1 = 0;
++	uint32_t cmd = rd32(SPI_CMD) & ~(SPI_CMD_TX_DMA | SPI_CMD_RX_DMA |
++	    SPI_CMD_PAUSE_EN | SPI_CMD_DEASSERT);
++
++	if (len <= kFIFOSize) {
++		/* PIO: packet_len = len, one packet; shift the frame through the
++		 * 32-byte FIFO, then drain the same number of RX bytes. */
++		uint32_t cfg1 = rd32(SPI_CFG1);
++		cfg1 &= ~((0x3ff << 16) | (0xff << 8));
++		cfg1 |= (len - 1) << 16;         /* packet_len = len, loop = 1 */
++		wr32(SPI_CFG1, cfg1);
++		if (txbuf != NULL) {
++			for (uint32_t i = 0; i < len; i += 4) {
++				uint32_t w = 0;
++				uint32_t n = (len - i) < 4 ? (len - i) : 4;
++				memcpy(&w, txbuf + i, n);
++				wr32(SPI_TX_DATA, w);
++			}
++		} else {
++			for (uint32_t i = 0; i < len; i += 4) {
++				wr32(SPI_TX_DATA, 0);
++			}
++		}
++		wr32(SPI_CMD, cmd | SPI_CMD_ACT);
++		if (!waitBusy(20000)) {
++			goto timeout;
++		}
++		if (rxbuf != NULL) {
++			for (uint32_t i = 0; i < len; i += 4) {
++				uint32_t w = rd32(SPI_RX_DATA);
++				uint32_t n = (len - i) < 4 ? (len - i) : 4;
++				memcpy(rxbuf + i, &w, n);
++			}
++		}
++		return kIOReturnSuccess;
++	}
++
++	/* DMA path: copy the frame into the contiguous buffer, program
++	 * packet_len (<=1024) + packet_loop, set the DMA cmd bits, ACT. */
++	if (txbuf != NULL) {
++		memcpy(fDMA->getBytesNoCopy(), txbuf, len);
++	} else {
++		memset(fDMA->getBytesNoCopy(), 0, len);
++	}
++	/* Clean+invalidate before the controller reads it (same op VivaWiFi
++	 * uses for both directions: this fork has no IOFlushCacheRange). */
++	fDMA->performOperation(kIOMemoryIncoherentIOFlush, 0, len);
++
++	packet = len < SPI_PACKET_SIZE ? len : SPI_PACKET_SIZE;
++	loop = (len + packet - 1) / packet;
++	cfg1 = rd32(SPI_CFG1);
++	cfg1 &= ~((0x3ff << 16) | (0xff << 8));
++	cfg1 |= (packet - 1) << 16 | (loop - 1) << 8;
++	wr32(SPI_CFG1, cfg1);
++	wr32(SPI_TX_SRC, fDMAPhys);
++	wr32(SPI_RX_DST, fDMAPhys);
++	cmd |= (txbuf != NULL ? SPI_CMD_TX_DMA : 0) | (rxbuf != NULL ? SPI_CMD_RX_DMA : 0);
++	wr32(SPI_CMD, cmd | SPI_CMD_ACT);
++	if (!waitBusy(100000)) {
++		goto timeout;
++	}
++	if (rxbuf != NULL) {
++		fDMA->performOperation(kIOMemoryIncoherentIOFlush, 0, len);
++		memcpy(rxbuf, fDMA->getBytesNoCopy(), len);
++	}
++	return kIOReturnSuccess;
++
++timeout:
++	fErrors++;
++	if (fErrors <= 8) {
++		IOLog("ATHENS SPI: transfer %u B timeout (status0 %08x status1 %08x)\n",
++		    len, rd32(SPI_STATUS0), rd32(SPI_STATUS1));
++	}
++	wr32(SPI_CMD, rd32(SPI_CMD) | SPI_CMD_RST);
++	IODelay(10);
++	wr32(SPI_CMD, rd32(SPI_CMD) & ~SPI_CMD_RST);
++	return kIOReturnTimeout;
++}
+diff --git a/iokit/Kernel/arm/AthensSPI.h b/iokit/Kernel/arm/AthensSPI.h
+new file mode 100644
+index 0000000..83a2b91
+--- /dev/null
++++ b/iokit/Kernel/arm/AthensSPI.h
+@@ -0,0 +1,55 @@
++/*
++ * athens (MT6853): MediaTek SPI host driver (spi-mt65xx.c equivalent).
++ *
++ * AthensSPI (/arm-io/spi4, "mediatek,mt6765-spi"): mt65xx SPI controller in
++ * FIFO (<= 32 B) and internal-DMA (TX_SRC/RX_DST, one CS frame up to 255 KiB)
++ * modes, polled completion; publishes device-tree children as VivaDTNub nubs
++ * (child "reg" = chip select). reg 0 = the SPI block, optional reg 1 =
++ * topckgen (clock mux + gate setup described by "clock-mux"/"clock-gates").
++ */
++#ifndef _IOKIT_ARM_ATHENSSPI_H
++#define _IOKIT_ARM_ATHENSSPI_H
++
++#include <IOKit/IOService.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOCommandGate.h>
++
++#include "VivaPMIC.h"   /* VivaDTNub */
++
++class AthensSPI : public IOService {
++	OSDeclareDefaultStructors(AthensSPI);
++public:
++	enum { kFIFOSize = 32 };
++	enum { kDMASize  = 64 * 1024 };
++
++	virtual bool init(OSDictionary *props = NULL) APPLE_KEXT_OVERRIDE;
++	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	virtual void free(void) APPLE_KEXT_OVERRIDE;
++	virtual IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE;
++
++	/*
++	 * One CS frame: full-duplex `len` bytes (tx may be NULL for a pure read,
++	 * rx may be NULL for a pure write). Sleeps: not from interrupt context.
++	 */
++	IOReturn transfer(const uint8_t *txbuf, uint8_t *rxbuf, uint32_t len);
++	/* The started controller, waiting for it if needed (NULL after timeout). */
++	static AthensSPI *wait(void);
++
++private:
++	IOReturn transferGated(const uint8_t *txbuf, uint8_t *rxbuf, uint32_t len);
++	void initHW(void);
++	bool waitBusy(uint32_t timeoutUs);
++	inline uint32_t rd32(uint32_t off) { return *(volatile uint32_t *)(fRegs + off); }
++	inline void wr32(uint32_t off, uint32_t v) { *(volatile uint32_t *)(fRegs + off) = v; }
++
++	IOMemoryMap             *fMap, *fTopMap, *fInfraMap;
++	vm_offset_t              fRegs, fTopRegs, fInfraRegs;
++	IOWorkLoop              *fWorkLoop;
++	IOCommandGate           *fGate;
++	IOBufferMemoryDescriptor *fDMA;
++	uint32_t                 fDMAPhys;
++	uint32_t                 fErrors;
++};
++
++#endif /* _IOKIT_ARM_ATHENSSPI_H */
+diff --git a/iokit/Kernel/arm/hid/AthensNT36672C.cpp b/iokit/Kernel/arm/hid/AthensNT36672C.cpp
+new file mode 100644
+index 0000000..7ed29f2
+--- /dev/null
++++ b/iokit/Kernel/arm/hid/AthensNT36672C.cpp
+@@ -0,0 +1,765 @@
++/*
++ * athens (MT6853): Novatek NT36672C "noflash" touch controller, the built-in
++ * touch screen. Matches /arm-io/spi4/touch ("novatek,nt36672c"), a child of
++ * AthensSPI (../AthensSPI.cpp); it is a SweetHIDTouch, so contacts reach
++ * backboardd as the same digitizer collection events as on sweet.
++ *
++ * Protocol from the kernel's nt36xxx* sources (realme-mt6853 tree
++ * drivers/input/touchscreen/NT36672C/). The live binding is
++ * "oppo,tp_noflash"/"novatek,nf_nt36672c" — that exact driver lives in a
++ * vendor module not in the public tree, but the wire protocol below is the
++ * chip's (Novatek xdata paging + 65-byte event report), which the generic
++ * source documents verbatim:
++ *
++ *  - SPI frame: write = {addr|0x80, data...}; read = {addr&0x7F, ...tx,
++ *    dummy} in one CS frame; data lands at rbuf[2]. set_page =
++ *    {0xFF, addr>>15, addr>>7}. nvt_write_addr(a,d) = set_page(a) + write
++ *    {a&0x7F, d}.
++ *  - Trim: bootloader_reset (SWRST 0x69, fast-read off) -> page 0x1F64E,
++ *    read 7 -> 6 ID bytes matched against trim_id_table -> mmap + hw_crc.
++ *    Both families are carried: NT36672A (event 0x21C00, bld regs 0x3Fxxx,
++ *    hw_crc=1) and the no-flash family (event 0x11A00, boot_rdy 0x1F141,
++ *    hw_crc=0).
++ *  - Download (hw_crc=1): loop<=3 { bootloader_reset; write_firmware —
++ *    header end=LE32@0, ILM/DLM 12B entries, info secs 16B @0x30, partitions
++ *    sized+1, <=63KiB SRAM bursts {SRAM&0x7F|0x80,...}; set_bld_hw_crc
++ *    (ILM/DLM reg banks); bld_crc_enable (BLD_CRC_EN|=0x80); fw_crc_enable
++ *    (eventbuf RESET_COMPLETE=0, HOST_CMD=0xAE); boot_ready (BOOT_RDY=1);
++ *    check_fw_reset_state(INIT, <=10) }. hw_crc=0 prepends eng_reset, skips
++ *    the bld regs, adds POR_CD writes in boot_ready and a software CheckSum
++ *    compare at R_ILM_CHECKSUM.
++ *  - IRQ (EINT14 falling) -> 66B event read at event-buf page, byte0=0:
++ *    packet checksum buf[65] == ~sum(buf[1..64])+1; recovery if
++ *    buf[1..6]==0x77 (fw reset) or >10 consecutive all-{0xFD,0xFE} (WDT);
++ *    fingers at pos=1+6i: id=b>>3, state=b&7 (1 down/2 move/3 up),
++ *    x=b1<<4|b3>>4, y=b2<<4|b3&0xF. Buttons at buf[61..62] (0xF8 flag):
++ *    not implemented.
++ *
++ * ADT: reset-gpio (held high; the chip resets over SPI), max-x/max-y,
++ * fw-path, optional swrst-addr (default 0x03F0FE from the mt6833
++ * 672-family dtsi — the NF dtsi has no such prop; 0x01F01A and 0x01C0BE
++ * are tried automatically when the trim read fails).
++ */
++#include <IOKit/IOLib.h>
++#include <IOKit/IOService.h>
++#include <IOKit/IOWorkLoop.h>
++#include <IOKit/IOTimerEventSource.h>
++#include <IOKit/IOInterruptEventSource.h>
++
++#include <sys/fcntl.h>
++#include <sys/proc.h>
++#include <sys/vnode.h>
++extern "C" {
++#include <sys/vnode_internal.h>
++}
++#include <sys/uio.h>
++#include <vfs/vfs_support.h>
++
++#include "SweetHIDTouch.h"
++#include "../AthensSPI.h"
++#include "../VivaIO.h"
++
++#define NVT_DUMMY_BYTES   1
++#define NVT_TRANSFER_LEN  (63 * 1024)
++#define NVT_POINT_LEN     65          /* POINT_DATA_LEN */
++#define NVT_MAX_FINGERS   10
++#define NVT_TRIM_PAGE     0x1F64E
++#define NVT_ENG_RST       0x7FFF80
++#define NVT_RST_INIT      0xA0
++#define NVT_RST_MAX       0xAF
++#define NVT_SWRST_DFLT    0x03F0FE    /* mt6833 672-family dtsi value */
++#define NVT_RDFAST_DFLT   0x03F310    /* mt6833 dtsi spi-rd-fast-addr */
++
++/* event map offsets inside the EVENT_BUF page */
++enum {
++	EV_HOST_CMD = 0x50,
++	EV_RESET_COMPLETE = 0x60,
++	EV_FWINFO = 0x78,
++};
++
++struct nvt_map {
++	uint32_t event_buf, boot_rdy, por_cd;
++	uint32_t ilm_len, dlm_len, ilm_des, dlm_des;
++	uint32_t g_ilm, g_dlm, r_ilm, bld_crc_en;
++	uint32_t swrst, rdfast;
++	uint8_t  hw_crc;
++	const char *name;
++};
++
++/* NT36672A_memory_map (hw_crc=1) — 672-family flash-variant layout */
++static const struct nvt_map MAP_A = {
++	0x21C00, 0x3F10D, 0,
++	0x3F118, 0x3F130, 0x3F128, 0x3F12C,
++	0x3F100, 0x3F104, 0x3F120, 0x3F30E,
++	NVT_SWRST_DFLT, NVT_RDFAST_DFLT, 1, "nt36672a",
++};
++/* NT36525/NT36676F_memory_map (hw_crc=0) — small no-flash SRAM layout
++ * matching our firmware's partition SRAM addresses (0x000000-0x02B4A8) */
++static const struct nvt_map MAP_NF = {
++	0x11A00, 0x1F141, 0x1F61C,
++	0, 0, 0, 0,
++	0, 0, 0x1BF00, 0,
++	NVT_SWRST_DFLT, NVT_RDFAST_DFLT, 0, "noflash",
++};
++/* trim_id_table subset (masked id bytes -> map); first match wins.
++ * Only entries for 672-family and no-flash chips are kept. */
++static const struct { uint8_t id[6], mask[6]; const struct nvt_map *map; } TRIM[] = {
++	{ {0x0C,0xFF,0xFF,0x25,0x65,0x03}, {1,0,0,1,1,1}, &MAP_A },
++	{ {0x0B,0xFF,0xFF,0x25,0x65,0x03}, {1,0,0,1,1,1}, &MAP_A },
++	{ {0x0A,0xFF,0xFF,0x72,0x65,0x03}, {1,0,0,1,1,1}, &MAP_A },
++	{ {0x0A,0xFF,0xFF,0x82,0x66,0x03}, {1,0,0,1,1,1}, &MAP_A },
++	{ {0x0A,0xFF,0xFF,0x70,0x66,0x03}, {1,0,0,1,1,1}, &MAP_A },
++	{ {0x0B,0xFF,0xFF,0x70,0x66,0x03}, {1,0,0,1,1,1}, &MAP_A },
++	{ {0x0A,0xFF,0xFF,0x72,0x67,0x03}, {1,0,0,1,1,1}, &MAP_A },
++	{ {0xFF,0xFF,0xFF,0x25,0x65,0x03}, {0,0,0,1,1,1}, &MAP_A },
++	/* no-flash family (hw_crc=0) — last entry is the NT36676F-style
++	 * catch-all for IDs like xx xx xx 76 66 03 */
++	{ {0x55,0x00,0xFF,0x00,0x00,0x00}, {1,1,0,1,1,1}, &MAP_NF },
++	{ {0xAA,0x72,0xFF,0x00,0x00,0x00}, {1,1,0,1,1,1}, &MAP_NF },
++	{ {0xFF,0xFF,0xFF,0x72,0x66,0x03}, {0,0,0,1,1,1}, &MAP_NF },
++	{ {0xFF,0xFF,0xFF,0x70,0x66,0x03}, {0,0,0,1,1,1}, &MAP_NF },
++	{ {0xFF,0xFF,0xFF,0x70,0x67,0x03}, {0,0,0,1,1,1}, &MAP_NF },
++	{ {0xFF,0xFF,0xFF,0x76,0x66,0x03}, {0,0,0,1,1,1}, &MAP_NF },
++};
++
++struct nvt_part { uint32_t bin, sram, size, crc; };
++
++class AthensNT36672C : public SweetHIDTouch {
++	OSDeclareDefaultStructors(AthensNT36672C);
++
++public:
++	virtual bool init(OSDictionary *props = NULL) APPLE_KEXT_OVERRIDE;
++	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
++	virtual void free(void) APPLE_KEXT_OVERRIDE;
++	virtual IOWorkLoop *getWorkLoop(void) const APPLE_KEXT_OVERRIDE;
++
++protected:
++	virtual OSString *getProduct() APPLE_KEXT_OVERRIDE { return OSString::withCString("NT36672C"); }
++	virtual UInt32 getVendorID() APPLE_KEXT_OVERRIDE { return 0x0600; }
++	virtual UInt32 getProductID() APPLE_KEXT_OVERRIDE { return 0x3672; }
++
++private:
++	static void interruptOccurred(OSObject *owner, IOInterruptEventSource *src, int count);
++	static void fwTimeout(OSObject *owner, IOTimerEventSource *src);
++	void handleEvent(void);
++	bool fwUpdate(void);
++	bool fwDownload(const uint8_t *fw, uint32_t fwsize);
++	bool fwInfo(void);
++	bool chipTrim(void);
++	bool ctpRead(uint8_t *buf, uint32_t len);
++	bool ctpWrite(uint8_t *buf, uint32_t len);
++	bool setPage(uint32_t addr);
++	bool writeAddr(uint32_t addr, uint8_t data);
++	bool bootloaderReset(void);
++	bool checkResetState(uint8_t state);
++	void bootReady(void);
++	uint32_t fPrevMap;
++	AthensSPI             *fBus;
++	VivaGPIO              *fGPIO;
++	IOWorkLoop            *fWorkLoop;
++	IOInterruptEventSource *fInterrupt;
++	IOTimerEventSource    *fFwTimer;
++	const struct nvt_map  *fMap;
++	uint32_t               fReset, fMaxX, fMaxY, fSwrst, fRdfast;
++	char                   fFwPath[128];
++	uint8_t                fFwVer;
++	bool                   fFwDone;
++	uint32_t               fWdtCnt;
++};
++
++OSDefineMetaClassAndStructors(AthensNT36672C, SweetHIDTouch);
++
++static uint32_t
++dtU32(IOService *provider, const char *key, uint32_t dflt)
++{
++	OSData *d = OSDynamicCast(OSData, provider->getProperty(key));
++	return (d != NULL && d->getLength() >= 4) ? *(const uint32_t *)d->getBytesNoCopy() : dflt;
++}
++
++static void
++dtStr(IOService *provider, const char *key, char *buf, uint32_t buflen, const char *dflt)
++{
++	OSString *s = OSDynamicCast(OSString, provider->getProperty(key));
++	strlcpy(buf, s != NULL ? s->getCStringNoCopy() : dflt, buflen);
++}
++
++static uint32_t
++le32(const uint8_t *p)
++{
++	return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24);
++}
++
++IOWorkLoop *
++AthensNT36672C::getWorkLoop(void) const
++{
++	return fWorkLoop;
++}
++
++/* nvt_set_page: 3-byte index write {0xFF, addr>>15, addr>>7}. */
++bool
++AthensNT36672C::setPage(uint32_t addr)
++{
++	uint8_t b[3] = { 0xFF, (uint8_t)(addr >> 15), (uint8_t)(addr >> 7) };
++	return fBus->transfer(b, NULL, 3) == kIOReturnSuccess;
++}
++
++/* CTP_SPI_WRITE: single CS frame, buf[0] gets SPI_WRITE_MASK (|0x80).
++ * Callers pre-fill buf[0] with the offset (addr & 0x7F at their map page). */
++bool
++AthensNT36672C::ctpWrite(uint8_t *buf, uint32_t len)
++{
++	buf[0] |= 0x80;
++	return fBus->transfer(buf, NULL, len) == kIOReturnSuccess;
++}
++
++/* CTP_SPI_READ: single CS frame of len+1 bytes ({buf0&0x7F, buf1.., dummy}
++ * out); the chip's data lands in buf[1..len-1] taken from rbuf[2..len]. */
++bool
++AthensNT36672C::ctpRead(uint8_t *buf, uint32_t len)
++{
++	uint8_t *tx = (uint8_t *)IOMalloc(len + NVT_DUMMY_BYTES);
++	uint8_t *rx = (uint8_t *)IOMalloc(len + NVT_DUMMY_BYTES);
++	if (tx == NULL || rx == NULL) {
++		if (tx) IOFree(tx, len + 1);
++		if (rx) IOFree(rx, len + 1);
++		return false;
++	}
++	memcpy(tx, buf, len);
++	tx[0] &= 0x7F;
++	tx[len] = 0;
++	bool ok = fBus->transfer(tx, rx, len + NVT_DUMMY_BYTES) == kIOReturnSuccess;
++	if (ok) {
++		memcpy(buf + 1, rx + 2, len - 1);
++	}
++	IOFree(tx, len + 1);
++	IOFree(rx, len + 1);
++	return ok;
++}
++
++/* nvt_write_addr: set_page + {addr&0x7F, data}. */
++bool
++AthensNT36672C::writeAddr(uint32_t addr, uint8_t data)
++{
++	if (!setPage(addr)) {
++		return false;
++	}
++	uint8_t b[2] = { (uint8_t)(addr & 0x7F), data };
++	return ctpWrite(b, 2);
++}
++
++bool
++AthensNT36672C::bootloaderReset(void)
++{
++	if (!writeAddr(fSwrst, 0x69)) {
++		return false;
++	}
++	IODelay(5000);                       /* tBRST2FR */
++	if (fRdfast) {
++		writeAddr(fRdfast, 0x00);        /* disable SPI_RD_FAST */
++	}
++	return true;
++}
++
++/* poll event-buf RESET_COMPLETE for buf[1] in [state, RESET_STATE_MAX]. */
++bool
++AthensNT36672C::checkResetState(uint8_t state)
++{
++	if (!setPage(fMap->event_buf | EV_RESET_COMPLETE)) {
++		return false;
++	}
++	uint8_t buf[6] = { EV_RESET_COMPLETE, 0, 0, 0, 0, 0 };
++	for (uint32_t i = 0; i <= 10; i++) { /* RESET_STATE_INIT: retry 10 */
++		buf[1] = 0;
++		if (ctpRead(buf, 6) && buf[1] >= state && buf[1] <= NVT_RST_MAX) {
++			return true;
++		}
++		IOSleep(10);
++	}
++	IOLog("ATHENS TOUCH: reset state timeout (last 0x%02x)\n", buf[1]);
++	return false;
++}
++
++/* nvt_boot_ready: BOOT_RDY=1; sw path also writes 0 + POR_CD 0xA0. */
++void
++AthensNT36672C::bootReady(void)
++{
++	writeAddr(fMap->boot_rdy, 1);
++	IODelay(5000);
++	if (!fMap->hw_crc) {
++		writeAddr(fMap->boot_rdy, 0);
++		writeAddr(fMap->por_cd, 0xA0);
++	}
++}
++
++/* nvt_ts_check_chip_ver_trim: bootloader-reset then read 6 ID bytes at
++ * xdata 0x1F64E and match the trim table. Needs a working SWRST addr, which
++ * is what we're trying to discover — try the 672-family default plus the
++ * legacy addresses before giving up. 5 retries per candidate like vendor. */
++bool
++AthensNT36672C::chipTrim(void)
++{
++	static const uint32_t swrst_try[] = { 0x03F0FE, 0x01F01A, 0x01C0BE };
++	for (uint32_t s = 0; s < sizeof(swrst_try) / sizeof(swrst_try[0]); s++) {
++		fSwrst = swrst_try[s];
++		for (int retry = 5; retry > 0; retry--) {
++			if (!bootloaderReset() || !setPage(NVT_TRIM_PAGE)) {
++				continue;
++			}
++			uint8_t buf[7] = { 0x4E, 0, 0, 0, 0, 0, 0 };
++			if (!ctpRead(buf, 7)) {
++				continue;
++			}
++			for (uint32_t t = 0; t < sizeof(TRIM) / sizeof(TRIM[0]); t++) {
++				uint32_t i;
++				for (i = 0; i < 6; i++) {
++					if (TRIM[t].mask[i] && buf[i + 1] != TRIM[t].id[i]) {
++						break;
++					}
++				}
++				if (i == 6) {
++					IOLog("ATHENS TOUCH: trim id %02x %02x %02x %02x %02x %02x -> %s map\n",
++					    buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], TRIM[t].map->name);
++					static struct nvt_map chosen;
++					chosen = *TRIM[t].map;
++					chosen.swrst = fSwrst;      /* keep the reset addr that worked */
++					fMap = &chosen;
++					return true;
++				}
++			}
++			IOSleep(10);
++		}
++	}
++	return false;
++}
++
++/* nvt_get_fw_info on the selected map. */
++bool
++AthensNT36672C::fwInfo(void)
++{
++	for (int retry = 0; retry < 3; retry++) {
++		if (!setPage(fMap->event_buf | EV_FWINFO)) {
++			continue;
++		}
++		uint8_t buf[17] = { EV_FWINFO, 0 };
++		if (ctpRead(buf, 17) && (buf[1] + buf[2]) == 0xFF) {
++			fFwVer = buf[1];
++			uint32_t x = (buf[5] << 8) | buf[6], y = (buf[7] << 8) | buf[8];
++			if (x != 0 && y != 0) {
++				fMaxX = x;
++				fMaxY = y;
++			}
++			IOLog("ATHENS TOUCH: fw_ver 0x%02x fw_type 0x%02x %ux%u ch %ux%u\n",
++			    fFwVer, buf[14], fMaxX, fMaxY, buf[3], buf[4]);
++			return true;
++		}
++		IOSleep(10);
++	}
++	return false;
++}
++
++/* nvt_download_firmware[_hw_crc]: the complete download flow. */
++bool
++AthensNT36672C::fwDownload(const uint8_t *fw, uint32_t fwsize)
++{
++	/* ---- nvt_bin_header_parser (verified layout) ---- */
++	uint32_t end = le32(fw);
++	if (end < 0x30 || end > fwsize) {
++		IOLog("ATHENS TOUCH: bad fw header end 0x%x\n", end);
++		return false;
++	}
++	uint32_t info_sec = (end - 0x30) / 0x10;
++	uint32_t ovly_sec = (fw[0x28] & 0x10) ? (fw[0x28] & 0x0F) : 0;
++	uint32_t partition = 2 + ovly_sec + info_sec;
++	struct nvt_part part[24];
++	if (partition > sizeof(part) / sizeof(part[0])) {
++		return false;
++	}
++	memset(part, 0, sizeof(part));
++	uint8_t hwcrc = fMap->hw_crc;
++	for (uint32_t i = 0; i < partition; i++) {
++		uint32_t cpos;
++		if (i < 2) {                          /* ILM/DLM: 12B {BIN,SRAM,size} */
++			part[i].bin = le32(fw + i * 12);
++			part[i].sram = le32(fw + 4 + i * 12);
++			part[i].size = le32(fw + 8 + i * 12);
++			cpos = 0x18 + i * 4;
++		} else if (i < 2 + info_sec) {        /* info: 16B @0x30 {SRAM,size,BIN,crc} */
++			uint32_t pos = 0x30 + 0x10 * (i - 2);
++			part[i].sram = le32(fw + pos);
++			part[i].size = le32(fw + pos + 4);
++			part[i].bin = le32(fw + pos + 8);
++			cpos = pos + 12;
++		} else {                              /* ovly: 16B @ DLM.BIN + 0x10*i' */
++			uint32_t pos = part[1].bin + 0x10 * (i - 2 - info_sec);
++			if (pos + 16 > fwsize) {
++				continue;
++			}
++			part[i].sram = le32(fw + pos);
++			part[i].size = le32(fw + pos + 4);
++			part[i].bin = le32(fw + pos + 8);
++			cpos = pos + 12;
++		}
++		if (hwcrc) {
++			part[i].crc = le32(fw + cpos);
++		} else if (part[i].size != 0 && part[i].bin + part[i].size <= fwsize) {
++			uint32_t c = 0;                   /* CheckSum(): ~(sum(data[0..size]) + size) + 1 */
++			for (uint32_t j = 0; j <= part[i].size; j++) {
++				c += fw[part[i].bin + j];
++			}
++			part[i].crc = ~(c + part[i].size) + 1;
++		}
++		if (part[i].size != 0 && part[i].bin + part[i].size > fwsize) {
++			IOLog("ATHENS TOUCH: part %u out of range\n", i);
++			return false;
++		}
++	}
++	IOLog("ATHENS TOUCH: %u parts (info %u, ovly %u) on %s map\n",
++	    partition, info_sec, ovly_sec, fMap->name);
++
++	for (int retry = 0; retry < 3; retry++) {
++		bool bad = false;
++		if (!hwcrc) {                         /* nvt_eng_reset first (sw path) */
++			writeAddr(NVT_ENG_RST, 0x5A);
++			IODelay(1000);
++		}
++		if (!bootloaderReset()) {
++			continue;
++		}
++		if (!hwcrc) {                         /* clear fw reset status */
++			writeAddr(fMap->event_buf | EV_RESET_COMPLETE, 0x00);
++		}
++		/* nvt_write_firmware: skip size==0, else size+1, <=63KiB bursts */
++		for (uint32_t p = 0; p < partition && !bad; p++) {
++			if (part[p].size == 0) {
++				continue;
++			}
++			uint32_t size = part[p].size + 1;
++			for (uint32_t off = 0; off < size; ) {
++				uint32_t n = (size - off) < NVT_TRANSFER_LEN ? (size - off) : NVT_TRANSFER_LEN;
++				uint32_t a = part[p].sram + off;
++				if (!setPage(a)) { bad = true; break; }
++				uint8_t *frame = (uint8_t *)IOMalloc(n + 1);
++				if (frame == NULL) { bad = true; break; }
++				frame[0] = (uint8_t)((a & 0x7F) | 0x80);
++				memcpy(frame + 1, fw + part[p].bin + off, n);
++				if (fBus->transfer(frame, NULL, n + 1) != kIOReturnSuccess) {
++					IOFree(frame, n + 1);
++					bad = true;
++					break;
++				}
++				IOFree(frame, n + 1);
++				off += n;
++			}
++		}
++		if (bad) {
++			continue;
++		}
++		if (hwcrc) {
++			/* nvt_set_bld_hw_crc: ILM/DLM reg banks (same 0x3F1x page) */
++			for (uint32_t p = 0; p < 2; p++) {
++				uint32_t des = p ? fMap->dlm_des : fMap->ilm_des;
++				uint32_t len = p ? fMap->dlm_len : fMap->ilm_len;
++				uint32_t cks = p ? fMap->g_dlm : fMap->g_ilm;
++				uint8_t w[5];
++				if (!setPage(des)) { bad = true; break; }
++				w[0] = (uint8_t)(des & 0x7F);
++				w[1] = part[p].sram & 0xFF;
++				w[2] = (part[p].sram >> 8) & 0xFF;
++				w[3] = (part[p].sram >> 16) & 0xFF;
++				if (!ctpWrite(w, 4)) { bad = true; break; }
++				w[0] = (uint8_t)(len & 0x7F);
++				w[1] = part[p].size & 0xFF;
++				w[2] = (part[p].size >> 8) & 0xFF;
++				if (!ctpWrite(w, 3)) { bad = true; break; }  /* hw_crc==1: 2B len */
++				if (!setPage(cks)) { bad = true; break; }
++				w[0] = (uint8_t)(cks & 0x7F);
++				w[1] = part[p].crc & 0xFF;
++				w[2] = (part[p].crc >> 8) & 0xFF;
++				w[3] = (part[p].crc >> 16) & 0xFF;
++				w[4] = (part[p].crc >> 24) & 0xFF;
++				if (!ctpWrite(w, 5)) { bad = true; break; }
++			}
++			if (bad) {
++				continue;
++			}
++			/* nvt_bld_crc_enable: BLD_CRC_EN_ADDR |= 0x80 */
++			if (!setPage(fMap->bld_crc_en)) {
++				continue;
++			}
++			uint8_t b[2] = { (uint8_t)(fMap->bld_crc_en & 0x7F), 0xFF };
++			if (!ctpRead(b, 2)) {
++				continue;
++			}
++			b[0] = (uint8_t)(fMap->bld_crc_en & 0x7F);
++			b[1] |= 0x80;
++			if (!ctpWrite(b, 2)) {
++				continue;
++			}
++			/* nvt_fw_crc_enable: RESET_COMPLETE=0, HOST_CMD=0xAE */
++			if (!setPage(fMap->event_buf)) {
++				continue;
++			}
++			uint8_t w[2] = { EV_RESET_COMPLETE & 0x7F, 0x00 };
++			if (!ctpWrite(w, 2)) {
++				continue;
++			}
++			w[0] = EV_HOST_CMD & 0x7F; w[1] = 0xAE;
++			if (!ctpWrite(w, 2)) {
++				continue;
++			}
++		}
++		bootReady();
++		if (!checkResetState(NVT_RST_INIT)) {
++			continue;
++		}
++		if (!hwcrc) {
++			/* nvt_check_fw_checksum: read partition*4 @R_ILM, cmp LE32 */
++			uint32_t len = partition * 4;
++			uint8_t *sum = (uint8_t *)IOMalloc(len + 1);
++			if (sum == NULL) {
++				return false;
++			}
++			sum[0] = (uint8_t)(fMap->r_ilm & 0x7F);
++			bool rd = setPage(fMap->r_ilm) && ctpRead(sum, len + 1);
++			uint32_t badcrc = 0;
++			if (rd) {
++				for (uint32_t p = 0; p < partition; p++) {
++					if (part[p].size && part[p].crc != le32(sum + 1 + p * 4)) {
++						badcrc++;
++					}
++				}
++			}
++			IOFree(sum, len + 1);
++			if (!rd || badcrc) {
++				IOLog("ATHENS TOUCH: fw checksum failed\n");
++				continue;
++			}
++		}
++		IOLog("ATHENS TOUCH: firmware download ok (%s map)\n", fMap->name);
++		return fwInfo();
++	}
++	IOLog("ATHENS TOUCH: firmware download failed after retries\n");
++	return false;
++}
++
++/* Boot_Update_Firmware: open the blob and stream it. */
++bool
++AthensNT36672C::fwUpdate(void)
++{
++	vfs_context_t ctx = vfs_context_kernel();
++	vnode_t vp = NULLVP;
++	uint8_t *fw = NULL;
++	bool ok = false;
++	if (vnode_open(fFwPath, FREAD, 0, 0, &vp, ctx) != 0) {
++		return false;                            /* iosroot not mounted yet */
++	}
++	off_t size = 0;
++	vnode_size(vp, &size, ctx);
++	if (size >= 0x100 && size <= (256 * 1024)) {
++		fw = (uint8_t *)IOMalloc((uint32_t)size);
++	}
++	if (fw != NULL) {
++		int resid = 0;
++		if (vn_rdwr(UIO_READ, vp, (caddr_t)fw, (int)size, 0, UIO_SYSSPACE,
++		    IO_NOAUTH | IO_UNIT, vfs_context_ucred(ctx), &resid,
++		    vfs_context_proc(ctx)) == 0 && resid == 0) {
++			IOLog("ATHENS TOUCH: downloading %lld-byte firmware %s\n",
++			    (long long)size, fFwPath);
++			ok = fwDownload(fw, (uint32_t)size);
++		}
++		IOFree(fw, (uint32_t)size);
++	}
++	vnode_close(vp, FREAD, ctx);
++	return ok;
++}
++
++bool
++AthensNT36672C::init(OSDictionary *props)
++{
++	if (!SweetHIDTouch::init(props)) {
++		return false;
++	}
++	/* Zero everything free() may touch: a failed match frees the
++	 * instance without start() ever assigning these. */
++	fPrevMap = 0;
++	fWdtCnt = 0;
++	fFwDone = false;
++	fFwVer = 0;
++	fBus = NULL;
++	fGPIO = NULL;
++	fWorkLoop = NULL;
++	fInterrupt = NULL;
++	fFwTimer = NULL;
++	fMap = NULL;
++	fFwPath[0] = '\0';
++	return true;
++}
++
++bool
++bool
++AthensNT36672C::start(IOService *provider)
++{
++	fPrevMap = 0;
++	fWdtCnt = 0;
++	fFwDone = false;
++	fFwVer = 0;
++	fInterrupt = NULL;
++	fFwTimer = NULL;
++	fBus = OSDynamicCast(AthensSPI, provider->getProvider());
++	fGPIO = VivaGPIO::wait();
++	fWorkLoop = IOWorkLoop::workLoop();
++	fReset = dtU32(provider, "reset-gpio", 33);
++	fMaxX = dtU32(provider, "max-x", 1080);
++	fMaxY = dtU32(provider, "max-y", 2400);
++	fSwrst = dtU32(provider, "swrst-addr", NVT_SWRST_DFLT);
++	fRdfast = dtU32(provider, "rd-fast-addr", NVT_RDFAST_DFLT);
++	dtStr(provider, "fw-path", fFwPath, sizeof(fFwPath),
++	    "/usr/share/firmware/touch/nt36672c_jdi.bin");
++	if (fBus == NULL || fGPIO == NULL || fWorkLoop == NULL) {
++		IOLog("ATHENS TOUCH: missing SPI bus, GPIO or work loop\n");
++		return false;
++	}
++	fMap = &MAP_A;
++	fGPIO->setOutput(fReset, true);          /* reset line: live pinctrl holds it high */
++	IOSleep(5);
++
++	/* Identify the map family via the trim ID table (tries the candidate
++	 * SWRST addresses). Without a match we keep the last candidate and let
++	 * fwInfo/download decide — the chip answers or it doesn't. */
++	if (!chipTrim()) {
++		IOLog("ATHENS TOUCH: trim id not recognised, keeping %s map\n", fMap->name);
++	}
++	/* A running fw answers fwInfo; a blank NF chip needs the blob. */
++	if (!fwInfo()) {
++		IOLog("ATHENS TOUCH: no running fw on %s map, will download %s\n",
++		    fMap->name, fFwPath);
++		fFwTimer = IOTimerEventSource::timerEventSource(this, &AthensNT36672C::fwTimeout);
++		if (fFwTimer == NULL || fWorkLoop->addEventSource(fFwTimer) != kIOReturnSuccess) {
++			IOLog("ATHENS TOUCH: no fw timer\n");
++			return false;
++		}
++		fFwTimer->setTimeoutMS(1000);
++	}
++
++	if (!SweetHIDTouch::start(provider)) {
++		return false;
++	}
++	fInterrupt = IOInterruptEventSource::interruptEventSource(this,
++	    &AthensNT36672C::interruptOccurred, provider, 0);
++	if (fInterrupt == NULL || fWorkLoop->addEventSource(fInterrupt) != kIOReturnSuccess) {
++		IOLog("ATHENS TOUCH: no interrupt\n");
++		return false;
++	}
++	fInterrupt->enable();
++	IOLog("ATHENS TOUCH: NT36672C on %s map, %ux%u%s\n", fMap->name,
++	    fMaxX, fMaxY, fFwDone ? "" : " (fw pending)");
++	return true;
++}
++
++void
++AthensNT36672C::free(void)
++{
++	if (fInterrupt != NULL) {
++		fInterrupt->disable();
++		if (fWorkLoop != NULL) fWorkLoop->removeEventSource(fInterrupt);
++	}
++	if (fFwTimer != NULL) {
++		fFwTimer->cancelTimeout();
++		if (fWorkLoop != NULL) fWorkLoop->removeEventSource(fFwTimer);
++	}
++	OSSafeReleaseNULL(fInterrupt);
++	OSSafeReleaseNULL(fFwTimer);
++	SweetHIDTouch::free();
++	OSSafeReleaseNULL(fWorkLoop);
++}
++
++void
++AthensNT36672C::fwTimeout(OSObject *owner, IOTimerEventSource *src __unused)
++{
++	AthensNT36672C *self = OSDynamicCast(AthensNT36672C, owner);
++	if (self == NULL || self->fFwDone) {
++		return;
++	}
++	if (self->fwUpdate()) {
++		self->fFwDone = true;
++		IOLog("ATHENS TOUCH: firmware running (fw_ver 0x%02x)\n", self->fFwVer);
++	} else {
++		self->fFwTimer->setTimeoutMS(1000);
++	}
++}
++
++void
++AthensNT36672C::interruptOccurred(OSObject *owner, IOInterruptEventSource *src __unused, int count __unused)
++{
++	AthensNT36672C *self = OSDynamicCast(AthensNT36672C, owner);
++	if (self != NULL) {
++		self->handleEvent();
++	}
++}
++
++/* nvt_ts_work_func: recovery checks, packet checksum, then the 65-byte
++ * report (10 x 6-byte slots at pos 1+6i, buttons at 61-62, checksum at 65). */
++void
++AthensNT36672C::handleEvent(void)
++{
++	uint8_t pd[NVT_POINT_LEN + 1] = { 0 };   /* pd[0] = xdata index 0 */
++	if (!setPage(fMap->event_buf) || !ctpRead(pd, NVT_POINT_LEN + 1)) {
++		return;
++	}
++	/* fw_recovery: all of pd[1..6]==0x77 -> chip rebooted, re-download */
++	uint32_t i;
++	for (i = 1; i < 7; i++) {
++		if (pd[i] != 0x77) break;
++	}
++	if (i == 7) {
++		IOLog("ATHENS TOUCH: fw reset (0x77), re-downloading\n");
++		fFwDone = false;
++		if (fFwTimer != NULL) fFwTimer->setTimeoutMS(1);
++		return;
++	}
++	/* wdt recovery: >10 consecutive reads all-{0xFD,0xFE} */
++	for (i = 1; i < 7; i++) {
++		if (pd[i] != 0xFD && pd[i] != 0xFE) break;
++	}
++	fWdtCnt = (i == 7) ? fWdtCnt + 1 : 0;
++	if (fWdtCnt > 10) {
++		IOLog("ATHENS TOUCH: wdt fw recovery\n");
++		fWdtCnt = 0;
++		fFwDone = false;
++		if (fFwTimer != NULL) fFwTimer->setTimeoutMS(1);
++		return;
++	}
++	/* packet checksum: pd[65] == ~(sum pd[1..64]) + 1 */
++	uint8_t sum = 0;
++	for (i = 1; i < NVT_POINT_LEN; i++) {
++		sum += pd[i];
++	}
++	if ((uint8_t)(~sum + 1) != pd[NVT_POINT_LEN]) {
++		return;                             /* corrupt packet, drop */
++	}
++	uint32_t map = 0;
++	for (i = 0; i < NVT_MAX_FINGERS; i++) {
++		uint32_t pos = 1 + 6 * i;
++		uint8_t id = pd[pos] >> 3;
++		uint8_t st = pd[pos] & 7;
++		if (id == 0 || id > NVT_MAX_FINGERS) {
++			continue;
++		}
++		if (st == 1 || st == 2) {           /* down | moving */
++			uint32_t x = (pd[pos + 1] << 4) | (pd[pos + 3] >> 4);
++			uint32_t y = (pd[pos + 2] << 4) | (pd[pos + 3] & 0x0F);
++			uint32_t slot = id - 1;
++			if (slot >= SWEET_TOUCH_FINGERS || x > fMaxX || y > fMaxY) {
++				continue;
++			}
++			map |= 1u << slot;
++			touch((int)slot, true, (int)x, (int)y);
++		}
++	}
++	for (uint32_t slot = 0; slot < SWEET_TOUCH_FINGERS; slot++) {
++		if ((fPrevMap & (1u << slot)) && !(map & (1u << slot))) {
++			touch((int)slot, false, 0, 0);
++		}
++	}
++	fPrevMap = map;
++}
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 0000000..0000000 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -135,6 +135,16 @@ const char * gIOKernelConfigTables =
+     "   {"
+     "     'IOClass'         = VivaGT9896;"
+     "     'IOProviderClass' = VivaDTNub;"
+     "     'IONameMatch'     = 'goodix,gt9896';"
+     "   },"
++    "   {"
++    "     'IOClass'         = AthensSPI;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'mediatek,mt6765-spi';"
++    "   },"
++    "   {"
++    "     'IOClass'         = AthensNT36672C;"
++    "     'IOProviderClass' = VivaDTNub;"
++    "     'IONameMatch'     = 'novatek,nt36672c';"
++    "   },"
+     "   {"
+     "     'IOClass'         = VivaBattery;"
+     "     'IOProviderClass' = VivaDTNub;"
+diff --git a/iokit/conf/files.arm64 b/iokit/conf/files.arm64
+index 0000000..0000000 100644
+--- a/iokit/conf/files.arm64
++++ b/iokit/conf/files.arm64
+@@ -24,5 +24,6 @@
+ iokit/Kernel/arm/AthensPMIC.cpp                                  optional iokitcpp
+ iokit/Kernel/arm/VivaIO.cpp                                      optional iokitcpp
++iokit/Kernel/arm/AthensSPI.cpp                                   optional iokitcpp
+ iokit/Kernel/arm/VivaGPU.cpp                                     optional iokitcpp
+ iokit/Kernel/arm/VivaGPUUserClient.cpp                           optional iokitcpp
+ iokit/Kernel/arm/SweetBattery.cpp                                optional iokitcpp
+@@ -37,5 +38,6 @@
+ iokit/Kernel/arm/hid/AthensGpioKeys.cpp                          optional iokitcpp
+ iokit/Kernel/arm/hid/VivaGT9896.cpp                              optional iokitcpp
++iokit/Kernel/arm/hid/AthensNT36672C.cpp                          optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEvent.cpp                              optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceQueue.cpp                  optional iokitcpp
+ iokit/Kernel/arm/hid/IOHIDEventServiceUserClient.cpp             optional iokitcpp

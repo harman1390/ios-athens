@@ -295,7 +295,7 @@ def athens_devices(ph, phandle, gic_ph, ecid):
     mt6853.dts; pins marked MEASURE need the live FDT before enabling."""
     io = lambda pa, size: u64(pa - SOC_BASE, size)
     eint_ph = next(phandle)
-    return [
+    devs = [
         # MediaTek keypad (kp@10010000, SPI 74 edge): same block as viva's.
         # NOTE (live FDT + /proc/interrupts): the KP matrix is NOT used on
         # athens - kpd-hw-init-map is all zeros and volume-down arrives on
@@ -380,6 +380,38 @@ def athens_devices(ph, phandle, gic_ph, ecid):
             ('scl-gpio', u32(97)),
             ('sda-gpio', u32(98)),
         ]),
+        # SPI4 (spi4@11018000, SPI 163 level): MTK SPI host (spi-mt65xx.c,
+        # iokit/Kernel/arm/AthensSPI.cpp). reg0=SPI block, reg1=topckgen
+        # (spi_sel mux -> msdcpll_d4, CLK_CFG_6 lsb16=3, update bit26),
+        # reg2=infracfg_ao (ifrao_spi4 gate, +0xa4 bit25). SCK GPIO12 MISO 13
+        # MOSI 97 CS 98 all func2 (live FDT spimode_default pinmux). Mode 0
+        # MSB, sck 5+5 of the ~96 MHz source ~= the DT's 9.6 MHz max.
+        node('spi4', [
+            ph(),
+            ('compatible', cstr('mediatek,mt6765-spi')),
+            ('reg', io(0x11018000, 0x100) + io(0x10000000, 0x1000) + io(0x10001000, 0x1000)),
+            ('interrupt-parent', u32(gic_ph)),
+            ('interrupts', spi(0xa3, IRQ_LEVEL_HIGH)),
+        ], [
+            # Novatek NT36672C noflash touch (live FDT touchscreen@0
+            # "oppo,tp_noflash" / modalias spi:tp_noflash, bound to
+            # novatek,nf_nt36672c). EINT14 falling, reset GPIO33, 1080x2400,
+            # 10pt, 16x36; JDI panel (lcm=nt36672c_..._jdi_120, prjname 20686
+            # -> fw dir 20611). Firmware image is downloaded to the chip's
+            # SRAM at boot from /usr/share/firmware/touch/nt36672c_jdi.bin.
+            node('touch', [
+                ph(),
+                ('compatible', cstr('novatek,nt36672c')),
+                ('reg', u32(0)),
+                ('spi-max-frequency', u32(9600000)),
+                ('interrupt-parent', u32(eint_ph)),
+                ('interrupts', u32(14, IRQ_EDGE_FALLING)),
+                ('reset-gpio', u32(33)),
+                ('max-x', u32(1080)),
+                ('max-y', u32(2400)),
+                ('fw-path', cstr('/usr/share/firmware/touch/nt36672c_jdi.bin')),
+            ]),
+        ]),
         # Mali-G57 MC3 (mali@13000000; GPU/MMU/JOB/EVENT/PWR = SPI 364-368
         # level high): power domains SCP_SYS_MFG0-5 (scpsys/spm@10006000),
         # mfgcfg + topckgen/apmixed/infracfg bases as on MT6781 — MEASURE.
@@ -392,7 +424,12 @@ def athens_devices(ph, phandle, gic_ph, ecid):
                          spi(0x16e, IRQ_LEVEL_HIGH) + spi(0x16f, IRQ_LEVEL_HIGH) +
                          spi(0x170, IRQ_LEVEL_HIGH)),
         ]),
-        # CONNSYS WiFi (MT6853 + MT663x combo): same family as viva's wlan.
+        # CONNSYS WiFi: on-die CONNSYS_6853 (connac2x2). Stock mt6853.dtb:
+        # wifi@0x18000000 "mediatek,wifi" (sz 0x100000, SPI 377), consys@0x18002000
+        # "mediatek,mt6853-consys" (SPI 378/79/379, clock "conn"), btif@0x1100c000
+        # (SPI 158/152/153), 4 MB consys + 6 MB wifi reserve-memory pools (no-map,
+        # alloc-ranges 0x40000000-0x80000000), MT6359 VCN33_1/VCN33_2 rails; FM id
+        # "MT6631_FM" (k6853v1_64_defconfig). wifid/MobileGestalt marker only - no driver yet.
         node('wlan', [
             ph(),
             ('device_type', cstr('wlan')),
@@ -400,6 +437,11 @@ def athens_devices(ph, phandle, gic_ph, ecid):
             ('local-mac-address', wifi_mac(ecid)),
         ]),
     ]
+    # --athens-notouch: drop spi4 (and its NT36672C child) so neither the
+    # SPI host nor the touch driver binds - A/B for boot-panic bisection.
+    if '--athens-notouch' in sys.argv:
+        devs = [d for d in devs if d.props[0][2].rstrip(b'\0') != b'spi4']
+    return devs
 
 
 def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False,
