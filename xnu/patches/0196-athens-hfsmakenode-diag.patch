@@ -91,8 +91,8 @@
 +		static int mkerr_count = 0;
 +		if (mkerr_count < 512) {
 +			mkerr_count++;
-+			printf("hfs_makenode ERR step=%d err=%d dvp=%s name=%.*s\n",
-+				   mkstep, error, dvp->v_name ? dvp->v_name : "?",
++			printf("hfs_makenode ERR step=%d err=%d dcnid=%u name=%.*s\n",
++				   mkstep, error, dcp ? dcp->c_desc.cd_cnid : 0,
 +				   (int)cnp->cn_namelen, (const char *)cnp->cn_nameptr);
 +		}
 +	}
