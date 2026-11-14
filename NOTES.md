@@ -3,8 +3,27 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
-## >>> ATHENS HANDOFF 2026-11-15i - gpu12 LOG: WACS2 genuinely dead -> ROOT CAUSE = WRONG PROTOCOL; patch 0188 re-ports to MT6853 PMIF/ARB_V3 <<<
+## >>> ATHENS HANDOFF 2026-11-15j - gpu13 BUILT+VERIFIED: patch 0188 PMIF/ARB_V3 (891f05e, CI 43611718591) <<<
 
+GPU13 = shim/out/athens-boot-gpu13.img (17,483,776 B). CI 43611718591 SUCCESS on
+891f05e. Kernel .tmp-patch/dl13/kernel.development.sweet. VERIFIED in img:
+athens PMIF init complete / pmif write_test / post-init read_test / pmif_init_done
+/ spiwrap_en now / PMIF still dead / PMIC hwcid ALL present; classic WACS2 strings
+(post-dio, WACS2 cannot, post-regclock) GONE. cmdline = gpu12 verbatim
+(sweetlog=1 ufslogsecs=5 sweetfb_hz=0 vivagpu=2 vivagpufreq=390 cpus=8 ...).
+ADT 4-range pwrap reg confirmed consecutive in payload: 0x10026000/0x10028000
+(spi_mst NEW)/0x10001000/0x10000000. Repack = dl13 kernel + gpu12 cmdline +
+new 4-range ADT + unchanged shim Image.gz via viva-bootimg.py.
+
+TEST: adb reboot bootloader; fastboot flash boot shim/out/athens-boot-gpu13.img;
+fastboot reboot; boot ~60-90s; force recovery; adb pull sweetlog tail.
+READ: post-init read_test ret + write_test rdata(0xa55a?) + swcid/hwcid(0x59xx?)
++ swinf2_sta FSM + spiwrap_en + pmic_vio/pmif_vio/mon_sta.
+PASS = write_test reads 0xa55a AND IDs 0x59xx -> PMIC WORKS -> GPU power ->
+IOAcceleratorES -> backboardd -> GUI. FAIL = read_test timeout -> the logged
+FSM/VIO/monitor regs say WHY (MPU reject vs dead SPI master vs needs-more-init).
+
+=== prior handoff 2026-11-15i (patch 0188 dev) ===
 GPU12 RESULT (.tmp-patch/gpu12-tail.bin): init ran end-to-end but WACS2 read
 still timed out AFTER full config:
   post-dio read_test ret -536870186 rdata 0x0 wrap_en 1 wacs2_en 1 dio_en 1
