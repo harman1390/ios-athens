@@ -3,6 +3,58 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15z - *** CROSS-REPO RESEARCH + REAL GUI BLOCKER IDENTIFIED *** crash storm is NORMAL (sweet/viva prove it); actual blocker = display-off + possible SW-renderer crash-guard; sweetfb_keep=1 test IN FLIGHT <<<
+
+CROSS-REPO RESEARCH (user asked: how do other repos get GUI+touch):
+- **ios-sweet (dipa-studio, direct ancestor)**: reached HOME SCREEN + touch +
+  CPU rendering 2026-10-18. KEY: "Daemons for [wifi/bt/cellular/audio/camera/
+  sensors/SEP] start and fail or keep relaunching" — the crash storm is
+  EXPECTED and TOLERATED; SpringBoard still appears after ~4 min. Their
+  userdata tweaks (sweet-root-tweaks.py: _PanicOnCrasX, containers dirs,
+  migration LastSystemVersion, Setup skip, activation data_ark, CommCenter/
+  VirtualAudio/MediaToolbox removal, BKNoWatchdogs) are what athens already
+  carries. Activation via ADT /chosen certificate-security-mode -> Hactivation.
+- **ios-viva (Nik300, MT6781 MediaTek sibling)**: reached LOCK SCREEN + keys
+  2026-11-02, ~20 min first boot. Same userland/storm, GUI still worked.
+- **instantnoodle/hackios**: full GUI+Metal+touch+WiFi+cellular on Qualcomm;
+  "user data on HFS+, data survives reboots"; keychain = stand-ins (no SEP).
+- CONCLUSION: the ~148-daemon sig5/sig6 crash storm is NORMAL on this platform
+  and is NOT what blocks GUI. Chasing its errno was the wrong tree.
+
+REAL GUI BLOCKER (from eio-log.txt, decisive):
+- backboardd FULLY up: HID drivers (AthensNT36672C/PMICKeys/VivaKeypad/
+  SweetHIDButtons), FB selectors, 2x IOSurface 1125x2436, VivaGPUAccelerator
+  matched IOAcceleratorES, Metal command buffers processing (vmg copied).
+- `SWEET FB: swap 1/2/3` = 3 REAL GUI frames presented to panel.
+- SpringBoard spawned, did AKS sel0/7/35 + IOPMrootDomain + HID + /product.
+- **`SWEET FB: display off` at log line 1638** — backboardd/sleepd called
+  RequestPowerChange(0) -> panel powered off right after 3 swaps. System
+  stayed ALIVE after (daemons kept launching). => screen sits on Apple logo.
+
+ACTIONS TAKEN:
+- `sweetfb_keep=1` (patch 0181, already compiled in) makes kernel IGNORE
+  RequestPowerChange(0) -> keeps last frame on screen. Boot-arg only.
+- Built `shim/out/athens-boot-eio2keep.img` = 0197v2 kernel (broadened errno
+  catch EIO+ENOTSUP+ENODEV+EROFS+ENOSYS+ENXIO+ESTALE+EREMOTE+ENOLINK+ENOSR)
+  + sweetfb_keep=1 + same diag cmdline. Verified strings in binary.
+- 0197v2 CI run 43649611331 SUCCESS; kernel .tmp-patch/eio2-art/.
+- FLASHED boot + rebooting NOW. userdata unchanged (varfix.simg).
+
+ALSO FOUND (documented in NOTES 2026-11-14b, verified UNPATCHED in image):
+- QuartzCore SW-renderer crash-guard: sw_renderer() aborts on-device
+  ("Software renderer! Simulating crash!"). Bypass = NOP 2 `bl` insns in
+  dyld_shared_cache_arm64.03 @0x1768d34/0x1768d8c via tools/patch-sw-renderer.py.
+- VERIFIED bytes 545f5b95/3e5f5b95 STILL PRESENT (unpatched) in
+  iosroot-work/ios16-root.img. BUT athens HAS Metal (backboardd rendered via
+  GPU) -> crash-guard only fires if Metal/GL context init FAILS -> probably
+  NOT the GUI blocker here (unlike sweet/viva which had no GPU). Hold as
+  backup if sweetfb_keep reveals a Metal/SW-renderer stall.
+
+NEXT: let it boot LONGER than 3 min (sweet ~4min, viva ~20min to lock
+screen; crash storm slows everything). Watch for `display off ignored
+(sweetfb_keep)` + swaps continuing + SpringBoard progress. Then recovery ->
+pull ring -> check SWEET EIO-SYSCALL err= lines (broadened) + FBSTAT swaps.
+
 ## >>> ATHENS HANDOFF 2026-11-15y - *** DECISIVE: ZERO unix syscalls return EIO *** crash storm is SYNTHESIZED/architectural (no SEP, no data volume, no Data Protection); broadened 0197 to catch real errno <<<
 
 0197 v1 RESULT (athens-boot-eio.img, run 43647789507, .tmp-patch/eio-log.txt,
