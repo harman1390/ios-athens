@@ -1,0 +1,296 @@
+diff --git a/iokit/Kernel/arm/hid/AthensNT36672C.cpp b/iokit/Kernel/arm/hid/AthensNT36672C.cpp
+--- a/iokit/Kernel/arm/hid/AthensNT36672C.cpp
++++ b/iokit/Kernel/arm/hid/AthensNT36672C.cpp
+@@ -87,40 +87,89 @@
+ 	const char *name;
+ };
+ 
++/* Memory maps ported 1:1 from nt36xxx_mem_map.h (vendor Novatek driver).
++ * Field order: event_buf, boot_rdy, por_cd, ilm_len, dlm_len, ilm_des,
++ * dlm_des, g_ilm, g_dlm, r_ilm, bld_crc_en, swrst, rdfast, hw_crc, name.
++ * Only the fields this driver consumes are populated; the vendor's extra
++ * pipe/baseline addresses are unused (touch data is read via event_buf). */
++
+ /* NT36672A_memory_map (hw_crc=1) — 672-family flash-variant layout */
+-static const struct nvt_map MAP_A = {
++static const struct nvt_map MAP_672A = {
+ 	0x21C00, 0x3F10D, 0,
+ 	0x3F118, 0x3F130, 0x3F128, 0x3F12C,
+ 	0x3F100, 0x3F104, 0x3F120, 0x3F30E,
+ 	NVT_SWRST_DFLT, NVT_RDFAST_DFLT, 1, "nt36672a",
+ };
+-/* NT36525/NT36676F_memory_map (hw_crc=0) — small no-flash SRAM layout
+- * matching our firmware's partition SRAM addresses (0x000000-0x02B4A8) */
+-static const struct nvt_map MAP_NF = {
++/* NT36772_memory_map (hw_crc=0) — no-flash, event_buf 0x11E00 */
++static const struct nvt_map MAP_6772 = {
++	0x11E00, 0x1F141, 0x1F61C,
++	0, 0, 0, 0,
++	0, 0, 0x1BF00, 0,
++	NVT_SWRST_DFLT, NVT_RDFAST_DFLT, 0, "nt36772",
++};
++/* NT36525_memory_map (hw_crc=0) — no-flash, event_buf 0x11A00 */
++static const struct nvt_map MAP_6525 = {
+ 	0x11A00, 0x1F141, 0x1F61C,
+ 	0, 0, 0, 0,
+ 	0, 0, 0x1BF00, 0,
+-	NVT_SWRST_DFLT, NVT_RDFAST_DFLT, 0, "noflash",
+-};
+-/* trim_id_table subset (masked id bytes -> map); first match wins.
+- * Only entries for 672-family and no-flash chips are kept. */
++	NVT_SWRST_DFLT, NVT_RDFAST_DFLT, 0, "nt36525",
++};
++/* NT36676F_memory_map (hw_crc=0) — no-flash, event_buf 0x11A00; the vendor
++ * map leaves BOOT_RDY/POR_CD/checksum unset (0). */
++static const struct nvt_map MAP_6676F = {
++	0x11A00, 0, 0,
++	0, 0, 0, 0,
++	0, 0, 0, 0,
++	NVT_SWRST_DFLT, NVT_RDFAST_DFLT, 0, "nt36676f",
++};
++/* NT36526 / NT36675_memory_map (hw_crc=2, carrier) — flash, event_buf
++ * 0x22D00 with the full BLD-CRC register bank (3-byte lengths? no: hw_crc>1
++ * writes a 4-byte length, handled in set_bld_hw_crc). */
++static const struct nvt_map MAP_6526 = {
++	0x22D00, 0x3F10D, 0,
++	0x3F118, 0x3F130, 0x3F128, 0x3F12C,
++	0x3F100, 0x3F104, 0x3F120, 0x3F30E,
++	NVT_SWRST_DFLT, NVT_RDFAST_DFLT, 2, "nt36526",
++};
++static const struct nvt_map MAP_6675 = {
++	0x22D00, 0x3F10D, 0,
++	0x3F118, 0x3F130, 0x3F128, 0x3F12C,
++	0x3F100, 0x3F104, 0x3F120, 0x3F30E,
++	NVT_SWRST_DFLT, NVT_RDFAST_DFLT, 2, "nt36675",
++};
++/* Back-compat alias: the no-flash family our nf_nt36672c belongs to. */
++#define MAP_NF MAP_6525
++
++/* trim_id_table ported 1:1 from nt36xxx_mem_map.h, same order so first-match
++ * wins identically. mask[i]!=0 -> buf[i+1] must equal id[i]. */
+ static const struct { uint8_t id[6], mask[6]; const struct nvt_map *map; } TRIM[] = {
+-	{ {0x0C,0xFF,0xFF,0x25,0x65,0x03}, {1,0,0,1,1,1}, &MAP_A },
+-	{ {0x0B,0xFF,0xFF,0x25,0x65,0x03}, {1,0,0,1,1,1}, &MAP_A },
+-	{ {0x0A,0xFF,0xFF,0x72,0x65,0x03}, {1,0,0,1,1,1}, &MAP_A },
+-	{ {0x0A,0xFF,0xFF,0x82,0x66,0x03}, {1,0,0,1,1,1}, &MAP_A },
+-	{ {0x0A,0xFF,0xFF,0x70,0x66,0x03}, {1,0,0,1,1,1}, &MAP_A },
+-	{ {0x0B,0xFF,0xFF,0x70,0x66,0x03}, {1,0,0,1,1,1}, &MAP_A },
+-	{ {0x0A,0xFF,0xFF,0x72,0x67,0x03}, {1,0,0,1,1,1}, &MAP_A },
+-	{ {0xFF,0xFF,0xFF,0x25,0x65,0x03}, {0,0,0,1,1,1}, &MAP_A },
+-	/* no-flash family (hw_crc=0) — last entry is the NT36676F-style
+-	 * catch-all for IDs like xx xx xx 76 66 03 */
+-	{ {0x55,0x00,0xFF,0x00,0x00,0x00}, {1,1,0,1,1,1}, &MAP_NF },
+-	{ {0xAA,0x72,0xFF,0x00,0x00,0x00}, {1,1,0,1,1,1}, &MAP_NF },
+-	{ {0xFF,0xFF,0xFF,0x72,0x66,0x03}, {0,0,0,1,1,1}, &MAP_NF },
+-	{ {0xFF,0xFF,0xFF,0x70,0x66,0x03}, {0,0,0,1,1,1}, &MAP_NF },
+-	{ {0xFF,0xFF,0xFF,0x70,0x67,0x03}, {0,0,0,1,1,1}, &MAP_NF },
+-	{ {0xFF,0xFF,0xFF,0x76,0x66,0x03}, {0,0,0,1,1,1}, &MAP_NF },
++	{ {0x0D,0xFF,0xFF,0x72,0x66,0x03}, {1,0,0,1,1,1}, &MAP_6675 },
++	{ {0x20,0xFF,0xFF,0x72,0x66,0x03}, {1,0,0,1,1,1}, &MAP_6675 },
++	{ {0x00,0xFF,0xFF,0x80,0x66,0x03}, {1,0,0,1,1,1}, &MAP_6675 },
++	{ {0x0C,0xFF,0xFF,0x25,0x65,0x03}, {1,0,0,1,1,1}, &MAP_672A },
++	{ {0x0E,0xFF,0xFF,0x72,0x66,0x03}, {1,0,0,1,1,1}, &MAP_6675 },
++	{ {0x0C,0xFF,0xFF,0x72,0x66,0x03}, {1,0,0,1,1,1}, &MAP_6675 },
++	{ {0xFF,0xFF,0xFF,0x26,0x65,0x03}, {0,0,0,1,1,1}, &MAP_6526 },
++	{ {0xFF,0xFF,0xFF,0x75,0x66,0x03}, {0,0,0,1,1,1}, &MAP_6675 },
++	{ {0x0B,0xFF,0xFF,0x72,0x66,0x03}, {1,0,0,1,1,1}, &MAP_672A },
++	{ {0x0B,0xFF,0xFF,0x82,0x66,0x03}, {1,0,0,1,1,1}, &MAP_672A },
++	{ {0x0B,0xFF,0xFF,0x25,0x65,0x03}, {1,0,0,1,1,1}, &MAP_672A },
++	{ {0x0A,0xFF,0xFF,0x72,0x65,0x03}, {1,0,0,1,1,1}, &MAP_672A },
++	{ {0x0A,0xFF,0xFF,0x72,0x66,0x03}, {1,0,0,1,1,1}, &MAP_672A },
++	{ {0x0A,0xFF,0xFF,0x82,0x66,0x03}, {1,0,0,1,1,1}, &MAP_672A },
++	{ {0x0A,0xFF,0xFF,0x70,0x66,0x03}, {1,0,0,1,1,1}, &MAP_672A },
++	{ {0x0B,0xFF,0xFF,0x70,0x66,0x03}, {1,0,0,1,1,1}, &MAP_672A },
++	{ {0x0A,0xFF,0xFF,0x72,0x67,0x03}, {1,0,0,1,1,1}, &MAP_672A },
++	{ {0x55,0x00,0xFF,0x00,0x00,0x00}, {1,1,0,1,1,1}, &MAP_6772 },
++	{ {0x55,0x72,0xFF,0x00,0x00,0x00}, {1,1,0,1,1,1}, &MAP_6772 },
++	{ {0xAA,0x00,0xFF,0x00,0x00,0x00}, {1,1,0,1,1,1}, &MAP_6772 },
++	{ {0xAA,0x72,0xFF,0x00,0x00,0x00}, {1,1,0,1,1,1}, &MAP_6772 },
++	{ {0xFF,0xFF,0xFF,0x72,0x67,0x03}, {0,0,0,1,1,1}, &MAP_6772 },
++	{ {0xFF,0xFF,0xFF,0x70,0x66,0x03}, {0,0,0,1,1,1}, &MAP_6772 },
++	{ {0xFF,0xFF,0xFF,0x70,0x67,0x03}, {0,0,0,1,1,1}, &MAP_6772 },
++	{ {0xFF,0xFF,0xFF,0x72,0x66,0x03}, {0,0,0,1,1,1}, &MAP_6772 },
++	{ {0xFF,0xFF,0xFF,0x25,0x65,0x03}, {0,0,0,1,1,1}, &MAP_6525 },
++	{ {0xFF,0xFF,0xFF,0x76,0x66,0x03}, {0,0,0,1,1,1}, &MAP_6676F },
+ };
+ 
+ struct nvt_part { uint32_t bin, sram, size, crc; };
+@@ -153,7 +202,9 @@
+ 	bool writeAddr(uint32_t addr, uint8_t data);
+ 	bool bootloaderReset(void);
+ 	bool checkResetState(uint8_t state);
++	bool discoverEventBuf(void);
+ 	void bootReady(void);
++	void engReset(void);
+ 	uint32_t fPrevMap;
+ 	AthensSPI             *fBus;
+ 	VivaGPIO              *fGPIO;
+@@ -161,6 +212,7 @@
+ 	IOInterruptEventSource *fInterrupt;
+ 	IOTimerEventSource    *fFwTimer;
+ 	const struct nvt_map  *fMap;
++	struct nvt_map         fMapStore;   /* mutable copy so event_buf can be discovered */
+ 	uint32_t               fReset, fMaxX, fMaxY, fSwrst, fRdfast;
+ 	char                   fFwPath[128];
+ 	uint8_t                fFwVer;
+@@ -261,6 +313,16 @@
+ 	return true;
+ }
+ 
++/* nvt_eng_reset: engineering reset cmd to ENG_RST_ADDR (0x7FFF80) = 0x5A.
++ * Vendor sends this before TP_RESX is raised / before trim + download so the
++ * MCU starts from a known state. */
++void
++AthensNT36672C::engReset(void)
++{
++	writeAddr(NVT_ENG_RST, 0x5A);
++	IODelay(1000);                       /* tMCU_Idle2TP_REX_Hi after TP_RST */
++}
++
+ /* poll event-buf RESET_COMPLETE for buf[1] in [state, RESET_STATE_MAX]. */
+ bool
+ AthensNT36672C::checkResetState(uint8_t state)
+@@ -280,6 +342,31 @@
+ 	return false;
+ }
+ 
++/* For hw_crc==0 the vendor no-flash maps disagree on EVENT_BUF
++ * (0x11A00 NT36525/NT36676F vs 0x11E00 NT36772). The download writes to
++ * absolute SRAM addresses so it is map-independent — only the status/touch
++ * reads use event_buf. If trim defaulted to the wrong page, the firmware can
++ * still be running; probe the sibling pages and lock in the one that answers
++ * RESET_COMPLETE. fMap points at fMapStore so the write is visible. */
++bool
++AthensNT36672C::discoverEventBuf(void)
++{
++	static const uint32_t cands[] = { 0x11A00, 0x11E00 };
++	uint32_t cur = fMap->event_buf;
++	for (uint32_t c = 0; c < sizeof(cands) / sizeof(cands[0]); c++) {
++		if (cands[c] == cur) {
++			continue;
++		}
++		fMapStore.event_buf = cands[c];
++		if (checkResetState(NVT_RST_INIT)) {
++			IOLog("ATHENS TOUCH: event_buf -> 0x%x (reset state ok)\n", cands[c]);
++			return true;
++		}
++	}
++	fMapStore.event_buf = cur;
++	return false;
++}
++
+ /* nvt_boot_ready: BOOT_RDY=1; sw path also writes 0 + POR_CD 0xA0. */
+ void
+ AthensNT36672C::bootReady(void)
+@@ -310,6 +397,11 @@
+ 			if (!ctpRead(buf, 7)) {
+ 				continue;
+ 			}
++			/* Always dump the raw ID bytes: on a real Novatek the trim table
++			 * is authoritative, but if reads are marginal the bytes tell us
++			 * whether we got data at all vs. a fixed pattern. */
++			IOLog("ATHENS TOUCH: trim raw swrst 0x%x id %02x %02x %02x %02x %02x %02x\n",
++			    fSwrst, buf[1], buf[2], buf[3], buf[4], buf[5], buf[6]);
+ 			for (uint32_t t = 0; t < sizeof(TRIM) / sizeof(TRIM[0]); t++) {
+ 				uint32_t i;
+ 				for (i = 0; i < 6; i++) {
+@@ -318,12 +410,11 @@
+ 					}
+ 				}
+ 				if (i == 6) {
+-					IOLog("ATHENS TOUCH: trim id %02x %02x %02x %02x %02x %02x -> %s map\n",
+-					    buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], TRIM[t].map->name);
+-					static struct nvt_map chosen;
+-					chosen = *TRIM[t].map;
+-					chosen.swrst = fSwrst;      /* keep the reset addr that worked */
+-					fMap = &chosen;
++					IOLog("ATHENS TOUCH: trim id -> %s map (swrst 0x%x)\n",
++					    TRIM[t].map->name, fSwrst);
++					fMapStore = *TRIM[t].map;
++					fMapStore.swrst = fSwrst;  /* keep the reset addr that worked */
++					fMap = &fMapStore;
+ 					return true;
+ 				}
+ 			}
+@@ -419,9 +510,15 @@
+ 
+ 	for (int retry = 0; retry < 3; retry++) {
+ 		bool bad = false;
+-		if (!hwcrc) {                         /* nvt_eng_reset first (sw path) */
+-			writeAddr(NVT_ENG_RST, 0x5A);
++		if (!hwcrc) {
++			/* nvt_download_firmware (sw path): vendor pulses TP_RESX around
++			 * eng_reset each retry (NVT_TOUCH_SUPPORT_HW_RST): resx low ->
++			 * eng_reset -> resx high -> tRT2BRST. Gives the MCU a clean POR. */
++			fGPIO->setOutput(fReset, false);    /* assert reset (active low) */
+ 			IODelay(1000);
++			engReset();
++			fGPIO->setOutput(fReset, true);     /* deassert */
++			IOSleep(10);
+ 		}
+ 		if (!bootloaderReset()) {
+ 			continue;
+@@ -471,7 +568,9 @@
+ 				w[0] = (uint8_t)(len & 0x7F);
+ 				w[1] = part[p].size & 0xFF;
+ 				w[2] = (part[p].size >> 8) & 0xFF;
+-				if (!ctpWrite(w, 3)) { bad = true; break; }  /* hw_crc==1: 2B len */
++				w[3] = (part[p].size >> 16) & 0xFF;
++				/* hw_crc==1 writes a 2-byte size, hw_crc>1 a 3-byte size. */
++				if (!ctpWrite(w, hwcrc == 1 ? 3 : 4)) { bad = true; break; }
+ 				if (!setPage(cks)) { bad = true; break; }
+ 				w[0] = (uint8_t)(cks & 0x7F);
+ 				w[1] = part[p].crc & 0xFF;
+@@ -510,7 +609,14 @@
+ 			}
+ 		}
+ 		bootReady();
+-		if (!checkResetState(NVT_RST_INIT)) {
++		bool rs = checkResetState(NVT_RST_INIT);
++		if (!rs && !hwcrc) {
++			/* Trim may have defaulted to the wrong no-flash EVENT_BUF page;
++			 * the download is map-independent so the fw can still be up —
++			 * probe the sibling pages before declaring failure. */
++			rs = discoverEventBuf();
++		}
++		if (!rs) {
+ 			continue;
+ 		}
+ 		if (!hwcrc) {
+@@ -622,16 +728,32 @@
+ 		IOLog("ATHENS TOUCH: missing SPI bus, GPIO or work loop\n");
+ 		return false;
+ 	}
+-	fMap = &MAP_A;
+-	fGPIO->setOutput(fReset, true);          /* reset line: live pinctrl holds it high */
+-	IOSleep(5);
++	/* Default to the no-flash map: this panel is nf_nt36672c (oppo,tp_noflash,
++	 * FW_20611_NF_NT36672C_JDI) = hw_crc 0. chipTrim may override to a flash
++	 * variant if the ID says so. */
++	fMap = &MAP_NF;
++	fGPIO->setOutput(fReset, true);          /* TP_RESX high = out of reset */
++	IOSleep(1);
++	/* Vendor probe order: eng_reset (SPI) -> resx high -> 10 ms -> trim. The
++	 * eng reset puts the MCU in a known state; without it the trim/download
++	 * reads come back garbage. */
++	engReset();
++	IOSleep(10);
+ 
+ 	/* Identify the map family via the trim ID table (tries the candidate
+-	 * SWRST addresses). Without a match we keep the last candidate and let
++	 * SWRST addresses). Without a match we keep the no-flash map and let
+ 	 * fwInfo/download decide — the chip answers or it doesn't. */
+ 	if (!chipTrim()) {
+ 		IOLog("ATHENS TOUCH: trim id not recognised, keeping %s map\n", fMap->name);
+ 	}
++	/* Work on a mutable copy so a no-flash download can discover the right
++	 * EVENT_BUF page (the vendor maps disagree on 0x11A00 vs 0x11E00). */
++	fMapStore = *fMap;
++	fMap = &fMapStore;
++	/* chipTrim leaves fSwrst at the last candidate it tried; bootloaderReset
++	 * uses fSwrst, so resync it to the selected map's reset address (a trim
++	 * match already stored the working one in fMapStore.swrst). */
++	fSwrst = fMap->swrst;
+ 	/* A running fw answers fwInfo; a blank NF chip needs the blob. */
+ 	if (!fwInfo()) {
+ 		IOLog("ATHENS TOUCH: no running fw on %s map, will download %s\n",
