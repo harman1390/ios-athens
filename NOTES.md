@@ -51,9 +51,17 @@ rate 5000). Catches EVERY unix syscall returning EIO with name+process =>
 definitively names the failing op. extern syscallnames[] (generated, already
 linked via kern_sysctl.c). printf->SWEETLOG proven. Applies clean -p1.
 KEEPS 0196 HFS prints (control: confirms HFS stays healthy).
-NEXT: CI build -> flash -> boot ~3min -> recovery -> pull ring -> grep
-EIO-SYSCALL => exact syscall+comm => then targeted fix (or confirms
-Foundation-synthesized EIO -> pivot to data-volume/mach).
+PATCH 0197 BUILT+FLASHED (2026-11-15): CI run 43647789507 SUCCESS ->
+.tmp-patch/eio-art/kernel.development.sweet (17,957,400 B). Verified strings:
+EIO-SYSCALL x1, sys=%s, comm=%s, hfs_makenode ENTER, MacToVFSError x5,
+cat_lookupbykey x7. Boot img shim/out/athens-boot-eio.img (17,502,208 B) via
+mkpayload+repack (shim/out/athens.adt + shim/out/athens/Image.gz +
+backup/boot.img). Cmdline = ufs-rw diag set, sweetlog=1 sweetfb_hz=0
+vivagpu=2 vivagpufreq=390 cpus=8 ufslogsecs=5, NO sweetscan/sweetnull (preserve
+ring for kernel prints; userspace reasons already captured last boot).
+FLASHED `fastboot flash boot` -> rebooted into iOS. userdata=varfix.simg.
+~3min boot -> recovery -> dd-pull ring -> grep `SWEET EIO-SYSCALL` => exact
+syscall name + comm for every EIO(5). THAT is the failing op.
 
 ## >>> ATHENS HANDOFF 2026-11-15w - *** HFS FILESYSTEM RULED OUT *** diag2 log: creates+lookups ALL SUCCEED, ZERO catalog errors; EIO is NOT filesystem; capturing userspace reason via sweetscan <<<
 
