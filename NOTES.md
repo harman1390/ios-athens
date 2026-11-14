@@ -3,6 +3,102 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15q - GPU/METAL CONFIRMED WORKING (vmg cmd buffers); touch bus woke (ff) but chip silent; Apple logo = crash storm, NOT GPU <<<
+
+gpu19 (commit e22ffd7, patch 0195 SPI parent-clock mainpll_d5_d4) BUILT via CI
+run 43626692574 -> shim/out/athens-boot-gpu19.img (flashed to boot; `fastboot
+boot` still fails "Too many links"). USERDATA = ios16-root-gpu.simg (Metal
+bundle injected) flashed via `fastboot flash -S 64M userdata` — ABL rejects
+>64M chunks ("data is too large" at 225M) and the img2simg tail chunk
+deterministically fails "sparse image write failure" on transfer 188/188.
+FIX (user-directed dd method): parsed simg -> failed range = partition blocks
+3119299..12582912 (~38.76GB, 9463613 blk) = 9,460,029 FILL-zero + 3,584 RAW
+(~14.7MB real). Extracted exact tail of ios16-root.img -> tailfix.gz (40MB) ->
+`adb push` -> recovery `gunzip -c /tmp/tailfix.gz | dd of=/dev/block/sdc59
+bs=4096 seek=3119299 conv=4` -> 9463613 rec, EXIT=0. userdata = complete image.
+
+BOOT RESULT: Apple logo only (display presents logo; SpringBoard not rendered).
+SWEETLOG pulled correctly via exec-out raw dd (NOT base64) + sweet-log.py:
+skip = total_blocks-1025 = 13048823 (53,452,177,408B /4096 = 13,049,848 blk).
+File .tmp-patch/gpu19-log.txt (4,899 lines, 278,978 B, flush#58).
+
+GPU/METAL — CONFIRMED FUNCTIONAL (not just published):
+- `VIVA GPU: accelerator published (MetalPluginName VivaMTLDriver)` (l330).
+- `exec MTLCompilerService` (l1590) — Metal shader compiler launched.
+- `SWEET SURF: backboardd create id 2 1125x2436 fmt 0x42475241` IOSurface made.
+- `|backboardd| vmg: IOSurface 2 ... import refused, copied (texture 1125x2436
+  b8g8r8a8_unorm)` + `vmg: buffer texture 194x237 ... copied at each command
+  buffer that samples it` — **VivaMTLDriver bundle LOADED and is processing
+  real Metal command buffers / creating GPU textures.** "import refused" =
+  IOSurface can't map into GPU mem -> CPU-copy fallback (perf limit, NOT fail).
+- backboardd does full HID setup (opens AthensNT36672C, AthensPMICKeys,
+  VivaKeypad, SweetHIDButtons, AppleCLCD). NO `CRASH backboardd`/`SpringBoard`.
+
+SPRINGBOARD — spawned (l948), did IOK service setup, then STALLED (not crashed).
+SMP thread dumps (l2737/4149) show threads blocked in normal mach_msg waits.
+BLOCKER = userspace crash storm, NOT GPU/display. Still crash-looping:
+mobileactivationd sig5 @0x..3bc, fitnesscoachingd sig5, tccd sig5, and MANY
+daemons sig6 @ IDENTICAL pc 0x1e1f77198 / bt 0x1ad5bc4b8 (dmd, ScreenTimeAgent,
+assistantd, ...) = shared-library/framework crash — investigate if Metal/GPU
+related (these daemons may init Metal) or a separate broken framework.
+FBSTAT frozen at swaps 7 flips 5 (logo only). datamigrator exec'd twice.
+
+TOUCH — 0195 clock fix had REAL effect: bus now returns `ff ff ff ff ff ff`
+(l306, was all 00) = MISO electrically alive after mainpll_d5_d4. But trim ID
+still unrecognised, `reset state timeout (last 0x00)`, `firmware download
+failed after retries`. Chip not yet answering validly — next suspects:
+CS assert/deassert timing vs spi-mt65xx.c, reset GPIO33 pulse correctness,
+MISO sampling edge, or chip power/rails. NOT confirmed working.
+
+NEXT ACTIONS:
+1. Identify the shared sig6 crash @0x1e1f77198 — symbolize (it's in dyld cache;
+   check if Metal/IOGPU). If Metal-related, fix driver; if not, it's the known
+   storm. This is now THE blocker for SpringBoard rendering past Apple logo.
+2. Touch: verify CS timing + reset pulse vs spi-mt65xx.c / NT36672C datasheet.
+3. Keep sweetfb_hz=0. Do NOT reflash userdata (image verified complete).
+
+## >>> ATHENS HANDOFF 2026-11-15p - TOUCH: clock-gate FIXED (regs alive) -> parent-clock fix 0195; GPU: Metal bundle injected, userdata flash pending <<<
+
+TOUCH PROGRESSION (all evidence from pulled sweetlog, no guessing):
+- gpu17 (0192 pinmux): `pinmux spi4 gpio12/13/97/98 func 2 2 1 1 -> 2 2 2 2`
+  applied BUT `spi4 ready (cfg0 00000000 cfg1 00000000 cmd 00000000)` = whole
+  register block dead. Pinmux was necessary but NOT sufficient.
+- gpu18 (0193 clockgate): `ifrao_spi4 gate sta 0x01fc0080 (running)` +
+  `cfg0 00000505 cfg1 00000001 cmd 00013000` = NONZERO. **0193 CONFIRMED:
+  the ifrao_spi4 functional clock was gated OFF (SET write at 0xa4); the
+  mtk_clk_gate_ops_setclr enable is a CLR write at 0xa8.** SPI4 regs now live,
+  transfers complete (no timeouts) but chip STILL reads 0x00 + reset timeout.
+- DIAGNOSIS (verified vs live DT + clk-mt6853.c + mt6853-clk.h, NOT guessed):
+  spi4 `clocks` = parent-clk=CLK_TOP_MAINPLL_D5_D4 (topckgen idx9),
+  sel-clk=CLK_TOP_SPI_SEL (idx179), spi-clk=CLK_IFRAO_SPI4. spi_parents[] =
+  {tck_26m, mainpll_d5_d4, mainpll_d6_d4, msdcpll_d4}; index1=mainpll_d5_d4 =
+  the DT parent-clk. We were selecting index3=msdcpll_d4 = eMMC PLL, GATED on
+  this UFS part -> dead SCK -> MISO 0x00. mainpll_d5_d4 is a FACTOR (mainpll/20,
+  always live). **Patch 0195: SPI_SEL_VAL 3->1.** Pushed e22ffd7; gpu19 CI run
+  43626692574 building. Divider unchanged (sck high=low=5 ~8MHz, under 9.6 max).
+- NEXT verify: sweetlog `trim raw ... id` nonzero + `firmware download ok` +
+  `ATHENS TOUCH: report ... x= y=` (0194 logs first 24 reports). If still 0x00
+  -> next suspects: CS polarity/deassert timing vs spi-mt65xx.c, or panel rail.
+
+GPU/METAL GUI (the real blocker, separate from touch):
+- gpu16/17/18 CONFIRMED: VivaGPUAccelerator publishes as IOAcceleratorES,
+  Mali-G57 MC3 id 0x90930000 3-core, MetalPluginName=VivaMTLDriver +
+  MetalPluginClassName=VMDevice published, backboardd creates real BGRA
+  IOSurface swaps. Display copy/flip/OVL frame-end VERIFIED working.
+- MISSING PIECE was userspace: VivaMTLDriver.bundle (15MB, iOS16 arm64,
+  BNDL, NSPrincipalClass=VMDevice, static Mesa/Panfrost) existed in
+  ../viva-gpu-artifacts/viva-gpu-ios/ but NEVER injected into rootfs.
+- DONE: mounted iosroot/ios16-root.img rw in WSL (hfsprogs; /mnt/c is ro for
+  loop -> copied 51.5GB img to /root/iosroot-work/), VERIFIED it is the tweaked
+  base (_PanicOnCrasX present + all /private/var skeleton dirs), copied bundle
+  -> /System/Library/Extensions/VivaMTLDriver.bundle (755/644, root:root),
+  sync+umount, img2simg -> /root/iosroot-work/ios16-root-gpu.simg.
+- NEXT: fastboot flash -S 512M userdata ios16-root-gpu.simg (~7min) -> boot ->
+  check sweetlog for Metal bundle load + SpringBoard render. IOGLESMetalBundle
+  Name= MISSING is likely non-fatal (legacy GLES prop; iOS16 uses MetalPlugin).
+- STILL OPEN: ~123-daemon sig5/sig6 crash storm may block SpringBoard even with
+  Metal working; stray-writer ZCHECK/0x4d4d4d4d memory corruption intermittent.
+
 ## >>> ATHENS HANDOFF 2026-11-15o - gpu16 booted: TOUCH root cause = SPI4 pins never muxed -> patch 0192 pinmux fix; DISPLAY still Apple-logo (FBSTAT pending) <<<
 
 GPU16 BUILD SUCCESS: CI run 43618107826, commit e8d0764 (patches 0189 FBSTAT +
