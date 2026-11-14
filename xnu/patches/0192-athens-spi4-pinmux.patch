@@ -1,0 +1,120 @@
+diff --git a/iokit/Kernel/arm/VivaIO.cpp b/iokit/Kernel/arm/VivaIO.cpp
+--- a/iokit/Kernel/arm/VivaIO.cpp
++++ b/iokit/Kernel/arm/VivaIO.cpp
+@@ -96,6 +96,44 @@
+ 		return kIOReturnBadArgument;
+ 	}
+ 	*high = (rd32(GPIO_DIN + 0x10 * (pin / 32)) >> (pin % 32)) & 1;
++	return kIOReturnSuccess;
++}
++
++/*
++ * mt6853 pinmux (drivers/pinctrl/mediatek/pinctrl-mt6853.c
++ * mt6853_pin_mode_range, i_base 0 = this gpio@0x10005000 block): the
++ * function-select is a 4-bit field per pin. Pins are grouped 8 per 32-bit
++ * register; group g sits at 0x0300 + g*0x10 and pin's field is at
++ * bit (pin%8)*4. Android's pinctrl applies this at probe (the touch
++ * "spimode_default" state); iOS has no pinctrl driver so SPI pins would
++ * otherwise stay in the LK/default GPIO function and the bus reads 0x00.
++ */
++uint32_t
++VivaGPIO::pinFuncField(uint32_t pin, uint32_t *bitpos)
++{
++	*bitpos = (pin % 8) * 4;
++	return 0x0300 + (pin / 8) * 0x10;
++}
++
++uint32_t
++VivaGPIO::getPinFunc(uint32_t pin)
++{
++	uint32_t bitpos;
++	uint32_t off = pinFuncField(pin, &bitpos);
++	return (rd32(off) >> bitpos) & 0xF;
++}
++
++IOReturn
++VivaGPIO::setPinFunc(uint32_t pin, uint32_t func)
++{
++	if (pin >= GPIO_PINS || func > 0xF) {
++		return kIOReturnBadArgument;
++	}
++	uint32_t bitpos;
++	uint32_t off = pinFuncField(pin, &bitpos);
++	uint32_t v = rd32(off);
++	v = (v & ~(0xFu << bitpos)) | ((func & 0xF) << bitpos);
++	wr32(off, v);
+ 	return kIOReturnSuccess;
+ }
+ 
+diff --git a/iokit/Kernel/arm/VivaIO.h b/iokit/Kernel/arm/VivaIO.h
+--- a/iokit/Kernel/arm/VivaIO.h
++++ b/iokit/Kernel/arm/VivaIO.h
+@@ -28,11 +28,17 @@
+ 	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
+ 	IOReturn setOutput(uint32_t pin, bool high);
+ 	IOReturn getInput(uint32_t pin, bool *high);
++	/* mt6853 pinmux (pinctrl-mt6853 mt6853_pin_mode_range): the 4-bit
++	 * function-select field per pin in this gpio block. getPinFunc reads
++	 * it, setPinFunc writes it (func 0 = GPIO, 2 = SPI4 on the touch pins). */
++	uint32_t getPinFunc(uint32_t pin);
++	IOReturn setPinFunc(uint32_t pin, uint32_t func);
+ 	/* The started instance, waiting for it if needed (NULL after timeout). */
+ 	static VivaGPIO *wait(void);
+ 
+ private:
+ 	bool outputAllowed(uint32_t pin);
++	uint32_t pinFuncField(uint32_t pin, uint32_t *bitpos);
+ 	inline uint32_t rd32(uint32_t off) { return *(volatile uint32_t *)(fRegs + off); }
+ 	inline void wr32(uint32_t off, uint32_t v) { *(volatile uint32_t *)(fRegs + off) = v; }
+ 
+diff --git a/iokit/Kernel/arm/AthensSPI.cpp b/iokit/Kernel/arm/AthensSPI.cpp
+--- a/iokit/Kernel/arm/AthensSPI.cpp
++++ b/iokit/Kernel/arm/AthensSPI.cpp
+@@ -23,6 +23,7 @@
+ #include <IOKit/IODeviceTreeSupport.h>
+ #include <libkern/OSByteOrder.h>
+ #include "AthensSPI.h"
++#include "VivaIO.h"   /* VivaGPIO: pinmux for the SPI4 pins */
+ 
+ #define SPI_CFG0        0x00
+ #define SPI_CFG1        0x04
+@@ -228,6 +229,39 @@
+ 	if (fInfraRegs != 0) {
+ 		*(volatile uint32_t *)(fInfraRegs + IFRAO4_CG_SET) = 1u << IFRAO_SPI4_BIT;
+ 	}
++	/*
++	 * SPI4 pins must be muxed to function 2 (the pinctrl "spimode_default"
++	 * state Android's pinctrl applies at probe). iOS has no pinctrl driver,
++	 * so without this the pins stay in the LK/default GPIO function: the
++	 * controller still clocks but SCK/CS/MOSI never reach the chip and
++	 * MISO reads a dead GPIO input -> every touch SPI read returns 0x00.
++	 * spi4@11018000 touchscreen@0 pinctrl-0 -> spimode_default pinmux:
++	 *   GPIO12=SPI4_MI, GPIO13=SPI4_MO, GPIO97=SPI4_CLK, GPIO98=SPI4_CSB.
++	 * Log the before/after function so a wrong guess is visible in sweetlog.
++	 */
++	{
++		VivaGPIO *gpio = VivaGPIO::wait();
++		if (gpio != NULL) {
++			static const uint32_t spi4pins[] = { 12, 13, 97, 98 };
++			uint32_t before[4], after[4];
++			for (unsigned int i = 0; i < 4; i++) {
++				before[i] = gpio->getPinFunc(spi4pins[i]);
++				gpio->setPinFunc(spi4pins[i], 2);
++				after[i] = gpio->getPinFunc(spi4pins[i]);
++			}
++			/* irq GPIO14 and reset GPIO33 must be plain GPIO (func 0);
++			 * Android's int_active/reset_active states set them so. */
++			uint32_t irqb = gpio->getPinFunc(14), rstb = gpio->getPinFunc(33);
++			gpio->setPinFunc(14, 0);
++			gpio->setPinFunc(33, 0);
++			IOLog("ATHENS SPI: pinmux spi4 gpio12/13/97/98 func %u %u %u %u -> %u %u %u %u (irq14 %u->%u rst33 %u->%u)\n",
++			    before[0], before[1], before[2], before[3],
++			    after[0], after[1], after[2], after[3],
++			    irqb, gpio->getPinFunc(14), rstb, gpio->getPinFunc(33));
++		} else {
++			IOLog("ATHENS SPI: no VivaGPIO for pinmux\n");
++		}
++	}
+ 	initHW();
+ 	IOLog("ATHENS SPI: %s ready (cfg0 %08x cfg1 %08x cmd %08x)\n",
+ 	    provider->getName(), rd32(SPI_CFG0), rd32(SPI_CFG1), rd32(SPI_CMD));
