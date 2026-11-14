@@ -83,9 +83,85 @@ SHADER_PRESENT so core count should be dynamic — verify.
 3. MMU/jobs — reuse as-is — G2
 4. Then the shared Metal stack (PIANO-GPU G3+) applies to both devices.
 
-## Open questions for next recovery pull
+## UPDATE 2026-11-14 — driver already in tree; hardware data pulled
 
-- live FDT: mali node `power-domains`, gpufreq node `_vgpu-supply`/
-  `_vsram_gpu-supply` targets, `sram-supply` if present
-- `/proc/device-tree` clock-names for gpufreq (MFG domain list)
-- efuse/devinfo for OPP segment selection (index 134)
+**The whole viva kernel driver is already applied in athens** —
+`xnu/patches/0100-viva-gpu-mali` … `0137-viva-gpu-dvfs-boost` ship
+`iokit/Kernel/arm/VivaGPU.{cpp,h}` + `VivaGPUUserClient.cpp` +
+`viva_gpu_uapi.h`, compiled into the kernel, all boot-args present
+(`vivagpu`, `vivagpufreq`, `vivagpumv`, `vivagpucache`, `vivagpuwc`,
+`vivagpudvfs`, `vivagpuboost`, `vivagpumem*`, `vivagpuprobe` …).
+`AthensPMIC.cpp` (MT6359 on pwrap@0x10026000) and `VivaPMIC`/`VivaPwrap`
+already exist. So this is NOT a from-scratch port — it is **hardware
+adaptation of a driver that is already compiled in**.
+
+**Userspace Metal stack exists and is proven on viva**: separate repo
+`github.com/Nik300/viva-gpu` (cloned to `../viva-gpu`). Metal frontend
+(`driver/metal/*.m`) + AIR→NIR (`vmg_air.c`) + static Mesa/Panfrost
+(Valhall compiler — MC2/MC3 agnostic) + `libdrm-xnu`→`vgpu`→IOKit →
+`VivaMTLDriver.bundle` (`MetalPluginName`/`VMDevice`). On viva it is
+LIVE: backboardd creates `VivaGPUUserClient` BOs, Panfrost BO cache
+present, SpringBoard/Settings GPU-accelerated. It builds against the
+kernel uapi in `uapi/viva_gpu_uapi.h` — unchanged for athens.
+
+**Why athens shows no IOAcceleratorES today** (all fixable):
+1. ADT `/arm-io/gpu` compatible is `mediatek,mt6853-mali` but
+   `VivaGPU` matches `mediatek,mt6781-mali` → add match.
+   NOTE: the *real* athens FDT uses `mediatek,mali` + `arm,mali-valhall`
+   (see `mali@13000000/compatible` in `research/rmx2117/live-dt/`) —
+   our ADT string is synthetic; keep it consistent with the match.
+2. `vivagpu` defaults to 0 → set `vivagpu=2` in `ATHENS_EXTRA`.
+3. ADT gpu `reg` is minimal (Mali MMIO only). The driver also needs the
+   MFG power blocks — viva's node carries mfgcfg/SPM/topckgen/apmixed/
+   infracfg_ao. Port those `reg` ranges into the athens node.
+4. PMIC rail defines are MT6366 (`VivaGPU.cpp` ~L204-212). athens needs
+   MT6359 — and `VivaPwrap::writeRegulator` whitelist must accept them.
+5. IRQs: athens gpufreq/mali use SPI 364-368 (mkadt comment) vs viva
+   274-276 — confirm which the driver requests.
+
+**Live device-tree data pulled (research/rmx2117/live-dt, 2026-11-13)**
+- `gpufreq/clock-names`: `clk_mux clk_main_parent clk_sub_parent
+  subsys_bg3d mtcmos_mfg0 mtcmos_mfg1 mtcmos_mfg2 mtcmos_mfg3
+  mtcmos_mfg5` → **five MFG power domains** (mfg0/1/2/3/5), matching
+  ATHENS-GPU.md; SPM MTCMOS sequence order must be ported.
+- `gpufreq/_vgpu-supply` phandle **0x83 = `buck_vproc1`** (reg=vproc1);
+  `gpufreq/_vsram_gpu-supply` phandle **0x84 = `ldo_vsram_md`**
+  (reg=vsram_md) — CONFIRMED for this realme unit (the vgpu11 red
+  herring is a different buck, phandle 0x41, feeds proc1 not GPU).
+- `mali@13000000`: compatible `mediatek,mali`/`arm,mali-valhall`,
+  minimal node (no clocks/power-domains/OPP in DT — all in gpufreq
+  driver). `operating-points` empty → OPP comes from the MT6853
+  gpufreq driver / efuse devinfo, still to extract.
+- PMIC on `pwrap@0x10026000/mt6359-pmic/mt6359regulator` — regulator
+  names confirmed; **register addresses are NOT in DT** (come from the
+  MT6359 driver map). ATHENS-GPU.md candidates: VGPU `buck_vproc1`
+  EN 0x1708 / VOSEL 0x172e[6:0]; VSRAM `ldo_vsram_md` EN 0x1f2c /
+  VOSEL 0x1b46[6:0] — **verify against mt6359 register defs before
+  writing** (this is the riskiest unknown).
+
+## Concrete port checklist (ordered)
+
+1. **mkadt gpu node**: add the MFG `reg` blocks (copy viva's list,
+   keep athens MMIO base) + correct SPI IRQs; keep `mediatek,mt6853-mali`.
+2. **VivaGPU match**: accept `mediatek,mt6853-mali` (KernelConfigTables).
+3. **MT6359 rails**: add vproc1/vsram_md EN+VOSEL(+DA) addresses to the
+   PMIC defines and to `VivaPwrap::writeRegulator` whitelist; port the
+   power-on ordering (VSRAM then VGPU, voltage step limits).
+4. **MFG power/clock**: port mt6859/mt6853 gpufreq MTCMOS domain order
+   (mfg0,1,2,3,5) + MFGPLL (apmixed 0x1000c000) + mfg_sel mux; verify
+   against `clk-mt6853.c`/`gpufreq_v1/mt6853`.
+5. **OPP**: extract mt6853 segment table; start one conservative OPP
+   (`vivagpufreq`), vsram−vgpu ≤ 350 mV constraint.
+6. Boot `vivagpu=2` → `gpu on`/`selftest` via link → GPU_ID must read
+   MC3 (SHADER_PRESENT=3 cores). Iterate on power faults.
+7. **Userspace**: build `viva-gpu/ios` for athens (needs iOS SDK/Xcode —
+   dev's Mac; this box has only CLT). Inject `VivaMTLDriver.bundle` +
+   dylibs into rootfs; Metal auto-loads via the service properties.
+
+## Honest scope
+
+Steps 1-6 are kernel hardware bring-up (days, iterative on-device).
+Step 7 is the userspace build+inject (the repo is ready; the blocker is
+iOS SDK + rootfs packaging). Full GPU-accelerated GUI = both, plus the
+viva display-sync patches (0111-0137) that make frames wait on GPU
+fences — port those only after basic submit works.
