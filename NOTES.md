@@ -3,6 +3,50 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-14b - DISPLAY/GPU RESEARCH; SW-RENDERER CRASH-GUARD FOUND <<<
+
+GOAL (user): get display working so touch is visible; GPU work to enable
+testing the boot. Researched in parallel while fw kernel built.
+
+KEY FINDING - the GUI blocker is NOT "no renderer", it's a deliberate
+crash-guard. iOS 16 QuartzCore ships a COMPLETE CPU software rasterizer
+(CA::OGL::SWContext: draw_elements, blur_surface, copy_destination,
+make_buffer_current, create_surface_from_iosurface - full SW:: sampler/
+filler set). backboardd -> CA::WindowServer::Server::render_update/
+render_surface -> Server::sw_renderer() lazily builds SWContext+Renderer,
+then calls an abort_with_reason-style helper TWICE:
+  "CoreAnimation: Software renderer! Simulating crash!"
+  "CoreAnimation: Failed to initialize Metal or OpenGLES contexts!"
+i.e. Apple hard-crashes the SW path on-device (GPU is mandatory on retail
+hw). Disasm: tools dump /tmp/qc-dis.txt; sw_renderer @0x1884f4c54.
+
+BYPASS (viable, NOT yet applied): the two crash sites are `bl 0x18dbcca84`
+in dyld_shared_cache_arm64.03 at file offsets 0x1768d34 (insn 0x955b5f54)
+and 0x1768d8c (insn 0x955b5f3e). NOP them (0xd503201f) -> sw_renderer()
+returns the SW renderer -> backboardd composites via CPU -> VISIBLE GUI,
+no GPU needed. Script: tools/patch-sw-renderer.py (verify+patch+verify,
+idempotent). Verified offsets/bytes against mounted ios16-root.img.
+CAVEAT: must land on the device's HFS+ rootfs = patch iosroot/ios16-root.img
+-> re-simg -> reflash userdata (the reflash path; same img + 8 bytes).
+/System is RO at runtime so it can't be patched from inside iOS. vivad/
+viva-link USB command channel is NOT on athens (ssusb xhci, not musb).
+
+BOOT-ARG sweetfb_keep (patch 0181, commit e21babc): RequestPowerChange(0)
+no longer fades panel to black - keeps last composited frame on screen.
+For the diagnostic "what did backboardd actually render" test. Kernel
+CI run 43574546167 (0180 embedded fw + 0181 fb-keep) building.
+
+TOUCH STATUS unchanged: driver binds+exposes (verified); embedded fw
+kernel 43573644960 ready (verify-string gate false-failed on 'spi4 ready'
+- it's a %s format arg not a literal; kernel itself is good, has
+'using built-in firmware').
+
+NEXT: (1) when 43574546167 lands -> build ufs-rw img w/ sweetlog=1
+sweetfb_keep=1 -> flash boot -> boot -> SEE if lock screen/GUI appears
+(sweetfb_keep holds last frame). (2) If black -> apply patch-sw-renderer
+to img + reflash userdata -> SW-rendered GUI. (3) fw download + touch
+reports confirm on same boot.
+
 ## >>> ATHENS HANDOFF 2026-11-14a - TOUCH DRIVER WORKS; FW EMBEDDED; DISPLAY=NO GPU <<<
 
 VERIFIED ON DEVICE (logs/athens-spifix2-log.txt, kernel a9774ba):
