@@ -2580,3 +2580,49 @@ OPEN / NEXT
   True 120Hz needs SWEET_FB_VSYNC_US 16667->8333 AND panel already 120Hz.
 * Local env: NO clang -> reuse shim/out/athens/Image.gz + viva-bootimg.py
   repack. fastboot boot flaky ('Too many links') -> flash boot partition.
+
+## 2026-11-14 GPU diag boot #3 RESULT: panic = stray-writer (NOT GPU); nub diag was too-early
+
+- Built athens-boot-gpu3.img from CI 43583130785 (0183 broadened
+  'SWEET NUB: node=' all createNub nodes + start() entered + mali
+  compatible). Repacked via viva-bootimg.py (reused shim Image.gz).
+  NOTE: mkadt --dump with no --athens flags clobbered athens.adt once -
+  regenerated with --athens --athens-ufs; verified mali under arm-io.
+- Flashed boot partition OK, rebooted. USER SAW: brief "pmic wrapper"
+  text then PANIC. (pmic wrapper = normal 'VIVA PWRAP: ... WACS2 not
+  initialized' line, coincidental with panic screen.)
+- Pulled SWEETLOG (bs=4096 skip=13045495 count=4353 -> gpu3-log.bin,
+  ~6MB nonzero). FINDINGS:
+  * ZERO 'SWEET NUB', ZERO 'VIVA GPU', ZERO 'start() entered' - the
+    broadened createNub diagnostic produced NO output for ANY node.
+  * Drivers still registered (SEP/WDT/AMFI/VIVA KP/PWRAP/GPIO/I2C/HID).
+  * Log ends in KERNEL PANIC = the KNOWN stray-writer memory bug:
+    'ZCHECK pn 0x38000 pa 0xe0000000 bad 191 ... w1 0x00000038014d4d4d'
+    (0x4d4d4d4d='MMMM' pattern, dram_r1 dummy-read range) + POOLSCAN/
+    STATICFREE SWEETPAN records. PRE-EXISTING, unrelated to GPU - it is
+    the intermittent corruption documented earlier (run-6 hit 0xe0000000).
+- ROOT CAUSE of silent diagnostic (verified in source, not guessed):
+  processTopLevel->createNubs->createNub runs inside
+  IODTPlatformExpert::configure(), which executes BEFORE
+  SweetPlatformExpert::start(). The 'SWEET NUB' IOLog fires during
+  configure() - before the persistent log ring captures IOKit output.
+  Driver start() messages (SEP etc.) ARE captured because matching is
+  deferred/async and lands inside the captured window. => createNub-time
+  logging is fundamentally invisible; need a captured-point diagnostic.
+- VERIFIED match path is sound (read source, not assumed):
+  AthensSPI uses IOProviderClass=IOPlatformDevice + IONameMatch and
+  WORKS, so IOPlatformDevice nubs match fine. mali node is a direct
+  arm-io child, identical structure to spi4. reg u64==io() encoding.
+  CompareKey reads compatible as OSData/OSString, exact NUL-separated
+  match -> 'mediatek,mali' should match IONameMatch.
+- FIX: moved diagnostic to SweetPlatformExpert::start() AFTER
+  'platform expert registered' (captured). New 'SWEET NUB2: child
+  <name> (<class>) compat=<compatible>' dumps every service-plane
+  device nub the platform created. Reveals: does mali produce an
+  IOPlatformDevice nub? what compatible does it carry?
+  (commit cdf5d8d; hunk git-apply --check verified; APIs match
+  VivaPwrap.cpp/AthensPMIC.cpp proven usage.)
+- NEW BUILD: CI run 43584629140.
+- STILL OPEN: GPU match (nub existence now being tested); touch
+  reset-state 0x00; stray-writer panic (separate, intermittent);
+  VivaMTLDriver.bundle staged not injected.
