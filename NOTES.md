@@ -3,6 +3,36 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15c - gpu10 RESULT: WACS2 genuinely DEAD (probe timeout); MT6853 may need ARB mode / PMIF <<<
+
+gpu10 (patch 0185 probe) flashed + logged. DECISIVE LINE:
+  `VIVA PWRAP: init-done clear; probe swcid ret -536870186 val 0x0 hwcid ret -536870186 val 0x0`
+  `VIVA PWRAP: WACS2 not initialized, not using it` -> `VIVA GPU: no PMIC wrapper`
+=> WACS2 command interface TIMES OUT. Not a missing flag — the bus engine is
+dead. backboardd still `IOAcceleratorES -> 0` (no GUI), same as gpu9.
+
+DEEPER FINDING (Linux mtk-pmic-wrap.c + vendor headers):
+- pwrap register OFFSETS match mt6779 (WACS2_CMD=0xC20,RDATA=0xC24,VLDCLR=0xC28;
+  WRAP_EN=0x04,HIPRIO_ARB_EN=0x6C,WACS0/1/2_EN=0x8C/0x94/0x9C,STAUPD=0x3C/0x40,
+  INIT_DONE0/1/2=0x90/0x98/0xA0,arb_en_all=0xfbb7f). MT6853 not in mainline 5.15.
+- BUT newer pwrap has PWRAP_CAP_ARB (arbiter): WACS2_CMD = raw `adr` (NOT
+  (adr>>1)<<16) and RDATA = PWRAP_SWINF_2_RDATA_31_0 (NOT WACS2_RDATA). If
+  MT6853 uses ARB, VivaPwrap's ENTIRE WACS2 protocol is wrong for athens.
+- MT6853 also has `pmif-m` (PMIC Interface, mediatek,mt6853-pmif-m) — a newer
+  PMIC bus that may be the REAL access path, with pwrap@10026000 possibly
+  legacy/limited. live-dt has pwraphal@10026000 + pwrap_mpu@10026000 siblings.
+- Register reads DO return values (init_done0=0xa000a,wacs2_en=0xa000a — same
+  value at two addrs is suspicious, possible bus-float/aliasing) but WACS2
+  command FSM never leaves IDLE -> engine not clocked/configured, OR wrong
+  protocol (ARB), OR wrong register block (should be spi_mst@0x10028000?).
+
+NEXT (needs MT6853-specific source — vendor kernel pwrap_hal.c / mt6853.dts /
+datasheet): determine (a) does MT6853 pwrap use ARB WACS2 protocol? (b) is the
+WACS block in pwrap@0x10026000 or spi_mst@0x10028000? (c) are spi/wrap clocks
+gated (infracfg) and need enabling first? (d) does real PMIC access go via
+pmif instead? Then port correct init+protocol into VivaPwrap.
+This is real hardware bring-up; do NOT guess register writes blind.
+
 ## >>> ATHENS HANDOFF 2026-11-15b - gpu10 BUILT: pwrap WACS2 probe (build 43600586629) <<<
 
 Patch 0185 (xnu/patches/0185-athens-pwrap-probe.patch, commit 42307ca):
