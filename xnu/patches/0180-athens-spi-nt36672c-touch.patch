@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..a59c0e7
 --- /dev/null
 +++ b/iokit/Kernel/arm/AthensSPI.cpp
-@@ -0,0 +1,295 @@
+@@ -0,0 +1,308 @@
 +/*
 + * athens (MT6853): MediaTek SPI host driver (see AthensSPI.h).
 + *
@@ -145,18 +145,23 @@ index 0000000..a59c0e7
 +	fTopMap = provider->mapDeviceMemoryWithIndex(1);
 +	fInfraMap = provider->mapDeviceMemoryWithIndex(2);
 +	fWorkLoop = IOWorkLoop::workLoop();
-+	fDMA = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
-+	    kIODirectionInOut | kIOMemoryPhysicallyContiguous, kDMASize,
-+	    (mach_vm_address_t)0x00000000FFFFF000ULL);
-+	if (fMap == NULL || fWorkLoop == NULL || fDMA == NULL) {
-+		IOLog("ATHENS SPI: missing resource map=%p loop=%p dma=%p\n",
-+		    fMap, fWorkLoop, fDMA);
++	fDMA = IOMemoryDescriptor::withPhysicalAddress(kDMAPhysAddr, kDMASize,
++	    kIODirectionInOut);
++	fDMAMap = NULL;
++	fDMABuf = NULL;
++	if (fDMA != NULL && fDMA->prepare() == kIOReturnSuccess) {
++		fDMAMap = fDMA->map(kIOMapWriteCombineCache);
++		fDMABuf = fDMAMap != NULL ? (uint8_t *)fDMAMap->getVirtualAddress() : NULL;
++	}
++	if (fMap == NULL || fWorkLoop == NULL || fDMA == NULL || fDMABuf == NULL) {
++		IOLog("ATHENS SPI: missing resource map=%p loop=%p dma=%p buf=%p\n",
++		    fMap, fWorkLoop, fDMA, fDMABuf);
 +		return false;
 +	}
 +	fRegs = fMap->getVirtualAddress();
 +	fTopRegs = fTopMap != NULL ? fTopMap->getVirtualAddress() : 0;
 +	fInfraRegs = fInfraMap != NULL ? fInfraMap->getVirtualAddress() : 0;
-+	fDMAPhys = (uint32_t)fDMA->getPhysicalSegment(0, NULL, kIOMemoryMapperNone);
++	fDMAPhys = kDMAPhysAddr;
 +	fGate = IOCommandGate::commandGate(this);
 +	if (fGate == NULL || fWorkLoop->addEventSource(fGate) != kIOReturnSuccess) {
 +		IOLog("ATHENS SPI: no gate\n");
@@ -194,7 +199,15 @@ index 0000000..a59c0e7
 +		fWorkLoop->removeEventSource(fGate);
 +	}
 +	OSSafeReleaseNULL(fGate);
-+	OSSafeReleaseNULL(fDMA);
++	if (fDMAMap != NULL) {
++		fDMAMap->release();
++		fDMAMap = NULL;
++	}
++	if (fDMA != NULL) {
++		fDMA->complete();
++		fDMA->release();
++		fDMA = NULL;
++	}
 +	OSSafeReleaseNULL(fMap);
 +	OSSafeReleaseNULL(fTopMap);
 +	OSSafeReleaseNULL(fInfraMap);
@@ -261,9 +274,9 @@ index 0000000..a59c0e7
 +	/* DMA path: copy the frame into the contiguous buffer, program
 +	 * packet_len (<=1024) + packet_loop, set the DMA cmd bits, ACT. */
 +	if (txbuf != NULL) {
-+		memcpy(fDMA->getBytesNoCopy(), txbuf, len);
++		memcpy(fDMABuf, txbuf, len);
 +	} else {
-+		memset(fDMA->getBytesNoCopy(), 0, len);
++		memset(fDMABuf, 0, len);
 +	}
 +	/* Clean+invalidate before the controller reads it (same op VivaWiFi
 +	 * uses for both directions: this fork has no IOFlushCacheRange). */
@@ -284,7 +297,7 @@ index 0000000..a59c0e7
 +	}
 +	if (rxbuf != NULL) {
 +		fDMA->performOperation(kIOMemoryIncoherentIOFlush, 0, len);
-+		memcpy(rxbuf, fDMA->getBytesNoCopy(), len);
++		memcpy(rxbuf, fDMABuf, len);
 +	}
 +	return kIOReturnSuccess;
 +
@@ -304,7 +317,7 @@ new file mode 100644
 index 0000000..83a2b91
 --- /dev/null
 +++ b/iokit/Kernel/arm/AthensSPI.h
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,64 @@
 +/*
 + * athens (MT6853): MediaTek SPI host driver (spi-mt65xx.c equivalent).
 + *
@@ -329,6 +342,14 @@ index 0000000..83a2b91
 +public:
 +	enum { kFIFOSize = 32 };
 +	enum { kDMASize  = 64 * 1024 };
++	/*
++	 * The internal DMA address regs (TX_SRC/RX_DST) are 32-bit and the whole
++	 * managed window is >4 GiB, so no allocator can satisfy a sub-4 GiB mask.
++	 * Borrow a fixed carve-out instead: pstore (0x4d010000, ~896 KiB of
++	 * Android ramoops) is reserved so the page allocator never hands it out,
++	 * unused under iOS, and below the dram_r0 dummy-read alloc range.
++	 */
++	enum { kDMAPhysAddr = 0x4d010000 };
 +
 +	virtual bool init(OSDictionary *props = NULL) APPLE_KEXT_OVERRIDE;
 +	virtual bool start(IOService *provider) APPLE_KEXT_OVERRIDE;
@@ -350,11 +371,12 @@ index 0000000..83a2b91
 +	inline uint32_t rd32(uint32_t off) { return *(volatile uint32_t *)(fRegs + off); }
 +	inline void wr32(uint32_t off, uint32_t v) { *(volatile uint32_t *)(fRegs + off) = v; }
 +
-+	IOMemoryMap             *fMap, *fTopMap, *fInfraMap;
++	IOMemoryMap             *fMap, *fTopMap, *fInfraMap, *fDMAMap;
 +	vm_offset_t              fRegs, fTopRegs, fInfraRegs;
 +	IOWorkLoop              *fWorkLoop;
 +	IOCommandGate           *fGate;
-+	IOBufferMemoryDescriptor *fDMA;
++	IOMemoryDescriptor      *fDMA;
++	uint8_t                *fDMABuf;
 +	uint32_t                 fDMAPhys;
 +	uint32_t                 fErrors;
 +};
