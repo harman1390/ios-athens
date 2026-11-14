@@ -136,6 +136,47 @@ fallback. `ATHENS_CMDLINE` replaces the whole command line.
   matches the shim's TOPRGU address (verified).
 11. ⬜ **Metal on Mali-G57 MC3 via viva-gpu — ACTIVE (not stretch).** Kernel driver ported (0182/0183); userspace `VivaMTLDriver.bundle` staged at `ios/viva-gpu-artifacts/` (upstream CI artifact, arm64 iOS16). Blocker: GPU nub/match not yet confirmed in SWEETLOG. Wi-Fi via connac work remains stretch.
 
+## Distance to daily driver (honest assessment, 2026-11-14)
+
+"Daily driver" = boots to a usable SpringBoard you can unlock, touch,
+browse, and leave running. Scored against the verified SWEETLOG state.
+**Cellular is realistically out of reach** — iOS has no MediaTek baseband
+stack; even the most advanced iOS-on-Android ports do not do cellular.
+The realistic ceiling is a **Wi-Fi-only iOS device** (iPad-class).
+
+| Subsystem | State | Evidence | Gap to daily-driver |
+| --- | --- | --- | --- |
+| Kernel→userspace boot | ✅ deep bring-up | SpringBoard/backboardd/wifid exec; userspace crash-loops are normal bring-up noise | done |
+| Display scan-out | ✅ pipeline proven | Apple logo renders; `sweetfb_keep` holds last frame | done (CPU path) |
+| Real GUI compositing | ❌ **THE blocker** | backboardd `IOAcceleratorES` match → 0 found; frozen logo | GPU kernel match+power, then Metal userspace |
+| Touch | ⚠️ partial | binds + 139 KB fw downloads, but `reset state timeout (0x00)` → no contact reports | fix SPI status-read/reset bug |
+| Buttons | ⚠️ partial | `SweetHIDButtons` opened by backboardd (GPIO keys) | verify PMIC PWRKEY/HOMEKEY + volume |
+| Storage (UFS r/w) | ✅ works | iOS root runs off `userdata` LUN2 | done |
+| Battery | ❌ fake | `SWEET BATTERY: static fallback, 100%` | MT6359 gauge/FGADC driver |
+| Wi-Fi | ❌ none | `wifid`/`wifianalyticsd` exec but no connac driver | connac2x2 driver port (big) |
+| Audio | ❌ none | `audioclocksyncd` exec, no codec driver | codec + audio stack port |
+| USB link | ❓ | ssusb xhci0 present, link unconfirmed | confirm adb/peripheral path |
+| Cellular/baseband | ❌ | no MTK modem stack in iOS | **research-grade, likely never** |
+| Camera/sensors/NFC/GPS | ❌ | not ported | each a driver project |
+| Sleep/wake, DVFS, thermal | ❌ | not validated | power-management bring-up |
+
+**Critical path (ordered):**
+1. **GPU** — get `mali` nub → `VivaGPUAccelerator` match (current
+   diagnostic build dumps every createNub node name), power-on, then
+   inject `VivaMTLDriver.bundle`. Gates ALL real UI. *Without this there
+   is no visible GUI at all.* (SW-renderer shortcut exists but user
+   declined it.)
+2. **Touch** — fix the post-download `0x00` status read so contacts land.
+3. **Wi-Fi + audio + real battery** — the "usable device" tier.
+4. **Power/sensors/stability** — daily-driver polish.
+
+**Honest distance:** visible+touchable GUI is *close* if the GPU match is
+a small fix (days) but *weeks* if it's a deeper DT/driver issue; the full
+userspace Metal stack is the long pole. A stable Wi-Fi-only daily driver
+is realistically **months** of iterative on-device work; cellular is not
+on the table. Current state ≈ **early bring-up / pre-GUI** — roughly the
+"boots but can't yet show a desktop" stage.
+
 ## Handoff (2026-11-06, Phase 0 partial — device session 1)
 
 Done on the phone: BROM entry confirmed (power off, Vol±, plug); Kamakiri
