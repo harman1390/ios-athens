@@ -3,6 +3,65 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-13m - SPI DMA MASK BUG = TOUCH BLOCKER; FIXED IN PATCH <<<
+
+ROOT CAUSE of "ATHENS SPI: missing regs map, work loop or DMA buffer":
+AthensSPI::start() allocated its 64KiB DMA bounce buffer with
+inTaskWithPhysicalMask mask = (0xFFFFFFFFULL)<<32 = 0xFFFFFFFF00000000.
+That mask demands phys bits ONLY in [32..63] -> PA must be an exact
+multiple of 4GiB -> impossible -> fDMA always NULL -> start() returns
+false -> no "ATHENS SPI ready" -> NT36672C child never matches.
+
+WHY <4GiB IS REQUIRED: MT6853 SPI4 internal DMA addr regs (TX_SRC 0x08 /
+RX_DST 0x0c) are 32-bit -> buffer PA must be <4GiB. Highmem window
+(0x100000000+) is fine for kernel RAM but NOT for this DMA.
+
+WHY IT CAN WORK: SweetSurface.cpp already allocates <4GiB contiguous
+framebuffer surfaces for the same reason (display DMA, no IOMMU) using
+mask 0x00000000ffffc000. Double-buffer addrs seen in log
+(0x77e20000/0x7920c000) prove <4GiB contiguous alloc succeeds. Fix =
+same pattern: mask 0x00000000FFFFF000 (<4GiB, 4KiB-aligned).
+
+FIX (patch 0180 + logs/xnu-src copy): mask -> 0x00000000FFFFF000;
+error msg now prints map/loop/dma ptrs to pinpoint any residual NULL.
+Hunk counts re-verified OK (tools/check_patch_counts.py). sweettouch=0
+is CORRECT to keep - it only gates the Qualcomm sweet_touch.c thread;
+AthensNT36672C is a separate IOService that probes the spi4 ADT node
+with no boot-arg gate.
+
+NEXT: CI kernel build -> athens-mkboot.sh ufs-rw -> boot -> pull tail
+skip=13048823 -> expect "ATHENS SPI ... ready" then NT36672C probe +
+fw download attempt. nt36672c_jdi.bin still NOT in flashed rootfs ->
+fwUpdate will fail soft unless rootfs rebuilt/flashed.
+
+## >>> ATHENS HANDOFF 2026-11-13l - PULL-OFFSET BUG FOUND; DEVICE IS FINE; TOUCH TEST IN FLIGHT <<<
+
+*** CRITICAL PULL-OFFSET CORRECTION (wasted a diagnostic cycle) ***
+sdc59 = 13,049,848 4KiB blocks (NOT 13,048,823 - dropped a digit).
+GPT "userdata" entry: first=2566144 last=15615991 n=13049848.
+Kernel log tail base (abs device blk) = first+nblocks-1025 = 15614967.
+sdc59-RELATIVE skip for last-1025-block window = **13048823**, count 1025.
+I wrongly used skip=13047798 (= total-2050, one window too early) -> read
+the region BEFORE the log tail -> saw SHIMPRAM (earlier zone) but NO
+SWEETLOG -> FALSELY concluded "kernel dies before UFS". tools/
+sweet-log-pull.sh computes 13048823 correctly (bytes/4096-1025); only
+my manual hardcoded skips were wrong. ALWAYS recompute skip from the
+GPT userdata nblocks, do not reuse a remembered number.
+
+VERIFIED (logs/athens-coldboot-correct.txt, correct pull):
+- 0179-good cold boot is CLEAN: exec SpringBoard(513) backboardd(602),
+  display on(2304), swap1-5, display off(2450). NO panic (6 SWEETPAN =
+  layout/poolscan/zcheck diag records only). Device + userdata + kernel
+  all healthy. "xnu logs->logo->black" = normal GUI-render/black-panel.
+- Userdata is FINE - no reflash needed. fastboot userdata flash has
+  failed on this device anyway; rootfs already reaches userspace.
+
+TOUCH TEST: reflashed athens-boot-touch.img (ae66f3b kernel, spi4 node),
+booting now. Will pull with CORRECT skip=13048823 to verify AthensSPI/
+NT36672C probe + fw-load attempt (binding is in kernel log even with
+black panel; nt36672c_jdi.bin NOT yet in flashed rootfs -> fwUpdate
+fails soft).
+
 ## >>> ATHENS HANDOFF 2026-11-13k - 0179 HIGHMEM BOOTS CLEAN TO GUI-RENDER; BLACK SCREEN = PANEL, NOT BOOT <<<
 
 VERIFIED ON DEVICE (logs/athens-0179-recheck.txt, ring total 553982B,

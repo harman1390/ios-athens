@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..a59c0e7
 --- /dev/null
 +++ b/iokit/Kernel/arm/AthensSPI.cpp
-@@ -0,0 +1,294 @@
+@@ -0,0 +1,295 @@
 +/*
 + * athens (MT6853): MediaTek SPI host driver (see AthensSPI.h).
 + *
@@ -147,9 +147,10 @@ index 0000000..a59c0e7
 +	fWorkLoop = IOWorkLoop::workLoop();
 +	fDMA = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
 +	    kIODirectionInOut | kIOMemoryPhysicallyContiguous, kDMASize,
-+	    (mach_vm_address_t)(0xFFFFFFFFULL) << 32);
++	    (mach_vm_address_t)0x00000000FFFFF000ULL);
 +	if (fMap == NULL || fWorkLoop == NULL || fDMA == NULL) {
-+		IOLog("ATHENS SPI: missing regs map, work loop or DMA buffer\n");
++		IOLog("ATHENS SPI: missing resource map=%p loop=%p dma=%p\n",
++		    fMap, fWorkLoop, fDMA);
 +		return false;
 +	}
 +	fRegs = fMap->getVirtualAddress();
