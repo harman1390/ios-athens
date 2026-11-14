@@ -29,24 +29,48 @@ CONFIRMED FACTS (source+log, not guesses):
 - MacToVFSError (hfs_vfsutils.c:2098): btBadNode->EIO AND default->EIO. So the
   REAL B-tree error code is MASKED — must capture raw `result`, not errno.
 
-PATCH 0196 (xnu/patches/0196-athens-hfsmakenode-diag.patch, NEW): instruments
+OFFLINE FORENSICS (done, rules OUT image/catalog repair as the fix):
+- fsck.hfsplus -n on ios16-root.img: catalog file, hierarchy, multi-linked
+  files, xattrs, volume bitmap ALL PASS. ONLY issue = "Volume header needs
+  minor repair" (trivial). => catalog B-tree is NOT corrupt.
+- Parsed catalog B-tree header node (node0 @ vol blk 240514): nodeSize=8192,
+  totalNodes=50176 (=411MB logicalSize/8192 exact), freeNodes=3054,
+  treeDepth=4, rootNode=21990, keyCompare=0xBC(case-sens/HFSX), attrs=0x6.
+  Structurally perfect.
+- attributesFile(xattr) B-tree = EMPTY (depth=0,root=0,freeNodes=10751/10752)
+  BUT handled gracefully: SearchTree returns fsBTEmptyErr on depth==0, and
+  BTSearchRecord/BTIterateRecord convert fsBTEmptyErr->btNotFound at exit, so
+  file_attribute_exist returns 0. RED HERRING - not the EIO.
+- extentsFile B-tree valid (depth=1,root=1).
+- MAC/sandbox: sweet_sandbox_mac_ops only has mpo_policy_syscall (no vnode
+  hooks) -> mac_vnode_check_create/mkdir return allow. AMFI only check_signature.
+  kauth vnode_authorize returns EACCES/EPERM not EIO. ALL RULED OUT.
+- => EIO is a driver/runtime issue inside hfs_makenode create path, NOT bad
+  on-disk structures. Candidates left: cat_preflight/BTReserveSpace,
+  cat_create/BTInsertRecord(node split), hfs_getnewvnode, journal transaction,
+  post-create parent/descendant update.
+
+PATCH 0196 build 1 (dcaaf8c, run 43641040416) FAILED TO COMPILE: dvp->v_name —
+struct vnode is INCOMPLETE/opaque in hfs_vnops.c (the v_name uses at 1286/1295/
+1305 are all commented out). FIXED in 9b2603c: print dcp->c_desc.cd_cnid
+(parent catalog id, NULL-guarded) instead. Patch itself APPLIED cleanly.
+
+PATCH 0196 (xnu/patches/0196-athens-hfsmakenode-diag.patch): instruments
 - hfs_vnops.c hfs_makenode: `mkstep` marker before each stage (1=trans,
   3=preflight,4=acquire_cnid,5=cat_create,6=setxattr,7=setupentry,8=getnewvnode,
   9=quotacheck,10=ENOSPC,11=genkeys) + printf `hfs_makenode ERR step=%d
-  err=%d dvp=%s name=%.*s` at exit (rate-limited 512).
+  err=%d dcnid=%u name=%.*s` at exit (rate-limited 512).
 - hfs_catalog.c cat_acquire_cnid: prints raw BTSearchRecord/file_attribute_exist
   `result` before EIO/return (rate-limit 256).
 - hfs_catalog.c cat_create: `cstep` (1=buildkey,2=BTInsert-thread,3=BTInsert-rec)
   + prints raw `result` before MacToVFSError masks it (rate-limit 256).
-Validated: patch -p1 dry-run+apply OK vs bt-art (fully-patched tree thru 0195;
-only 0026+0041 ever touch these files so context is exact). printf->console->
-SWEETLOG via patch 0047. Types verified (cn_nameptr=char*, cn_namelen=int,
-v_name=const char*, cnid_t=u_int32_t).
+Validated: patch -p1 applies OK vs bt-art (only 0026+0041 touch these files).
+printf->console->SWEETLOG via patch 0047. Types verified.
 
-NEXT: commit+push 0196 (athens branch, xnu/patches/** triggers CI) -> build ->
-flash diag boot (reuse athens-boot-diag.img cmdline OR rebuild shim) -> boot
-varfix userdata -> pull SWEETLOG -> read mkstep/cstep/rawresult to pinpoint the
-exact failing B-tree/catalog call. THEN implement the functional fix.
+NEXT: build 9b2603c via CI -> flash diag boot -> boot varfix userdata -> pull
+SWEETLOG -> read mkstep/cstep/rawresult to pinpoint exact failing call. THEN
+implement functional fix. NOTE: if it turns out to be a runtime/journal issue
+rather than catalog, fix may be a driver patch not an image rebuild.
 
 ## >>> ATHENS HANDOFF 2026-11-15r - CRASH STORM ROOT CAUSE FOUND = /private/var skeleton incomplete (EIO on dir create); varfix image building <<<
 
