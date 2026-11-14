@@ -36,10 +36,10 @@ identity/storage decisions). Device runbook: `docs/athens-flash.md`.
 | Keypad | kp@10010000, SPI 74 edge; volume-down bit from kpd-hw-init-map | mt6853.dts |
 | PMIC | MT6359 via pwrap@10026000; interrupt = pio EINT 118 level | mt6853.dts |
 | Keys | PWRKEY/HOMEKEY in MT6359 (+ _r variants); volume down = keypad | mt6359p.dtsi; regs TBD |
-| Touch | **Novatek NT36672C on spi4** (kernel detects + downloads 139392-byte fw; 1080x2400, irq=gpio14) | verified kernel log |
+| Touch | **Novatek NT36672C on spi4** — driver binds + embedded 139 KB fw downloads (15 parts, nt36672a map), but post-download `reset state timeout (last 0x00)` → fw download reports failed; not yet sensing touches. irq=EINT14, reset=GPIO33 | verified kernel log 2026-11-14 |
 | i2c0 | 0x11e00000 (+ apdma 0x10217080), SPI 112 level, 400 kHz, div 5, scl 97 / sda 98 | mt6853.dts |
 | Battery | MT6359 internal gauge (FGADC/auxadc via pwrap), 5000 mAh, 30 W Dart (MT6360 charger companion) | mt6853.dts; regs TBD |
-| GPU | Mali-G57 MC3 @0x13000000, SPI 364–368 (GPU/MMU/JOB/EVENT/PWR), SCP_SYS_MFG0-5 domains | mt6853.dts |
+| GPU | Mali-G57 MC3 @0x13000000, SPI 364–368 (GPU/MMU/JOB/EVENT/PWR), MT6359 vproc1+vsram_md rails, 5 MTCMOS domains mfg0/1/2/3/5, MFGPLL 0x268/0x26c/0x274. **Kernel driver port in progress** (patches 0182/0183, `mediatek,mali` match) — powers on but nub/match not yet confirmed | mt6853.dts + live DT; port spec `docs/ATHENS-GPU.md` |
 | USB | ssusb xhci0@0x11200000, usb0phy@0x11e40000 — NOT the musb viva's link used | mt6853.dts; link port TBD |
 | Wi-Fi | On-die CONNSYS_6853 (connac2x2): `wifi@0x18000000` `mediatek,wifi` (SPI 377) + `consys@0x18002000` `mediatek,mt6853-consys` (SPI 378/79/379); MT6359 VCN33_1/2 rails, 4+6 MB reserve pools; BT `btif@0x1100c000` | stock mt6853.dtb + k6853v1_64_defconfig; later |
 | Recovery | unofficial TWRP 3.7.0 for athens (adb root, decryption) | XDA 4584321 |
@@ -77,7 +77,7 @@ fallback. `ATHENS_CMDLINE` replaces the whole command line.
 3. ⬜ Storage: MediaTek UFS from LK's state, `userdata` LUN found (`ufs-ro`)
 4. ⬜ iOS 16.7.16 lock screen (`ufs-rw`, ~5–20 min first boot)
 5. ⬜ Keys (MT6359 PWRKEY/HOMEKEY + keypad) as HID consumer events
-6. Touch - Novatek NT36672C on spi4 working (fw download, live events)
+6. ⬜ Touch - NT36672C binds + fw downloads, but `reset state timeout (0x00)` blocks contact reports (SPI status-read bug)
 7. ⬜ `cpus=8`: all cores incl. A76s online
 8. ⬜ GUI usable: unlock, home screen, Settings/CC/notification center
 9. ⬜ Identity: serial/model/region/MLB/UDID in Settings → About (mkadt ATHENS_IDENTITY)
@@ -134,7 +134,7 @@ fallback. `ATHENS_CMDLINE` replaces the whole command line.
 - dsi@0x14013000 has 4 panel children; this unit boots
   `jdi,nt36672c,dphy,vdo,120` (cmdline `lcm=`). toprgu@0x10007000
   matches the shim's TOPRGU address (verified).
-11. ⬜ (stretch) Metal on Mali-G57 MC3 via viva-gpu; Wi-Fi via connac work
+11. ⬜ **Metal on Mali-G57 MC3 via viva-gpu — ACTIVE (not stretch).** Kernel driver ported (0182/0183); userspace `VivaMTLDriver.bundle` staged at `ios/viva-gpu-artifacts/` (upstream CI artifact, arm64 iOS16). Blocker: GPU nub/match not yet confirmed in SWEETLOG. Wi-Fi via connac work remains stretch.
 
 ## Handoff (2026-11-06, Phase 0 partial — device session 1)
 
@@ -166,12 +166,13 @@ mismatch); `shim/build-athens.sh`; `tools/athens-mkboot.sh` (stages);
 `docs/athens-flash.md` (Phase-0 discovery, unlock, flash, restore runbook);
 `ATHENS.md` facts table.
 
-Not done: kernel patches for athens (the drivers match `mediatek,mt6781-*` /
-viva-compatible strings today — patches 0160+ must extend matching to
-`mt6853-*` and parametrize the MT6359-vs-MT6366 register differences);
-athens fb console patch (equivalent of viva 0090 at the measured address);
-USB link (ssusb on MT6853 — viva's 0093 was musb-style); iOS rootfs build +
-flash; GPU driver.
+Not done: kernel patches for athens display/input/power (0160+ extend
+matching to `mt6853-*` and parametrize MT6359-vs-MT6366 — mostly landed);
+athens fb console patch (equivalent of viva 0090 at the measured address —
+landed via SweetFramebuffer); USB link (ssusb on MT6853 — viva's 0093 was
+musb-style); iOS rootfs build + flash; **GPU bring-up** — driver ported
+(0182/0183) but `mali` nub→`VivaGPUAccelerator` match still unconfirmed in
+SWEETLOG (see NOTES.md 2026-11-14 handoff + `docs/ATHENS-GPU.md`).
 
 Waiting on device (Phase 0, see docs/athens-flash.md): live FDT, GPT/LUN for
 userdata, atag videolfb, which touch variant is populated, lk kernel-format
