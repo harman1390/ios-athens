@@ -96,3 +96,67 @@ index 2e07385..9d134bc 100644
  	return true;
  }
  
+diff --git a/iokit/Kernel/arm/AthensSPI.cpp b/iokit/Kernel/arm/AthensSPI.cpp
+index c4bdf79..d10f913 100644
+--- a/iokit/Kernel/arm/AthensSPI.cpp
++++ b/iokit/Kernel/arm/AthensSPI.cpp
+@@ -135,6 +135,59 @@ AthensSPI::start(IOService *provider)
+ 	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
++	/*
++	 * GPU match diag: dump every IOPlatformDevice nub in the service
++	 * plane plus the DT mali node. Runs in a guaranteed arm-io child
++	 * driver so every processTopLevel nub already exists; reports
++	 * iterator/path NULLs explicitly so an empty dump is unambiguous.
++	 */
++	{
++		OSIterator *git = IORegistryIterator::iterateOver(
++		    gIOServicePlane, kIORegistryIterateRecursively);
++		IOLog("ATHENS DIAG: svcIter=%p\n", (void *)git);
++		if (git) {
++			unsigned g = 0, pn = 0;
++			IORegistryEntry *ge;
++			while ((ge = (IORegistryEntry *)git->getNextObject())) {
++				g++;
++				if (ge->metaCast("IOPlatformDevice") == NULL)
++					continue;
++				pn++;
++				const char *nm = ge->getName();
++				const char *cp = NULL;
++				OSObject *po = ge->getProperty("compatible");
++				if (po) {
++					if (OSData *dd = OSDynamicCast(OSData, po))
++						cp = (const char *)dd->getBytesNoCopy();
++					else if (OSString *ss = OSDynamicCast(OSString, po))
++						cp = ss->getCStringNoCopy();
++				}
++				IOLog("ATHENS GPNUB: %s compat=%s\n",
++				    nm ? nm : "?", cp ? cp : "?");
++			}
++			IOLog("ATHENS DIAG: svc entries=%u platformdevices=%u\n", g, pn);
++			git->release();
++		}
++		IORegistryEntry *dtmali = IORegistryEntry::fromPath(
++		    "/arm-io/mali", gIODTPlane);
++		IOLog("ATHENS DIAG: DT arm-io/mali=%p\n", (void *)dtmali);
++		if (dtmali) {
++			dtmali->release();
++		}
++		OSIterator *dit = IORegistryIterator::iterateOver(
++		    gIODTPlane, kIORegistryIterateRecursively);
++		if (dit) {
++			unsigned dn = 0;
++			IORegistryEntry *de;
++			while ((de = (IORegistryEntry *)dit->getNextObject())) {
++				dn++;
++			}
++			IOLog("ATHENS DIAG: dtPlane entries=%u\n", dn);
++			dit->release();
++		} else {
++			IOLog("ATHENS DIAG: dtIter=NULL\n");
++		}
++	}
+ 	fMap = provider->mapDeviceMemoryWithIndex(0);
+ 	fTopMap = provider->mapDeviceMemoryWithIndex(1);
+ 	fInfraMap = provider->mapDeviceMemoryWithIndex(2);
