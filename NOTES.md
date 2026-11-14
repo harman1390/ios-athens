@@ -2307,3 +2307,57 @@ recovery so unreadable; ring log dies with panic so panics never flush.
   pin the live FDT's volume-down gpio property names (wasn't dumped).
 - TOUCH: still needs SPI4 host + NT36672C (see ATHENS.md notes); ADT
   touch node removed until then.
+
+### 0182: ATHENS GPU MT6853 PORT (kernel driver, 2026-11-12)
+
+GOAL: get Mali-G57 MC3 powered + self-tested on athens via the viva
+VivaGPU driver (already compiled in via patches 0100-0146). Userspace
+Metal stack is the separate ../viva-gpu repo (VivaMTLDriver.bundle) -
+kernel alone does NOT give a GUI; it is the prerequisite.
+
+WHAT 0182 CHANGES (all in iokit/Kernel/arm/VivaGPU.cpp + VivaPwrap.cpp +
+KernelConfigTables.cpp; patch verified applies byte-identical to
+post-0181 tree):
+- PMIC regs MT6366->MT6359: VGPU=buck_vproc1 (EN 0x1708 VOSEL 0x172e
+  DA 0x1726/0x1728), VSRAM=ldo_vsram_md (EN 0x1f2c VOSEL 0x1b46
+  DA 0x1f32/0x1f2e). Verified vs docs/mtk/mt6359-registers.h.
+- Per-rail voltage decode: vproc1 base 0.4 V, vsram_md base 0.5 V,
+  both 6.25 mV/step (VGPU_UV/VSRAM_UV/VGPU_SEL_OF/VSRAM_SEL_OF).
+- OPP table -> gpufreq mt6853 segment_1 (37 OPPs, 390-950 MHz,
+  vgpu 0.575-0.8 V, vsram = max(vgpu,0.75 V)). vsram>=vgpu, NOT the
+  MT6781 vsram>=vgpu+0.1 V rule.
+- railsTo rewritten: enable VGPU->VSRAM (buck_control), ramp
+  vsram-first-on-rise / vgpu-first-on-fall (volt_switch), <=50 mV steps.
+- MTCMOS 5 domains {0,1,2,3,5} (mfg5 = index 5 -> PWR_CON 0x31c bit7);
+  MC3 has all shader stacks so all five power (gpufreq shader_present
+  = MT_GPU_SHADER_PRESENT_3 always for MT6853 segment).
+- MFGPLL apmixed offsets -> CON0 0x268 CON1 0x26c PWR_CON0 0x274.
+  mfgpllCon1 formula UNCHANGED (posdiv field = log2 div, same encoding;
+  all MT6853 OPPs use POSDIV_POWER_4 = field 2 for >=390 MHz).
+- topckgen mfg mux -> CLK_CFG_4 @0x050 (MT6781 used CLK_CFG_3 @0x040):
+  mfg_pll_sel bit18 (1=mfgpll_ck,0=mfg_ref), mfg_ref_sel [17:16]
+  (3=mainpll_d5_d2). Update kick = CLK_CFG_UPDATE bit18.
+- KernelConfigTables: added 'mediatek,mt6853-mali' -> VivaGPUAccelerator
+  (kept mt6781 entry).
+- VivaPwrap whitelist: + MT6359 rail regs 0x1708/0x172e/0x1f2c/0x1b46.
+
+ADT (tools/mkadt.py athens_devices 'gpu' node, already committed):
+compatible mediatek,mt6853-mali; reg = Mali 0x13000000 + mfgcfg
+0x13fbf000 + SPM 0x10006000 + topckgen 0x10000000 + apmixed 0x1000c000
++ infracfg 0x10001000 (driver map order kMapMali..kMapInfra);
+interrupts SPI 0x16c-0x170 = GPU,MMU,JOB,EVENT,PWR (driver uses idx
+0,1,2 = GPU/MMU/JOB).
+
+BOOT ARGS for test: vivagpu=2 (power+publish), vivagpufreq=390..950
+(pick mid, e.g. 500, or default->floor 390 MHz), vivagpumv margin.
+VERIFY in SWEETLOG: 'VIVA GPU: driver started', 'GPU_ID 0x..' should be
+Mali-G57, 'MFG0..MFG5 on', 'mfgpll con0/con1', selftest result.
+
+NOT DONE / RISKS:
+- infracfg_ao bus-protection regs (gMfgProt) still MT6781 values - only
+  used on MFG1 power-OFF; verify if power-off misbehaves.
+- CK_CFG_UPDATE kick bit for mfg_pll_sel assumed bit18 (mfg_ref shift);
+  if clock doesn't switch, check topckgen update semantics.
+- vsram_md DA_VOSEL is [14:8] of 0x1f32 (railsRead already >>8 &0x7f).
+- Userspace Metal (VivaMTLDriver.bundle) NOT built yet - needs iOS SDK;
+  check ../viva-gpu CI for a macOS runner that can produce it.

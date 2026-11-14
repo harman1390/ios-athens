@@ -1,0 +1,422 @@
+diff --git a/iokit/Kernel/arm/VivaGPU.cpp b/iokit/Kernel/arm/VivaGPU.cpp
+index c02d45c..2921937 100644
+--- a/iokit/Kernel/arm/VivaGPU.cpp
++++ b/iokit/Kernel/arm/VivaGPU.cpp
+@@ -201,16 +201,22 @@
+ 
+ /* ---- MFG (MediaTek) ---- */
+ 
+-/* PMIC (MT6366, MT6358 layout) */
+-#define PMIC_VGPU_EN            0x1508  /* bit 0 */
+-#define PMIC_VGPU_VOSEL         0x1526  /* [6:0] */
+-#define PMIC_VGPU_DA_VOSEL      0x151e  /* [6:0] */
+-#define PMIC_VGPU_DA_EN         0x1520  /* bit 0 */
+-#define PMIC_VSRAM_EN           0x1bc8  /* bit 0 */
+-#define PMIC_VSRAM_VOSEL        0x1bf4  /* [6:0] */
+-#define PMIC_VSRAM_DA_VOSEL     0x1be2  /* [14:8] */
+-#define PMIC_VSRAM_DA_EN        0x1be4  /* bit 0 */
+-#define UV(sel)                 (500000u + 6250u * (sel))
++/* PMIC (MT6359 on athens pwrap; was MT6366 on viva) */
++#define PMIC_VGPU_EN            0x1708  /* buck_vproc1 CON0, bit 0 */
++#define PMIC_VGPU_VOSEL         0x172e  /* ELR0, [6:0] */
++#define PMIC_VGPU_DA_VOSEL      0x1726  /* DBG0, [6:0] */
++#define PMIC_VGPU_DA_EN         0x1728  /* DBG1, bit 0 */
++#define PMIC_VSRAM_EN           0x1f2c  /* ldo_vsram_md CON0, bit 0 */
++#define PMIC_VSRAM_VOSEL        0x1b46  /* ELR, [6:0] */
++#define PMIC_VSRAM_DA_VOSEL     0x1f32  /* VOSEL1, [14:8] */
++#define PMIC_VSRAM_DA_EN        0x1f2e  /* MON B_EN, bit 0 */
++/* MT6359 linear rails: vproc1 0.4-1.194 V base 400000; vsram_md 0.5-1.10 V
++ * base 500000; both 6.25 mV/step. SEL_OF/UV are per-rail now. */
++#define VGPU_UV(sel)            (400000u + 6250u * (sel))
++#define VSRAM_UV(sel)           (500000u + 6250u * (sel))
++#define VGPU_SEL_OF(uv)         (((uv) - 400000u + 6249u) / 6250u)
++#define VSRAM_SEL_OF(uv)        (((uv) - 500000u + 6249u) / 6250u)
++#define UV(sel)                 VSRAM_UV(sel)   /* legacy: vsram base */
+ 
+ /* SPM 0x10006000 */
+ #define SPM_POWERON_CONFIG_EN   0x000
+@@ -226,6 +232,11 @@
+ #define PWR_SRAM_PDN            (1u << 8)
+ #define PWR_SRAM_PDN_ACK        (1u << 12)
+ #define MFG_STATUS_BIT(n)       (1u << (2 + (n)))
++/* MT6853 MFG power domains in gpufreq's on-order: mfg0/mfg1 always, then the
++ * shader-stack domains. ATHENS is MC3 (all stacks present), so all five are
++ * powered; mfg5 uses domain index 5 -> PWR_CON 0x31c, status bit 1<<7. */
++static const uint32_t kMfgDomains[] = { 0, 1, 2, 3, 5 };
++#define MFG_DOMAIN_COUNT        (sizeof(kMfgDomains) / sizeof(kMfgDomains[0]))
+ 
+ /* infracfg_ao 0x10001000: bus protection for MFG1 */
+ #define INFRA_PROT_SET          0x2a0
+@@ -247,9 +258,21 @@
+ #define CK_MFG_PDN              (1u << 23)
+ #define CK_MFG_MFGPLL           1u
+ #define CK_MFG_MAINPLL_D5       3u
+-#define PLL_MFG_CON0            0x250   /* bit 0 EN */
+-#define PLL_MFG_CON1            0x254
+-#define PLL_MFG_PWR_CON0        0x25c   /* bit 0 PWR_ON, bit 1 ISO */
++/* MT6853 topckgen mfg clock mux lives in CLK_CFG_4 @0x050 (set 0x054 clr
++ * 0x058): mfg_ref_sel [17:16] picks the ref (3 = mainpll_d5_d2), mfg_pll_sel
++ * [18] picks mfgpll_ck (1) vs mfg_ref_sel (0). Update kick = CLK_CFG_UPDATE
++ * bit 18 (TOP_MUX_MFG_REF_SHIFT); mfg_pll_sel needs no kick. */
++#define CK4_CFG_0               0x050
++#define CK4_CFG_SET             0x054
++#define CK4_CFG_CLR             0x058
++#define CK_MFG_REF_SHIFT        16
++#define CK_MFG_REF_MASK         (3u << 16)
++#define CK_MFG_PLL_BIT          (1u << 18)
++#define CK_MFG_MAINPLL_D5_D2    3u
++#define CK_CFG_UPDATE_MFG_6853  (1u << 18)
++#define PLL_MFG_CON0            0x268   /* bit 0 EN (MT6853 apmixed) */
++#define PLL_MFG_CON1            0x26c   /* PCW_CHG[31] POSDIV[26:24] DDS */
++#define PLL_MFG_PWR_CON0        0x274   /* bit 0 PWR_ON, bit 1 ISO */
+ 
+ /* mfgcfg 0x13fbf000 (inside the MFG power domain) */
+ #define MFG_CG_CON              0x000
+@@ -1492,32 +1515,30 @@ VivaGPUAccelerator::regulatorSet(uint32_t enAddr, uint32_t voselAddr, uint32_t s
+ }
+ 
+ /*
+- * Operating points: gpufreq_v1/mt6781 g_opp_table_segment_0 (frequency, VGPU and VSRAM_GPU in 10 uV). The
+- * segment is efuse 0x11cb05cc[29:28] (devinfo index 69): 0 on this phone (LK's atag,devinfo); segment 1 only
+- * adds 50 mV, which the default margin (vivagpumv) covers below ~560 MHz anyway.
++ * Operating points: gpufreq_v1/mt6853 g_opp_table_segment_1 (frequency kHz,
++ * VGPU and VSRAM_GPU in 10 uV) — the Dimensity 800U table. vsram tracks
++ * vgpu..+0.2 V here (MT6853 wants 0 <= vsram-vgpu <= 350 mV, NOT the
++ * MT6781 vsram>=vgpu+0.1 V floor). Segment 2/3 differ only in the lowest
++ * entries' vgpu; segment_1 is the median.
+  */
+ static const struct { uint32_t khz, vgpu, vsram; } gVivaOpp[] = {
+-	{ 950000, 90000, 100000 }, { 940000, 89375, 99375 }, { 930000, 88750, 98750 }, { 920000, 88125, 98125 },
+-	{ 910000, 87500, 97500 }, { 900000, 86875, 96875 }, { 890000, 86250, 96250 }, { 880000, 85625, 95625 },
+-	{ 870000, 85000, 95000 }, { 860000, 84375, 94375 }, { 850000, 83750, 93750 }, { 840000, 83125, 93125 },
+-	{ 830000, 82500, 92500 }, { 820000, 81875, 91875 }, { 810000, 81250, 91250 }, { 800000, 80625, 90625 },
+-	{ 790000, 80000, 90000 }, { 775000, 79375, 89375 }, { 761000, 78750, 88750 }, { 746000, 78125, 88125 },
+-	{ 732000, 77500, 87500 }, { 718000, 76875, 86875 }, { 703000, 76250, 86250 }, { 689000, 75625, 85625 },
+-	{ 675000, 75000, 85000 }, { 660000, 74375, 85000 }, { 646000, 73750, 85000 }, { 631000, 73125, 85000 },
+-	{ 617000, 72500, 85000 }, { 603000, 71875, 85000 }, { 588000, 71250, 85000 }, { 574000, 70625, 85000 },
+-	{ 560000, 70000, 85000 }, { 543000, 69375, 85000 }, { 527000, 68750, 85000 }, { 511000, 68125, 85000 },
+-	{ 495000, 67500, 85000 }, { 478000, 66875, 85000 }, { 462000, 66250, 85000 }, { 446000, 65625, 85000 },
+-	{ 430000, 65000, 85000 }, { 413000, 64375, 85000 }, { 397000, 63750, 85000 }, { 381000, 63125, 85000 },
+-	{ 365000, 62500, 85000 }, { 348000, 61875, 85000 }, { 332000, 61250, 85000 }, { 316000, 60625, 85000 },
+-	{ 300000, 60000, 85000 },
++	{ 950000, 80000, 80000 }, { 941000, 79375, 79375 }, { 932000, 78750, 78750 }, { 923000, 78125, 78125 },
++	{ 915000, 77500, 77500 }, { 906000, 76875, 76875 }, { 897000, 76250, 76250 }, { 888000, 75625, 75625 },
++	{ 880000, 75000, 75000 }, { 865000, 74375, 75000 }, { 850000, 73750, 75000 }, { 835000, 73125, 75000 },
++	{ 820000, 72500, 75000 }, { 805000, 71875, 75000 }, { 790000, 71250, 75000 }, { 775000, 70625, 75000 },
++	{ 760000, 70000, 75000 }, { 745000, 69375, 75000 }, { 730000, 68750, 75000 }, { 715000, 68125, 75000 },
++	{ 700000, 67500, 75000 }, { 685000, 66875, 75000 }, { 670000, 66250, 75000 }, { 655000, 65625, 75000 },
++	{ 640000, 65000, 75000 }, { 619000, 64375, 75000 }, { 598000, 63750, 75000 }, { 577000, 63125, 75000 },
++	{ 556000, 62500, 75000 }, { 535000, 61875, 75000 }, { 515000, 61250, 75000 }, { 494000, 60625, 75000 },
++	{ 473000, 60000, 75000 }, { 452000, 59375, 75000 }, { 431000, 58750, 75000 }, { 410000, 58125, 75000 },
++	{ 390000, 57500, 75000 },
+ };
+ #define OPP_COUNT       (sizeof(gVivaOpp) / sizeof(gVivaOpp[0]))
+-#define SEL_OF(uv)      (((uv) - 500000u + 6249u) / 6250u)      /* round up */
+-#define VGPU_SEL_MAX    0x40    /* 0.9 V: VivaPwrap's ceiling, = the top OPP */
+-#define VSRAM_SEL_MAX   0x50    /* 1.0 V */
+-#define VSRAM_SEL_MIN   0x38    /* 0.85 V */
+-#define BUCK_DIFF_MIN   16      /* VSRAM - VGPU in steps: 100 mV .. 250 mV (gpufreq BUCK_DIFF_*) */
+-#define BUCK_DIFF_MAX   40
++/* MT6359 rail ceilings (linear, 6.25 mV/step): vproc1 0.4-1.194 V, vsram_md
++ * 0.5-1.10 V. SEL_MAX values cap at ~0.9 V vgpu / ~1.0 V vsram. */
++#define VGPU_SEL_MAX    80      /* 0.9 V: (900000-400000)/6250 */
++#define VSRAM_SEL_MAX   80      /* 1.0 V: (1000000-500000)/6250 */
++#define VSRAM_SEL_MIN   40      /* 0.75 V: (750000-500000)/6250 */
+ 
+ /* Highest OPP at or below `mhz` (the lowest one if none). */
+ static uint32_t
+@@ -1531,13 +1552,18 @@ oppForMHz(uint32_t mhz)
+ 	return OPP_COUNT - 1;
+ }
+ 
+-/* Rail settings of an OPP: VGPU + margin (vivagpumv), VSRAM >= VGPU + 0.1 V, within the PMIC ceilings. */
++/* Rail settings of an OPP: VGPU + margin (vivagpumv); VSRAM from the table,
++ * kept >= VGPU and within the PMIC ceilings (MT6853: vsram-vgpu <= 350 mV). */
+ void
+ VivaGPUAccelerator::oppSels(uint32_t opp, uint32_t *vg, uint32_t *vs)
+ {
+-	uint32_t g = SEL_OF(gVivaOpp[opp].vgpu * 10 + (uint32_t)fMarginMv * 1000), v = SEL_OF(gVivaOpp[opp].vsram * 10);
++	uint32_t g = VGPU_SEL_OF(gVivaOpp[opp].vgpu * 10 + (uint32_t)fMarginMv * 1000);
++	uint32_t v = VSRAM_SEL_OF(gVivaOpp[opp].vsram * 10);
+ 	g = MIN(g, (uint32_t)VGPU_SEL_MAX);
+-	v = MIN(MAX(MAX(v, g + BUCK_DIFF_MIN), (uint32_t)VSRAM_SEL_MIN), (uint32_t)VSRAM_SEL_MAX);
++	v = MIN(MAX(v, (uint32_t)VSRAM_SEL_MIN), (uint32_t)VSRAM_SEL_MAX);
++	if (v < g) {
++		v = MIN(g, (uint32_t)VSRAM_SEL_MAX);   /* vsram_md must be >= vproc1 */
++	}
+ 	*vg = g;
+ 	*vs = v;
+ }
+@@ -1551,15 +1577,18 @@ mfgpllCon1(uint32_t khz)
+ 	return 0x80000000u | posdiv << 24 | dds;
+ }
+ 
+-/* MFGPLL to the OPP's frequency, mfg_sel parked on mainpll_d5 while it changes (gpufreq's frequency switch). */
++/* MFGPLL to the OPP's frequency, GPU clock parked on mainpll_d5_d2 while it
++ * relocks (gpufreq's frequency switch). MT6853 mux is CLK_CFG_4: mfg_pll_sel
++ * bit18 (1=mfgpll, 0=mfg_ref), mfg_ref_sel [17:16] (3=mainpll_d5_d2). */
+ void
+ VivaGPUAccelerator::mfgClock(uint32_t opp, char **out, char *end)
+ {
+-	uint32_t cfg = rd32(fTopck, CK_CFG_0);
++	uint32_t cfg = rd32(fTopck, CK4_CFG_0);
+ 	if (rd32(fApmixed, PLL_MFG_CON0) & 1) {
+-		wr32(fTopck, CK_CFG_0_CLR, CK_MFG_SEL_MASK);
+-		wr32(fTopck, CK_CFG_0_SET, CK_MFG_MAINPLL_D5 << CK_MFG_SEL_SHIFT);
+-		wr32(fTopck, CK_CFG_UPDATE, CK_CFG_UPDATE_MFG);
++		wr32(fTopck, CK4_CFG_CLR, CK_MFG_PLL_BIT);                          /* mfg_pll_sel -> mfg_ref */
++		wr32(fTopck, CK4_CFG_CLR, CK_MFG_REF_MASK);
++		wr32(fTopck, CK4_CFG_SET, CK_MFG_MAINPLL_D5_D2 << CK_MFG_REF_SHIFT); /* mainpll_d5_d2 */
++		wr32(fTopck, CK_CFG_UPDATE, CK_CFG_UPDATE_MFG_6853);
+ 		IODelay(20);
+ 	}
+ 	if (!(rd32(fApmixed, PLL_MFG_PWR_CON0) & 1)) {
+@@ -1571,17 +1600,13 @@ VivaGPUAccelerator::mfgClock(uint32_t opp, char **out, char *end)
+ 	wr32(fApmixed, PLL_MFG_CON1, mfgpllCon1(gVivaOpp[opp].khz));
+ 	set32(fApmixed, PLL_MFG_CON0, 1u << 0);
+ 	IODelay(20);
+-	if (cfg & CK_MFG_PDN) {
+-		wr32(fTopck, CK_CFG_0_CLR, CK_MFG_PDN);
+-	}
+-	wr32(fTopck, CK_CFG_0_CLR, CK_MFG_SEL_MASK);
+-	wr32(fTopck, CK_CFG_0_SET, CK_MFG_MFGPLL << CK_MFG_SEL_SHIFT);
+-	wr32(fTopck, CK_CFG_UPDATE, CK_CFG_UPDATE_MFG);
++	wr32(fTopck, CK4_CFG_SET, CK_MFG_PLL_BIT);                              /* mfg_pll_sel -> mfgpll_ck */
++	wr32(fTopck, CK_CFG_UPDATE, CK_CFG_UPDATE_MFG_6853);
+ 	IODelay(20);
+ 	fClockOpp = opp;
+-	say(out, end, "clock: %u MHz, mfgpll con0 0x%08x con1 0x%08x pwr 0x%08x, clk_cfg_0 0x%08x (was 0x%08x)\n",
++	say(out, end, "clock: %u MHz, mfgpll con0 0x%08x con1 0x%08x pwr 0x%08x, clk_cfg_4 0x%08x (was 0x%08x)\n",
+ 	    gVivaOpp[opp].khz / 1000, rd32(fApmixed, PLL_MFG_CON0), rd32(fApmixed, PLL_MFG_CON1),
+-	    rd32(fApmixed, PLL_MFG_PWR_CON0), rd32(fTopck, CK_CFG_0), cfg);
++	    rd32(fApmixed, PLL_MFG_PWR_CON0), rd32(fTopck, CK4_CFG_0), cfg);
+ }
+ 
+ /* Current rail state from the PMIC's DA (actual) registers. */
+@@ -1600,9 +1625,11 @@ VivaGPUAccelerator::railsRead(uint32_t *vgEn, uint32_t *vg, uint32_t *vsEn, uint
+ }
+ 
+ /*
+- * Rails to (tvg, tvs) in steps of at most 50 mV, keeping VSRAM - VGPU within 100..250 mV where the start allows
+- * it (gpufreq steps through intermediate OPPs for the same reason): raising moves VSRAM first, lowering VGPU
+- * first. A rail that is off is first enabled straight at its target, VSRAM before VGPU.
++ * MT6853 rails to (tvg, tvs). Enable order follows gpufreq buck_control:
++ * VGPU then VSRAM on, VSRAM then VGPU off. Voltage changes on live rails
++ * follow volt_switch: rising moves VSRAM first, falling moves VGPU first.
++ * Each rail steps in <= 8 sel (50 mV) moves with a settle delay; the OPP
++ * table keeps VSRAM >= VGPU (vsram = max(vgpu, 0.75 V)).
+  */
+ bool
+ VivaGPUAccelerator::railsTo(uint32_t tvg, uint32_t tvs)
+@@ -1610,45 +1637,47 @@ VivaGPUAccelerator::railsTo(uint32_t tvg, uint32_t tvs)
+ 	uint32_t vgEn, vg, vsEn, vs;
+ 	railsRead(&vgEn, &vg, &vsEn, &vs);
+ 	bool ok = true;
+-	if (!vsEn) {
+-		ok = regulatorSet(PMIC_VSRAM_EN, PMIC_VSRAM_VOSEL, tvs);
+-		IODelay(300);           /* 240 us enable ramp + settle */
+-		vs = tvs;
+-	}
+-	if (ok && !vgEn) {
+-		ok = regulatorSet(PMIC_VGPU_EN, PMIC_VGPU_VOSEL, tvg);
+-		IODelay(300);           /* 200 us enable ramp + settle */
++	if (!vgEn) {
++		ok = fPwrap->writeRegulator(PMIC_VGPU_VOSEL, 0x7f, tvg) == kIOReturnSuccess &&
++		    fPwrap->writeRegulator(PMIC_VGPU_EN, 0x1, 1) == kIOReturnSuccess;
+ 		vg = tvg;
++		IODelay(300);           /* 200 us enable ramp + settle */
++	}
++	if (ok && !vsEn) {
++		ok = fPwrap->writeRegulator(PMIC_VSRAM_VOSEL, 0x7f, tvs) == kIOReturnSuccess &&
++		    fPwrap->writeRegulator(PMIC_VSRAM_EN, 0x1, 1) == kIOReturnSuccess;
++		vs = tvs;
++		IODelay(300);           /* 240 us enable ramp + settle */
+ 	}
+ 	for (int guard = 0; ok && guard < 64 && (vg != tvg || vs != tvs); guard++) {
+-		if (vg < tvg) {
+-			uint32_t nvg = MIN(tvg, vg + 8);
+-			if (vs < nvg + BUCK_DIFF_MIN) {
+-				uint32_t nvs = MIN(MIN(MAX(tvs, nvg + BUCK_DIFF_MIN), vg + BUCK_DIFF_MAX), (uint32_t)VSRAM_SEL_MAX);
++		bool rising = (tvg > vg) || (tvs > vs);
++		if (rising) {
++			if (vs < tvs) {
++				uint32_t nvs = MIN(tvs, vs + 8);
+ 				ok = fPwrap->writeRegulator(PMIC_VSRAM_VOSEL, 0x7f, nvs) == kIOReturnSuccess;
+ 				vs = nvs;
+ 				IODelay(100);
+-				if (vs < nvg + BUCK_DIFF_MIN) {
+-					nvg = vs > BUCK_DIFF_MIN ? MAX(vs - BUCK_DIFF_MIN, vg) : vg;
+-				}
+ 			}
+-			ok = ok && fPwrap->writeRegulator(PMIC_VGPU_VOSEL, 0x7f, nvg) == kIOReturnSuccess;
+-			vg = nvg;
+-		} else if (vg > tvg) {
+-			uint32_t nvg = vg - MIN(vg - tvg, 8u);
+-			ok = fPwrap->writeRegulator(PMIC_VGPU_VOSEL, 0x7f, nvg) == kIOReturnSuccess;
+-			vg = nvg;
+-			uint32_t nvs = MAX(MAX(tvs, nvg + BUCK_DIFF_MIN), (uint32_t)VSRAM_SEL_MIN);
+-			if (ok && nvs < vs) {
++			if (vg < tvg) {
++				uint32_t nvg = MIN(tvg, vg + 8);
++				ok = ok && fPwrap->writeRegulator(PMIC_VGPU_VOSEL, 0x7f, nvg) == kIOReturnSuccess;
++				vg = nvg;
+ 				IODelay(100);
+-				ok = fPwrap->writeRegulator(PMIC_VSRAM_VOSEL, 0x7f, nvs) == kIOReturnSuccess;
+-				vs = nvs;
+ 			}
+ 		} else {
+-			ok = fPwrap->writeRegulator(PMIC_VSRAM_VOSEL, 0x7f, tvs) == kIOReturnSuccess;
+-			vs = tvs;
++			if (vg > tvg) {
++				uint32_t nvg = vg - MIN(vg - tvg, 8u);
++				ok = fPwrap->writeRegulator(PMIC_VGPU_VOSEL, 0x7f, nvg) == kIOReturnSuccess;
++				vg = nvg;
++				IODelay(100);
++			}
++			if (vs > tvs) {
++				uint32_t nvs = vs - MIN(vs - tvs, 8u);
++				ok = ok && fPwrap->writeRegulator(PMIC_VSRAM_VOSEL, 0x7f, nvs) == kIOReturnSuccess;
++				vs = nvs;
++				IODelay(100);
++			}
+ 		}
+-		IODelay(100);           /* 8 steps x 2 us + 52 us (gpufreq settle time), rounded up */
+ 	}
+ 	return ok && vg == tvg && vs == tvs;
+ }
+@@ -1683,8 +1712,8 @@ VivaGPUAccelerator::setOpp(uint32_t opp, char **out, char *end)
+ 		}
+ 	}
+ 	railsRead(&vgEn, &vg, &vsEn, &vs);
+-	say(out, end, "OPP %u MHz: vgpu %u uV, vsram_gpu %u uV%s\n", gVivaOpp[fClockOpp].khz / 1000, UV(vg), UV(vs),
+-	    ok ? "" : " (PMIC write refused or failed)");
++	say(out, end, "OPP %u MHz: vgpu %u uV, vsram_gpu %u uV%s\n", gVivaOpp[fClockOpp].khz / 1000, VGPU_UV(vg),
++	    VSRAM_UV(vs), ok ? "" : " (PMIC write refused or failed)");
+ 	return ok ? kIOReturnSuccess : kIOReturnError;
+ }
+ 
+@@ -1693,8 +1722,8 @@ VivaGPUAccelerator::mfgOn(char **out, char *end)
+ {
+ 	uint32_t vgEn, vgSel, vsEn, vsSel, tvg, tvs;
+ 	railsRead(&vgEn, &vgSel, &vsEn, &vsSel);
+-	say(out, end, "rails before: vgpu %s %u uV, vsram_gpu %s %u uV\n", vgEn ? "on" : "off", UV(vgSel),
+-	    vsEn ? "on" : "off", UV(vsSel));
++	say(out, end, "rails before: vgpu %s %u uV, vsram_gpu %s %u uV\n", vgEn ? "on" : "off", VGPU_UV(vgSel),
++	    vsEn ? "on" : "off", VSRAM_UV(vsSel));
+ 
+ 	/*
+ 	 * OPP fOpp (vivagpufreq). Lowering (the preloader leaves 0.9 V / 1.0 V at its own frequency): clock down
+@@ -1708,7 +1737,7 @@ VivaGPUAccelerator::mfgOn(char **out, char *end)
+ 	bool ok = railsTo(tvg, tvs);
+ 	railsRead(&vgEn, &vgSel, &vsEn, &vsSel);
+ 	say(out, end, "rails: vgpu %s %u uV, vsram_gpu %s %u uV (OPP %u MHz, margin %d mV)%s\n", vgEn ? "on" : "off",
+-	    UV(vgSel), vsEn ? "on" : "off", UV(vsSel), gVivaOpp[fOpp].khz / 1000, fMarginMv,
++	    VGPU_UV(vgSel), vsEn ? "on" : "off", VSRAM_UV(vsSel), gVivaOpp[fOpp].khz / 1000, fMarginMv,
+ 	    ok ? "" : " (PMIC write refused or failed)");
+ 	if (!ok || !vgEn || !vsEn) {
+ 		return false;
+@@ -1718,10 +1747,10 @@ VivaGPUAccelerator::mfgOn(char **out, char *end)
+ 		mfgClock(fOpp, out, end);       /* raising: voltage first, then the clock */
+ 	}
+ 
+-	/* power domains MFG0 -> MFG3 */
++	/* power domains in gpufreq order: MFG0 MFG1 MFG2 MFG3 MFG5 */
+ 	wr32(fSpm, SPM_POWERON_CONFIG_EN, SPM_PROJECT_KEY);
+-	for (uint32_t n = 0; n < 4; n++) {
+-		if (!mtcmosOn(n, out, end)) {
++	for (uint32_t i = 0; i < MFG_DOMAIN_COUNT; i++) {
++		if (!mtcmosOn(kMfgDomains[i], out, end)) {
+ 			return false;
+ 		}
+ 	}
+@@ -1759,8 +1788,8 @@ VivaGPUAccelerator::mfgOff(char **out, char *end)
+ 		}
+ 		wr32(fMfgcfg, MFG_CG_SET, MFG_CG_BG3D);
+ 	}
+-	for (int n = 3; n >= 0; n--) {
+-		if (!mtcmosOff((uint32_t)n, out, end)) {
++	for (int i = (int)MFG_DOMAIN_COUNT - 1; i >= 0; i--) {
++		if (!mtcmosOff(kMfgDomains[i], out, end)) {
+ 			wr32(fMfgcfg, MFG_CG_CLR, MFG_CG_BG3D);
+ 			say(out, end, "MFG off aborted: MFG0/MFG1, clock and rails left on\n");
+ 			return;
+@@ -1793,17 +1822,17 @@ VivaGPUAccelerator::mfgDump(char **out, char *end)
+ 	fPwrap->readPMIC(PMIC_VSRAM_DA_EN, &v[6]);
+ 	fPwrap->readPMIC(PMIC_VSRAM_DA_VOSEL, &v[7]);
+ 	say(out, end, "vgpu: en 0x%04x vosel 0x%04x | da_en 0x%04x da_vosel 0x%04x (%s, %u uV)\n", v[0], v[1], v[2],
+-	    v[3], (v[2] & 1) ? "on" : "off", UV(v[3] & 0x7f));
++	    v[3], (v[2] & 1) ? "on" : "off", VGPU_UV(v[3] & 0x7f));
+ 	say(out, end, "vsram_gpu: en 0x%04x vosel 0x%04x | da_en 0x%04x da_vosel 0x%04x (%s, %u uV)\n", v[4], v[5],
+-	    v[6], v[7], (v[6] & 1) ? "on" : "off", UV((v[7] >> 8) & 0x7f));
++	    v[6], v[7], (v[6] & 1) ? "on" : "off", VSRAM_UV((v[7] >> 8) & 0x7f));
+ 	uint32_t s1 = rd32(fSpm, SPM_PWR_STATUS), s2 = rd32(fSpm, SPM_PWR_STATUS_2ND);
+-	say(out, end, "spm: status 0x%08x 2nd 0x%08x | mfg0 0x%08x mfg1 0x%08x mfg2 0x%08x mfg3 0x%08x\n", s1, s2,
+-	    rd32(fSpm, SPM_MFG_PWR_CON(0)), rd32(fSpm, SPM_MFG_PWR_CON(1)), rd32(fSpm, SPM_MFG_PWR_CON(2)),
+-	    rd32(fSpm, SPM_MFG_PWR_CON(3)));
+-	uint32_t cfg = rd32(fTopck, CK_CFG_0);
+-	say(out, end, "clk_cfg_0 0x%08x (mfg_sel %u%s) | mfgpll con0 0x%08x con1 0x%08x pwr 0x%08x\n", cfg,
+-	    (cfg & CK_MFG_SEL_MASK) >> CK_MFG_SEL_SHIFT, (cfg & CK_MFG_PDN) ? ", pdn" : "", rd32(fApmixed, PLL_MFG_CON0),
+-	    rd32(fApmixed, PLL_MFG_CON1), rd32(fApmixed, PLL_MFG_PWR_CON0));
++	say(out, end, "spm: status 0x%08x 2nd 0x%08x | mfg0 0x%08x mfg1 0x%08x mfg2 0x%08x mfg3 0x%08x mfg5 0x%08x\n",
++	    s1, s2, rd32(fSpm, SPM_MFG_PWR_CON(0)), rd32(fSpm, SPM_MFG_PWR_CON(1)), rd32(fSpm, SPM_MFG_PWR_CON(2)),
++	    rd32(fSpm, SPM_MFG_PWR_CON(3)), rd32(fSpm, SPM_MFG_PWR_CON(5)));
++	uint32_t cfg = rd32(fTopck, CK4_CFG_0);
++	say(out, end, "clk_cfg_4 0x%08x (mfg_pll_sel %u, mfg_ref_sel %u) | mfgpll con0 0x%08x con1 0x%08x pwr 0x%08x\n",
++	    cfg, (cfg & CK_MFG_PLL_BIT) ? 1 : 0, (cfg & CK_MFG_REF_MASK) >> CK_MFG_REF_SHIFT,
++	    rd32(fApmixed, PLL_MFG_CON0), rd32(fApmixed, PLL_MFG_CON1), rd32(fApmixed, PLL_MFG_PWR_CON0));
+ 	say(out, end, "infra: prot sta1 0x%08x sta1_1 0x%08x acp 0x%08x\n", rd32(fInfra, INFRA_PROT_STA1),
+ 	    rd32(fInfra, INFRA_PROT1_STA1), rd32(fInfra, INFRA_ACP_CON));
+ 	if ((s1 & s2 & MFG_STATUS_BIT(0)) && (s1 & s2 & MFG_STATUS_BIT(1))) {
+@@ -3978,7 +4007,8 @@ VivaGPUAccelerator::linkCommand(const char *args, char *out, size_t outLen)
+ 				uint32_t tvg, tvs;
+ 				oppSels(fOpp, &tvg, &tvs);
+ 				say(o, end, "OPP %u MHz (clock %u MHz), vgpu %u uV vsram_gpu %u uV, margin %d mV; table (MHz):",
+-				    gVivaOpp[fOpp].khz / 1000, gVivaOpp[fClockOpp].khz / 1000, UV(tvg), UV(tvs), fMarginMv);
++				    gVivaOpp[fOpp].khz / 1000, gVivaOpp[fClockOpp].khz / 1000, VGPU_UV(tvg), VSRAM_UV(tvs),
++				    fMarginMv);
+ 				for (uint32_t i = 0; i < OPP_COUNT; i++) {
+ 					say(o, end, " %u", gVivaOpp[i].khz / 1000);
+ 				}
+@@ -4028,7 +4058,7 @@ VivaGPUAccelerator::linkCommand(const char *args, char *out, size_t outLen)
+ 			    fJobFaults, fMmuFaults, fGpuFaults, fTimeouts, fResets, fHeapGrows);
+ 			say(o, end, "mem_kib=%lld\nmem_peak_kib=%lld\nmem_limit_mib=%lld\nmem_proc_mib=%lld\nmem_refusals=%llu\n"
+ 			    "busy_ns=%llu\nvgpu_mv=%u\nvsram_mv=%u\n", fMemory >> 10, fMemPeak >> 10, fMemLimit >> 20,
+-			    fProcLimit >> 20, fMemRefused, bns, UV(tvg) / 1000, UV(tvs) / 1000);
++			    fProcLimit >> 20, fMemRefused, bns, VGPU_UV(tvg) / 1000, VSRAM_UV(tvs) / 1000);
+ 			for (VivaGPUVM *v = fVMs; v != NULL; v = v->nextVM) {
+ 				bool seen = false;
+ 				for (VivaGPUVM *w = fVMs; w != v; w = w->nextVM) {
+diff --git a/iokit/Kernel/arm/VivaPwrap.cpp b/iokit/Kernel/arm/VivaPwrap.cpp
+index caf5f8e..b2f4bb3 100644
+--- a/iokit/Kernel/arm/VivaPwrap.cpp
++++ b/iokit/Kernel/arm/VivaPwrap.cpp
+@@ -213,6 +213,13 @@ static const struct {
+ 	{ 0x1526, 0x007f, 0x40 },       /* BUCK_VGPU_ELR0: RG_BUCK_VGPU_VOSEL, <= 0.9 V */
+ 	{ 0x1bc8, 0x0001, 0x01 },       /* LDO_VSRAM_GPU_CON0: RG_LDO_VSRAM_GPU_EN */
+ 	{ 0x1bf4, 0x007f, 0x50 },       /* LDO_VSRAM_CON3: RG_LDO_VSRAM_GPU_VOSEL, <= 1.0 V */
++	/* MT6359 (athens): GPU rails are buck_vproc1 (VGPU) and ldo_vsram_md
++	 * (VSRAM_GPU). VOSEL sel = (uV - base)/6250, base 0.4 V / 0.5 V; the
++	 * driver caps at VGPU_SEL_MAX/VSRAM_SEL_MAX (0.9 V / 1.0 V). */
++	{ 0x1708, 0x0001, 0x01 },       /* BUCK_VPROC1_CON0: RG_BUCK_VPROC1_EN */
++	{ 0x172e, 0x007f, 0x50 },       /* BUCK_VPROC1_ELR0: RG_BUCK_VPROC1_VOSEL, <= 0.9 V */
++	{ 0x1f2c, 0x0001, 0x01 },       /* LDO_VSRAM_MD_CON0: RG_LDO_VSRAM_MD_EN */
++	{ 0x1b46, 0x007f, 0x50 },       /* LDO_VSRAM_MD_ELR: RG_LDO_VSRAM_MD_VOSEL, <= 1.0 V */
+ 	/* CPU DVFS (osfmk/arm64/viva_cpufreq.c): Vproc only, Vsram tracks it in hardware; the OPP tables' maxima */
+ 	{ 0x13a6, 0x007f, 0x63 },       /* BUCK_VPROC11_ELR0: RG_BUCK_VPROC11_VOSEL (A76), <= 1.11875 V */
+ 	{ 0x1426, 0x007f, 0x55 },       /* BUCK_VPROC12_ELR0: RG_BUCK_VPROC12_VOSEL (A55 + CCI), <= 1.03125 V */
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 0298792..96fcfcf 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -168,6 +168,11 @@ const char * gIOKernelConfigTables =
+     "     'IONameMatch'     = 'mediatek,mt6781-mali';"
+     "   },"
+     "   {"
++    "     'IOClass'         = VivaGPUAccelerator;"
++    "     'IOProviderClass' = IOPlatformDevice;"
++    "     'IONameMatch'     = 'mediatek,mt6853-mali';"
++    "   },"
++    "   {"
+     "     'IOClass'         = SweetHIDButtons;"
+     "     'IOProviderClass' = IOResources;"
+     "     'IOMatchCategory' = SweetHIDButtons;"
