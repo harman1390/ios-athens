@@ -3,6 +3,43 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-14c - GPU PORT: DRIVER ALREADY IN TREE; VIVA-GPU USERSPACE FOUND <<<
+
+USER DIRECTION: abandoned the SW-renderer/userdata-hack path ("will not
+work for me"). Wants the REAL GPU/Metal port — "the dev claimed to have
+gotten that" on viva. Pulled and confirmed.
+
+VERIFIED STATE (all in docs/ATHENS-GPU.md "UPDATE 2026-11-14"):
+- Kernel driver ALREADY compiled into athens: xnu/patches/0100-0137 ship
+  VivaGPU.cpp/h + VivaGPUUserClient.cpp + uapi; all vivagpu* boot-args
+  present. AthensPMIC (MT6359/pwrap) + VivaPMIC/VivaPwrap exist.
+- Userspace Metal stack = separate repo github.com/Nik300/viva-gpu
+  (cloned to ../viva-gpu): Metal frontend + AIR->NIR + Mesa/Panfrost
+  (Valhall, MC2/MC3-agnostic) + libdrm-xnu -> VivaMTLDriver.bundle.
+  PROVEN on viva: backboardd creates GPU BOs, Panfrost cache present,
+  SpringBoard/Settings GPU-accelerated.
+- LIVE DT pulled (research/rmx2117/live-dt): gpufreq supplies resolve
+  VGPU=buck_vproc1 (ph0x83), VSRAM=ldo_vsram_md (ph0x84); clock-names
+  show 5 MFG domains (mfg0/1/2/3/5); mali node minimal, compatible
+  mediatek,mali/arm,mali-valhall.
+
+WHY NO GPU TODAY (fixable, ordered): (1) ADT gpu compatible
+mediatek,mt6853-mali vs driver match mediatek,mt6781-mali -> add match;
+(2) vivagpu=0 default -> vivagpu=2; (3) ADT reg lacks MFG power blocks
+(mfgcfg/SPM/topckgen/apmixed/infracfg) viva's node has; (4) PMIC defines
+are MT6366 (VivaGPU.cpp ~L204) -> need MT6359 vproc1/vsram_md EN/VOSEL +
+VivaPwrap whitelist; (5) IRQs athens SPI 364-368 vs viva 274-276; (6)
+MFG power/clock sequence for MT6853 + OPP (operating-points empty in DT).
+
+PORT CHECKLIST + honest scope in docs/ATHENS-GPU.md. This is real
+hardware bring-up (days-weeks iterative), NOT a quick fix — but the
+driver skeleton is already present so it is adaptation, not from-scratch.
+Userspace build needs iOS SDK/Xcode (dev's Mac; this box = CLT only).
+
+TOUCH (unchanged, still open): embedded fw downloads but post-download
+"reset state timeout (last 0x00)" -> firmware download failed. SPI
+status read returns 0 — debug ctpRead/event-buf path next.
+
 ## >>> ATHENS HANDOFF 2026-11-14b - DISPLAY/GPU RESEARCH; SW-RENDERER CRASH-GUARD FOUND <<<
 
 GOAL (user): get display working so touch is visible; GPU work to enable
