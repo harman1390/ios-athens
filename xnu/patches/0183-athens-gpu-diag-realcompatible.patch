@@ -97,10 +97,18 @@ index 2e07385..9d134bc 100644
  }
  
 diff --git a/iokit/Kernel/arm/AthensSPI.cpp b/iokit/Kernel/arm/AthensSPI.cpp
-index c4bdf79..d10f913 100644
+index c4bdf79..aa006c0 100644
 --- a/iokit/Kernel/arm/AthensSPI.cpp
 +++ b/iokit/Kernel/arm/AthensSPI.cpp
-@@ -135,6 +135,59 @@ AthensSPI::start(IOService *provider)
+@@ -20,6 +20,7 @@
+  */
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOBufferMemoryDescriptor.h>
++#include <IOKit/IODeviceTreeSupport.h>
+ #include <libkern/OSByteOrder.h>
+ #include "AthensSPI.h"
+ 
+@@ -135,6 +136,59 @@ AthensSPI::start(IOService *provider)
  	if (!IOService::start(provider)) {
  		return false;
  	}
