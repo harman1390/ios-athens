@@ -1,0 +1,54 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -797,18 +797,41 @@
+ 	su.wait = (wait == 1);
+ 
+ 	su.regs = ml_io_map(reg[0], reg[1]);
+-	/* A host without 64-bit addressing gets DMA memory below 4 GiB. */
+-	ppnum_t max_pnum = (ppnum_t)(atop_64(1ULL << 32) - 1); /* always <4GiB: CAP read can lie early */
++	/* A host without 64-bit addressing gets DMA memory below 4 GiB.
++	 * MT6853 reads CAP 0x387071f (bit 24 CAP_64AS set): DMA then lives in
++	 * the managed pool above 4 GiB - out of every firmware engine's
++	 * alloc-range, including dram_r1 which scribbles [0xc0000000,
++	 * 0xffe60000). The previous fixed carve at 0xfd000000 was INSIDE that
++	 * range and the boot hung right after the takeover print. */
++	ppnum_t max_pnum = (ufs_rd(REG_CAP) & CAP_64AS) ? 0 : (ppnum_t)(atop_64(1ULL << 32) - 1);
++	uint64_t ufsdma = 0;
++	PE_parse_boot_argn("ufsdma", &ufsdma, sizeof(ufsdma));
++	if (!ufsdma) {
++		/* Fallback only. Below BOTH dummy-read engines (r0 ends
++		 * 0x5ff00000, r1 starts 0xc0000000) in the free gap
++		 * [0x4d100000,0x56000000). */
++		ufsdma = 0x4e000000;
++	}
+ 	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, max_pnum, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+-		printf("SWEET UFS: no contiguous DMA memory\n");
+-		return ENOMEM;
+-	}
+-	ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)su.dma);
+-	if (!pn) {
+-		return ENOMEM;
+-	}
+-	su.dma_pa = ptoa_64(pn);
++		/* With the whole managed pool above 4 GiB there is no <4G page to
++		 * allocate. Fall back to a fixed low-bank region outside the pool:
++		 * the old window is left unmanaged, so nothing else owns it. */
++		su.dma = (vm_offset_t)ml_io_map((vm_map_address_t)ufsdma, DMA_SIZE);
++		if (!su.dma) {
++			printf("SWEET UFS: no DMA memory\n");
++			return ENOMEM;
++		}
++		su.dma_pa = ufsdma;
++		printf("SWEET UFS: fixed low-bank DMA region at 0x%llx\n",
++		    (unsigned long long)ufsdma);
++	} else {
++		ppnum_t pn = pmap_find_phys(kernel_pmap, (addr64_t)su.dma);
++		if (!pn) {
++			return ENOMEM;
++		}
++		su.dma_pa = ptoa_64(pn);
++	}
+ 	su.secsize = DEV_BSIZE;
+ 	uint32_t lun_arg = UINT32_MAX;
+ 	PE_parse_boot_argn("ufslun", &lun_arg, sizeof(lun_arg));

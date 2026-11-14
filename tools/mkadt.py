@@ -19,12 +19,6 @@ MEM_SIZE = 0x4d000000
 # and the kernel hangs right after "kdp_core zlib memory" — reproduced on QEMU
 # and independently on ios-fajita.
 PANIC_LOG_SIZE = 0x100000
-# Dedicated UFS DMA carve for athens, taken from just below the panic log and
-# exposed to sweet_ufs.c as /sweet-ufs dma-phys. sweet_ufs_init maps it with
-# ml_io_map directly instead of kmem_alloc_contig: the contiguous-page search
-# fails intermittently under memory pressure and panics FindBSDRoot (ENOMEM,
-# IOKitBSDInit.cpp:778). Sized above sweet_ufs.c DMA_SIZE (~1 MiB).
-UFS_DMA_SIZE = 0x200000
 # --highmem (phone only): the whole upper DDR bank. The live FDT memory node is
 # <0x80000000 2G>, <0x1_00000000 0xfcc00000>; every fixed reserved-memory
 # carve-out is in the low bank and the dynamic pools are limited below 4G.
@@ -474,17 +468,7 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False,
             phys_base, mem_size = ATHENS_PHYS_BASE, ATHENS_MEM_SIZE
     # Carve the panic log off the top so the kernel never allocates over it.
     panic_base = phys_base + mem_size - PANIC_LOG_SIZE
-    # Carve the UFS DMA buffer just below the panic log (athens UFS only),
-    # 64 KiB-aligned for the UFS descriptor engine. /sweet-ufs dma-phys hands
-    # it to the driver, which maps it directly instead of searching for
-    # contiguous pages (kmem_alloc_contig fails intermittently -> FindBSDRoot
-    # ENOMEM panic). mem_size ends at the carve so nothing else owns it.
-    ufs_dma_base = 0
-    if athens_ufs:
-        ufs_dma_base = (panic_base - UFS_DMA_SIZE) & ~0xffff
-        mem_size = ufs_dma_base - phys_base
-    else:
-        mem_size -= PANIC_LOG_SIZE
+    mem_size -= PANIC_LOG_SIZE
     gicd, gicr, timebase = (QEMU_GICD, QEMU_GICR, QEMU_TIMEBASE) if qemu else (GICD, GICR, TIMEBASE)
     gicd_size, gicr_size, vtimer = GICD_SIZE, GICR_SIZE, (QEMU_VTIMER_INTID if qemu else VTIMER_INTID)
     fb, fb_size, fb_stride, ecid = FB, FB_SIZE, FB_STRIDE, SWEET_ECID
@@ -631,9 +615,6 @@ def build(seed=None, qemu=False, highmem=False, viva=False, viva_ufs=False,
         # (the athens patch series may add an mt6853 alias).
         ('compatible', cstr('mediatek,mt8183-ufshci') if (viva or athens) else cstr('qcom,ufshc')),
         ('reg', u64(VIVA_UFS, VIVA_UFS_SIZE) if viva else (u64(ATHENS_UFS, ATHENS_UFS_SIZE) if athens else u64(UFS, UFS_SIZE))),
-        # athens: the carved DMA buffer (build() above). Present only when
-        # athens_ufs carved it; sweet_ufs.c maps DMA_SIZE bytes at it.
-        *([('dma-phys', u64(ufs_dma_base))] if ufs_dma_base else []),
     ])
 
     # pmap_compute_max_asids requires the node even when no overrides are set.
