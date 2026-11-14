@@ -3,6 +3,58 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15x - SWEETSCAN GOT REAL ERRORS: temp-dir EIO(5)+keychain open fail; varfix skeleton CONFIRMED present; EIO = NON-create op -> patch 0197 syscall-level EIO catch <<<
+
+SWEETSCAN RESULT (athens-boot-scan.img = eba2140 kernel + sweetscan/sweetnull
+boot-args, .tmp-patch/scan-log.txt 4646 lines + 354 STR heap strings):
+- REAL error strings captured: `Failed to initialize/create darwin user temp
+  directory: Input/output error (5)`, `Failed to create temporary directory:
+  Input/output error (5)`, `Failed to initialize temporary directory suffix
+  for com.apple.fitnesscoachingd (5)`, `open_v2 "/Library/Keychains/
+  keychain-2.db" 0x400006: [14]2 unable to open database file`,
+  `Failed to query keychain`, `Failed to copy certificate ... -25291`.
+- mobileactivationd also doing OS-upgrade data migration to 20H392.
+
+VARFIX SKELETON CONFIRMED PRESENT (not missing): hfs_makenode ENTER shows
+`usersession.kb.writing`, `persona.kb.writing`, `Session` created under
+/private/var/keybags, AND many 40-char SHA1 hash dirs (= /private/var/folders
+/<uid-hex>/<hash>) being created. So folders+keybags dirs EXIST and HFS
+creates into them SUCCEED. => EIO is NOT a missing-dir problem.
+
+ARCHITECTURAL FACT (kernel log, lines ~440-653): iOS expects a SEPARATE APFS
+DATA VOLUME for /private/var, /tmp, /var/run, per-user sessions:
+- `exec mount` -> `failed to get filesystem info` (x2) -> `mount: data volume
+  missing, but not required in env: 0` -> continues (env:0 = not required).
+- `MKB_INIT: mount point (/private/var/) does not support Data Protection`,
+  `Unable to set /private/var//tmp to class D!`, `MKBUserSessionNeedsMount=1`.
+- launchd `(init-with-data-volume)` boot task runs. `dc_reset: /tmp` +
+  `/var/run: Invalid argument`.
+- Only ONE fs mounted: /dev/ufsroot0 (hfs) on /. /private/var = plain HFS dir.
+
+RULED OUT (source+instrumentation, high confidence): HFS create (335 ENTERs,
+0 err), lookup (cat_lookupbykey 0 err), catalog B-tree (MacToVFSError 0 EIO),
+cprotect/Data Protection (cp_fs_protected FALSE -> cp_handle_open/vnop/
+vnode_setclass all bypass or ENOTSUP/EINVAL not EIO), xattr BTInsert (no err
+printfs fired), bindfs (ENOTSUP, /private/var not bindfs), sandbox/MAC (no
+vnode hooks -> allow), kauth (EACCES/EPERM not EIO), statfs (cached mnt_vfsstat).
+
+CONCLUSION: EIO(5) is a NON-create filesystem op OR a synthesized Foundation
+error. The remaining surface = setattrlist/chmod/chown/setxattr/getattrlist/
+getdirentries/statfs-family/fsctl/open/read-write on the temp/keychain paths,
+OR a non-unix-syscall source (mach trap/IOKit/keybag). Need the EXACT syscall.
+
+PATCH 0197 (xnu/patches/0197-athens-eio-syscall-diag.patch): instruments
+bsd/dev/arm/systemcalls.c unix_syscall() — the arm64 syscall choke point —
+right after `error = (*(callp->sy_call))(...)`: if error==EIO print
+`SWEET EIO-SYSCALL code=%u sys=%s pid=%d comm=%s` (syscallnames[syscode],
+rate 5000). Catches EVERY unix syscall returning EIO with name+process =>
+definitively names the failing op. extern syscallnames[] (generated, already
+linked via kern_sysctl.c). printf->SWEETLOG proven. Applies clean -p1.
+KEEPS 0196 HFS prints (control: confirms HFS stays healthy).
+NEXT: CI build -> flash -> boot ~3min -> recovery -> pull ring -> grep
+EIO-SYSCALL => exact syscall+comm => then targeted fix (or confirms
+Foundation-synthesized EIO -> pivot to data-volume/mach).
+
 ## >>> ATHENS HANDOFF 2026-11-15w - *** HFS FILESYSTEM RULED OUT *** diag2 log: creates+lookups ALL SUCCEED, ZERO catalog errors; EIO is NOT filesystem; capturing userspace reason via sweetscan <<<
 
 DIAG2 RESULT (eba2140 / athens-boot-0196b.img, run 43644261657, .tmp-patch/
