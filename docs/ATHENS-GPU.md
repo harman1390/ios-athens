@@ -207,3 +207,66 @@ bits differ; read clk-mt6853-pg.c / spm register defs for exact addrs.
 - OPP table values (g_opp_table built from segment+efuse at runtime;
   not a static array in this file — find mt6853 opp table source)
 - SHADER_PRESENT read for MC3 core count
+
+## VERIFIED clock/PLL data (clk-mt6853.c, apmixed 0x1000c000)
+
+MFGPLL register offsets (MT6853) — DIFFERENT from MT6781's 0x250/0x254/0x25c:
+- CON0 (enable, bit0)      = apmixed + 0x268
+- CON1 (PCW/POSDIV/DDS)    = apmixed + 0x26c  ← gpufreq confirms
+- PWR_CON (bit0 on, bit1 iso) = apmixed + 0x274
+- CON1 layout: bit31=PCW_CHG, bits[26:24]=POSDIV(power enum 0-4),
+  low=PCW/DDS (FIN=26 MHz). POSDIV_POWER_4 covers 375-950 MHz,
+  POSDIV_POWER_8 covers 187.5-475 MHz.
+
+**OPP table** (mtk_gpufreq_internal_plat.h, g_opp_table_segment_1/2/3;
+GPUOP(khz,vgpu,vsram,posdiv,aging); vgpu/vsram in 10 uV):
+- Top: 950000 kHz, vgpu 80000 (0.80 V), vsram 80000 (0.80 V)
+- 880 MHz: vgpu 75000, vsram 75000
+- 640 MHz: vgpu 65000, vsram 75000
+- **Floor: 390000 kHz (390 MHz), vgpu 57500-62500, vsram 75000**
+  (segment_1/2/3 differ only in the lowest entries' vgpu 57500/60000/62500)
+- vsram ≈ vgpu..+0.2 V on MT6853 (NOT the MT6781 vsram≥vgpu+0.1 V floor;
+  constraint is 0 ≤ vsram−vgpu ≤ 350 mV)
+
+**Power-on order** (mt_gpufreq_power_on): buck rails → mtcmos → cg
+(mfgcfg + subsys_bg3d). Driver's mfgOn already does rails→clock→mtcmos→
+mfgcfg — reorder to rails→mtcmos→clock→mfgcfg to match, OR verify
+ordering is tolerated (viva powered clock before mtcmos and it worked).
+
+## COMPLETE edit list for the athens GPU patch (0182+)
+
+All in a NEW patch `0182-athens-gpu-mt6853.patch` modifying
+VivaGPU.cpp/h (do NOT edit the 0100-0137 viva patches):
+
+1. **Match**: `mediatek,mt6781-mali` → also accept `mediatek,mt6853-mali`
+   (in patch 0100's matching table / KernelConfigTables entry).
+2. **PMIC defines** (~L205-212) MT6366→MT6359:
+   VGPU_EN 0x1708, VGPU_VOSEL 0x172e, VGPU_DA_VOSEL 0x1726, VGPU_DA_EN 0x1728;
+   VSRAM_EN 0x1f2c, VSRAM_VOSEL 0x1b46, VSRAM_DA_VOSEL 0x1f32(>>8),
+   VSRAM_DA_EN 0x1f2e. Add these to VivaPwrap::writeRegulator whitelist.
+3. **Voltage decode**: UV()/SEL_OF() assume base 500000+6250 for BOTH
+   rails — WRONG for vproc1 (base 400000). Split into VGPU_UV (400000
+   base) and VSRAM_UV (500000 base); SEL_OF per-rail.
+4. **OPP table** gVivaOpp → MT6853 segment_1 (37 entries, 390-950 MHz,
+   vgpu/vsram 10 uV). SEL caps: vproc1 0.4-1.194 V (sel 0-127),
+   vsram_md 0.5-1.10 V (sel 0-96).
+5. **MTCMOS**: mfgOn loop `n<4` → power domains {0,1,2,3,5} (MC3 has all
+   shader stacks; mfg5 index n=5 → PWR_CON 0x31C, status bit 7). mfgOff
+   reverse. mtcmosOn/Off formulas already correct (0x308+4n, bit 2+n).
+6. **MFGPLL**: PLL_MFG_CON0 0x250→0x268, CON1 0x254→0x26c, PWR_CON0
+   0x25c→0x274. Rewrite mfgpllCon1() for MT6853 CON1 layout (posdiv_power
+   enum at [26:24], PCW<<? — verify DDS_SHIFT use; FIN still 26 MHz).
+7. **topckgen CK_CFG_0** mfg_sel mux bits + CK_CFG_UPDATE for MT6853 —
+   verify offsets in clk-mt6853.c (CK_CFG_0 base may differ from
+   MT6781's; search TOPCKGEN CLK_CFG).
+8. **infracfg_ao** bus-protection regs for the MFG1-equivalent domain —
+   verify base 0x10001000 + prot step masks in clk-mt6853-pg.c.
+9. **IRQ**: driver uses interrupt indices 0,1,2 = GPU/MMU/JOB. Athens
+   node has 5 SPIs (364-368); confirm 364/365/366 = GPU/MMU/JOB (the
+   gpufreq/mali DT or mt6853.dts irq order) and that indices line up.
+10. **SHADER_PRESENT**: MC3 → expect 3 cores; driver reads it dynamically
+    already (popcount → "Mali-G57 MC%u") — verify it reports MC3.
+
+Then: `ATHENS_EXTRA="vivagpu=2 sweetlog=1 cpus=8"` build → flash →
+SWEETLOG shows "VIVA GPU: ... GPU_ID 0x... cores 0x... l2 on" + rails/
+mtcmos/mfgcfg dumps → iterate on the first fault.

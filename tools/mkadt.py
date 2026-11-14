@@ -413,13 +413,21 @@ def athens_devices(ph, phandle, gic_ph, ecid):
                 ('fw-path', cstr('/usr/share/firmware/touch/nt36672c_jdi.bin')),
             ]),
         ]),
-        # Mali-G57 MC3 (mali@13000000; GPU/MMU/JOB/EVENT/PWR = SPI 364-368
-        # level high): power domains SCP_SYS_MFG0-5 (scpsys/spm@10006000),
-        # mfgcfg + topckgen/apmixed/infracfg bases as on MT6781 — MEASURE.
+        # Mali-G57 MC3 (mali@13000000; GPU/MMU/JOB = SPI 364/365/366 level
+        # high, EVENT/PWR 367/368 unused like viva's kbase pair): iokit/
+        # Kernel/arm/VivaGPU.cpp (athens port of the viva MC2 driver), started
+        # with boot-arg vivagpu=1|2. reg MUST carry all 6 regions in driver
+        # order kMapMali,Mfgcfg,Spm,Topck,Apmixed,Infra (mapDeviceMemory-
+        # WithIndex 0..5) - bases are the standard MTK SoC map, same as
+        # MT6781: mfgcfg 0x13fbf000, SPM/scpsys 0x10006000, topckgen
+        # 0x10000000, apmixed 0x1000c000, infracfg_ao 0x10001000 (MEASURE
+        # infracfg on live FDT; MFG domains here are mfg0,1,2,3,5).
         node('gpu', [
             ph(),
             ('compatible', cstr('mediatek,mt6853-mali')),
-            ('reg', u64(0x13000000 - SOC_BASE, 0x4000)),
+            ('reg', u64(0x13000000 - SOC_BASE, 0x4000, 0x13fbf000 - SOC_BASE, 0x1000,
+                        0x10006000 - SOC_BASE, 0x1000, 0x10000000 - SOC_BASE, 0x1000,
+                        0x1000c000 - SOC_BASE, 0x1000, 0x10001000 - SOC_BASE, 0x1000)),
             ('interrupt-parent', u32(gic_ph)),
             ('interrupts', spi(0x16c, IRQ_LEVEL_HIGH) + spi(0x16d, IRQ_LEVEL_HIGH) +
                          spi(0x16e, IRQ_LEVEL_HIGH) + spi(0x16f, IRQ_LEVEL_HIGH) +
