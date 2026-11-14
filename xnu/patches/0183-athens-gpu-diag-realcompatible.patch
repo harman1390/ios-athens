@@ -45,19 +45,16 @@ diff --git a/iokit/Kernel/arm/VivaGPU.cpp b/iokit/Kernel/arm/VivaGPU.cpp
 diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
 --- a/iokit/Kernel/IOPlatformExpert.cpp
 +++ b/iokit/Kernel/IOPlatformExpert.cpp
-@@ -1600,9 +1600,15 @@
+@@ -1600,9 +1600,12 @@
  
  	nub = new IOPlatformDevice;
  	if (nub) {
 +		const char *dbgName = from ? from->getName() : "?";
-+		bool dbgMali = dbgName && strcmp(dbgName, "mali") == 0;
++		IOLog("SWEET NUB: node=%s\n", dbgName ? dbgName : "?");
  		if (!nub->init( from, gIODTPlane )) {
-+			if (dbgMali)
-+				IOLog("SWEET NUB: init FAILED for %s\n", dbgName);
++			IOLog("SWEET NUB: init FAILED for %s\n", dbgName ? dbgName : "?");
  			nub->free();
  			nub = NULL;
-+		} else if (dbgMali) {
-+			IOLog("SWEET NUB: created %s\n", dbgName);
  		}
  	}
  	return nub;
