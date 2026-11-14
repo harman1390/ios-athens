@@ -1,0 +1,560 @@
+diff --git a/iokit/Kernel/arm/VivaPwrap.cpp b/iokit/Kernel/arm/VivaPwrap.cpp
+--- a/iokit/Kernel/arm/VivaPwrap.cpp
++++ b/iokit/Kernel/arm/VivaPwrap.cpp
+@@ -54,13 +54,13 @@
+ 
+ /*
+  * ================= athens (MT6853) pwrap bring-up =================
+- * Ported from the vendor mt6785 pwrap HAL
+- * (drivers/misc/mediatek/pmic_wrap/mt6785/pwrap_hal.c + pwrap_hal.h,
+- * MTK_PLATFORM_MT6359) and clk-mt6853.c. lk2nd leaves the wrapper
+- * unclocked and uninitialised; Android's CCF enables the spi/wrap gates and
+- * pwrap_init() runs the sequence below. We replicate it with direct MMIO.
+- * The WACS2 register offsets and command format are identical to the ones
+- * this file already uses (verified against mt6785/pwrap_hal.h).
++ * MT6853 does NOT use the classic WACS2 engine - its pwrap is ARB_V3/PMIF
++ * (drivers/soc/mediatek/mtk-pmic-wrap.c, pwrap_mt6853, .regs = mt6853_regs).
++ * PMIC access goes through the PMIF "SWINF_2" interface at 0xC80+, and the
++ * SPI master is a separate region (spi_mst@0x10028000) enabled via
++ * PMICSPI_MST_SPIWRAP_EN. The slave (MT6359) has caps=0, so Android runs no
++ * sidly/dual-io/security/slave-reset init - only clocks + spi_mst + init_done
++ * + SWINF_2 transactions. Verified against the exact-device kernel source.
+  */
+ 
+ /* infracfg_ao (syson@10001000) - clk-mt6853.c *_cg_regs + mt6785 hal.h */
+@@ -122,6 +122,31 @@
+ #define PW_WACS2_RDATA      0xc24
+ #define PW_WACS2_VLDCLR     0xc28
+ 
++/* PMIF/ARB_V3 registers (mt6853_regs[], drivers/soc/mediatek/mtk-pmic-wrap.c).
++ * All in the pwrap region (fRegs). SWINF_2 is the software-interface channel
++ * used for every PMIC access on this SoC. */
++#define PMIF_INIT_DONE      0x000   /* write 1 = init complete (pwrap_init) */
++#define PMIF_STAUPD_CTRL    0x04c
++#define PMIF_TIMER_CTRL     0x3e4   /* probe writes 0x3 for ARB_V3 */
++#define PMIF_IRQ_EN3        0x450   /* probe |= 0x180000 (int_en_all) */
++#define PMIF_MONITOR_CTRL   0x484
++#define PMIF_MONITOR_STA    0x4f4
++#define PMIF_SWINF2_ACC     0xc80   /* read: adr ; write: (1<<29)|adr */
++#define PMIF_SWINF2_WDATA   0xc84   /* write data (before ACC) */
++#define PMIF_SWINF2_RDATA   0xc94   /* read data & 0xffff */
++#define PMIF_SWINF2_VLDCLR  0xca4   /* write 1 after a read */
++#define PMIF_SWINF2_STA     0xca8   /* FSM + status (PWRAP_WACS2_RDATA alias) */
++#define PMIF_PMIC_VIO0      0xf50   /* PMIC access-violation info (timeout diag) */
++#define PMIF_PMIF_VIO0      0xf80   /* PMIF self access-violation info */
++/* spi_mst region (fSpiRegs, index 1): PMICSPI_MST_SPIWRAP_EN */
++#define SPI_MST_SPIWRAP_EN  0x014
++
++/* PMIF FSM decode: SWINF_2_STA bits[3:1] (PMIF_GET_SWINF_2_FSM). */
++#define PMIF_FSM(x)         (((x) >> 1) & 7)
++#define PMIF_FSM_IDLE       0
++#define PMIF_FSM_WFVLDCLR   6
++#define PMIF_INITDONE_V3    (1u << 15)   /* PWRAP_STATE_INIT_DONE0_V3 */
++
+ /* bit fields (mt6785 pwrap_hal.h GET_* macros) */
+ #define W2_RDATA(x)     ((x) & 0xffff)
+ #define W2_FSM(x)       (((x) >> 16) & 7)
+@@ -170,41 +195,46 @@
+ 		return false;
+ 	}
+ 	fLock = IOLockAlloc();
+-	fMap = provider->mapDeviceMemoryWithIndex(0);
+-	fInfraMap = provider->mapDeviceMemoryWithIndex(1);   /* infracfg_ao: clock gates */
+-	fTopMap = provider->mapDeviceMemoryWithIndex(2);     /* topckgen: ulposc mux */
++	fMap = provider->mapDeviceMemoryWithIndex(0);    /* pwrap: PMIF SWINF_2 regs */
++	fSpiMap = provider->mapDeviceMemoryWithIndex(1); /* spi_mst: SPIWRAP_EN */
++	fInfraMap = provider->mapDeviceMemoryWithIndex(2); /* infracfg_ao: clock gates */
++	fTopMap = provider->mapDeviceMemoryWithIndex(3);   /* topckgen: ulposc mux */
+ 	if (fLock == NULL || fMap == NULL) {
+ 		IOLog("VIVA PWRAP: cannot map registers\n");
+ 		return false;
+ 	}
+ 	fRegs = (vm_offset_t)fMap->getVirtualAddress();
++	fSpiRegs = fSpiMap ? (vm_offset_t)fSpiMap->getVirtualAddress() : 0;
+ 	fInfraRegs = fInfraMap ? (vm_offset_t)fInfraMap->getVirtualAddress() : 0;
+ 	fTopRegs = fTopMap ? (vm_offset_t)fTopMap->getVirtualAddress() : 0;
+-	if (fInfraRegs == 0 || fTopRegs == 0) {
+-		IOLog("VIVA PWRAP: cannot map infracfg/topckgen (infra 0x%llx top 0x%llx)\n",
+-		    (unsigned long long)fInfraRegs, (unsigned long long)fTopRegs);
+-	}
+-
+-	uint32_t rdata = rd32(PWRAP_WACS2_RDATA);
+-	IOLog("VIVA PWRAP: init_done0 0x%x wacs2_en 0x%x wacs2_rdata 0x%08x (fsm %u, init %u)\n",
+-	    rd32(PWRAP_INIT_DONE0), rd32(PWRAP_WACS2_EN), rdata, WACS_FSM(rdata),
+-	    (rdata & WACS_INIT_DONE0_V2) != 0);
+-	if (!(rdata & WACS_INIT_DONE0_V2)) {
+-		/* athens: lk2nd does not run the pwrap init that LK did on viva, so
+-		 * the init-done flag is clear and the clocks/engine are off. Run the
+-		 * ported MT6853 init (clocks + WACS2 sequence) before probing. */
+-		IOLog("VIVA PWRAP: init-done clear; running athens pwrap init\n");
++	if (fSpiRegs == 0 || fInfraRegs == 0 || fTopRegs == 0) {
++		IOLog("VIVA PWRAP: cannot map spi_mst/infracfg/topckgen (spi 0x%llx infra 0x%llx top 0x%llx)\n",
++		    (unsigned long long)fSpiRegs, (unsigned long long)fInfraRegs,
++		    (unsigned long long)fTopRegs);
++	}
++
++	/* PMIF init-done: PMIF_INIT_DONE (ctl, 0x0) gates whether pwrap_init runs;
++	 * SWINF_2_STA bit15 (0xCA8) is the hardware init-done status the probe checks. */
++	uint32_t pmif_init = rd32(PMIF_INIT_DONE);
++	uint32_t swinf_sta = rd32(PMIF_SWINF2_STA);
++	IOLog("VIVA PWRAP: pmif_init_done 0x%x swinf2_sta 0x%08x (fsm %u init %u) spiwrap_en 0x%x\n",
++	    pmif_init, swinf_sta, PMIF_FSM(swinf_sta), (swinf_sta & PMIF_INITDONE_V3) != 0,
++	    spiRd(SPI_MST_SPIWRAP_EN));
++	if (!(swinf_sta & PMIF_INITDONE_V3)) {
++		/* athens: lk2nd does not run the pwrap/PMIF init that LK did, so the
++		 * clocks/engine are uninitialised. Run the ported MT6853 PMIF init. */
++		IOLog("VIVA PWRAP: init-done clear; running athens PMIF init\n");
+ 		athensPwrapInit();
+-		rdata = rd32(PWRAP_WACS2_RDATA);
+-		IOLog("VIVA PWRAP: post-init wacs2_rdata 0x%08x (fsm %u init %u)\n",
+-		    rdata, WACS_FSM(rdata), (rdata & WACS_INIT_DONE0_V2) != 0);
++		swinf_sta = rd32(PMIF_SWINF2_STA);
++		IOLog("VIVA PWRAP: post-init swinf2_sta 0x%08x (fsm %u init %u)\n",
++		    swinf_sta, PMIF_FSM(swinf_sta), (swinf_sta & PMIF_INITDONE_V3) != 0);
+ 		uint32_t sw = 0, hw = 0;
+ 		IOReturn r1 = readPMIC(MT6358_SWCID, &sw);
+ 		IOReturn r2 = readPMIC(MT6358_HWCID, &hw);
+ 		IOLog("VIVA PWRAP: probe swcid ret %d val 0x%x hwcid ret %d val 0x%x\n",
+ 		    (int)r1, sw, (int)r2, hw);
+ 		if (r1 != kIOReturnSuccess && r2 != kIOReturnSuccess) {
+-			IOLog("VIVA PWRAP: WACS2 still dead after athens init, not using it\n");
++			IOLog("VIVA PWRAP: PMIF still dead after athens init, not using it\n");
+ 			return false;
+ 		}
+ 	}
+@@ -244,11 +274,13 @@
+ 	return true;
+ }
+ 
++/* PMIF FSM lives in SWINF_2_STA (0xCA8), decoded (x>>1)&7 - NOT the classic
++ * WACS2_RDATA bits[18:16]. ~10 ms timeout like the Linux driver. */
+ bool
+-VivaPwrap::waitFSM(uint32_t fsm)
++VivaPwrap::waitPMIFFSM(uint32_t fsm)
+ {
+-	for (int i = 0; i < 10000; i++) {       /* ~10 ms, like Linux */
+-		if (WACS_FSM(rd32(PWRAP_WACS2_RDATA)) == fsm) {
++	for (int i = 0; i < 10000; i++) {
++		if (PMIF_FSM(rd32(PMIF_SWINF2_STA)) == fsm) {
+ 			return true;
+ 		}
+ 		IODelay(1);
+@@ -257,13 +289,21 @@
+ 	return false;
+ }
+ 
++bool
++VivaPwrap::waitFSM(uint32_t fsm)
++{
++	return waitPMIFFSM(fsm);
++}
++
+ /*
+- * _pwrap_wacs2_nochk (mt6785 pwrap_hal.c): a raw WACS2 transaction with no
+- * init-done / sync check - used by pwrap_init() itself before the wrapper is
+- * up. Identical command format to readPMIC/writePMIC.
++ * pwrap_read16/pwrap_write16 (ARB_V3 path, drivers/soc/mediatek/mtk-pmic-wrap.c):
++ * a raw PMIF SWINF_2 transaction with no init-done check - used by init before
++ * the wrapper is fully up. Read: SWINF_2_ACC=adr, wait FSM==WFVLDCLR,
++ * rdata=SWINF_2_RDATA&0xffff, SWINF_2_VLD_CLR=1. Write: SWINF_2_WDATA=wdata,
++ * SWINF_2_ACC=(1<<29)|adr. `addr` is the raw 16-bit PMIC byte address.
+  */
+ IOReturn
+-VivaPwrap::wacs2NoChk(uint32_t write, uint32_t addr, uint32_t wdata, uint32_t *rdata)
++VivaPwrap::pmifNoChk(uint32_t write, uint32_t addr, uint32_t wdata, uint32_t *rdata)
+ {
+ 	if (rdata) {
+ 		*rdata = 0;
+@@ -273,14 +313,22 @@
+ 	}
+ 	IOReturn ret = kIOReturnTimeout;
+ 	IOLockLock(fLock);
+-	if (waitFSM(WACS_FSM_IDLE)) {
+-		wr32(PW_WACS2_CMD, (write ? 0x80000000u : 0) | ((addr >> 1) << 16) | wdata);
++	/* clear a stale VLDCLR before starting (pwrap_leave_fsm_vldclr) */
++	if (PMIF_FSM(rd32(PMIF_SWINF2_STA)) == PMIF_FSM_WFVLDCLR) {
++		wr32(PMIF_SWINF2_VLDCLR, 1);
++	}
++	if (waitPMIFFSM(PMIF_FSM_IDLE)) {
+ 		if (write) {
++			wr32(PMIF_SWINF2_WDATA, wdata);
++			wr32(PMIF_SWINF2_ACC, (1u << 29) | addr);
+ 			ret = kIOReturnSuccess;
+-		} else if (waitFSM(WACS_FSM_WFVLDCLR)) {
+-			*rdata = rd32(PW_WACS2_RDATA) & 0xffff;
+-			wr32(PW_WACS2_VLDCLR, 1);
+-			ret = kIOReturnSuccess;
++		} else {
++			wr32(PMIF_SWINF2_ACC, addr);
++			if (waitPMIFFSM(PMIF_FSM_WFVLDCLR)) {
++				*rdata = rd32(PMIF_SWINF2_RDATA) & 0xffff;
++				wr32(PMIF_SWINF2_VLDCLR, 1);
++				ret = kIOReturnSuccess;
++			}
+ 		}
+ 	}
+ 	IOLockUnlock(fLock);
+@@ -288,34 +336,31 @@
+ }
+ 
+ /*
+- * athens (MT6853) pwrap bring-up - faithful port of pwrap_init() from the
+- * vendor mt6785 pwrap HAL (MT6359-class). lk2nd does not run this, so the
+- * spi/wrap clocks are gated and the WACS2 engine is uninitialised. Each stage
+- * is logged so a failure pinpoints the exact step. _pwrap_InitStaUpd() and
+- * _pwrap_starve_set() (status-update/auxadc/starvation, not needed for plain
+- * register access) are intentionally omitted for now.
++ * athens (MT6853) pwrap/PMIF bring-up - faithful port of pwrap_probe()/
++ * pwrap_init() for pwrap_mt6853 (ARB_V3) + pmic_mt6359 (caps=0) from
++ * drivers/soc/mediatek/mtk-pmic-wrap.c. lk2nd leaves the wrapper unclocked and
++ * uninitialised; we enable the spi/wrap gates, the spi_mst SPI master, set the
++ * PMIF init-done + timer/irq enables the probe sets, then validate with a PMIC
++ * write/read over SWINF_2. Slave caps=0 => no sidly/dual-io/security/slave
++ * reset (those are skipped for MT6359). Each stage is logged.
+  */
+ void
+ VivaPwrap::athensPwrapInit(void)
+ {
+ 	uint32_t r = 0;
+-	int i, found, si_en_sel, si_ck_sel, si_dly, si_sample_ctrl, clk_edge_no;
+-	static const uint32_t test_data[30] = {
+-		0x6996, 0x9669, 0x6996, 0x9669, 0x6996, 0x9669, 0x6996, 0x9669, 0x6996, 0x9669,
+-		0x5aa5, 0xa55a, 0x5aa5, 0xa55a, 0x5aa5, 0xa55a, 0x5aa5, 0xa55a, 0x5aa5, 0xa55a,
+-		0x1b27, 0x1b27, 0x1b27, 0x1b27, 0x1b27, 0x1b27, 0x1b27, 0x1b27, 0x1b27, 0x1b27,
+-	};
+ 
+ 	if (fInfraRegs == 0) {
+ 		IOLog("VIVA PWRAP: no infracfg map - cannot enable clocks\n");
+ 		return;
+ 	}
+-	IOLog("VIVA PWRAP: athens init; pre ifrao2_sta 0x%x clk_cfg8 0x%x wrap_en 0x%x\n",
+-	    infraRd(AT_IFRAO_CG0_STA), fTopRegs ? topRd(AT_CLK_CFG_8) : 0, rd32(PW_WRAP_EN));
+-
+-	/* 1. __pwrap_spi_clk_set: gate spi/wrap clocks, drop the SPM 26M ctrl,
+-	 *    soft-reset pwrap, then ungate -> a clean clock restart. The ifrao2
+-	 *    gates are active-low: STA=1 gated, a CLR write enables. */
++	IOLog("VIVA PWRAP: athens PMIF init; pre ifrao2_sta 0x%x clk_cfg8 0x%x "
++	    "swinf2_sta 0x%x spiwrap_en 0x%x\n",
++	    infraRd(AT_IFRAO_CG0_STA), fTopRegs ? topRd(AT_CLK_CFG_8) : 0,
++	    rd32(PMIF_SWINF2_STA), spiRd(SPI_MST_SPIWRAP_EN));
++
++	/* 1. clocks: gate spi/wrap, drop the SPM 26M ctrl, soft-reset pwrap, ungate.
++	 *    ifrao2 gates are active-low: STA=1 gated, a CLR write enables. This
++	 *    restarts PMIC_TMR(wrap)/PMIC_AP(spi) off fpwrap_ulposc_ck. */
+ 	infraWr(AT_IFRAO_CG0_SET, 0xf);
+ 	infraWr(AT_IFRAO_CG2_SET, 0x100);
+ 	infraWr(AT_PMICW_CLK_CTRL, 0x2);
+@@ -326,189 +371,46 @@
+ 	IODelay(100);
+ 	IOLog("VIVA PWRAP: clocks on, ifrao2_sta 0x%x (0=running)\n", infraRd(AT_IFRAO_CG0_STA));
+ 
+-	/* 2. _pwrap_reset_spislv: manual-mode bit-bang to reset the SPI slave. */
+-	wr32(PW_HPRIO_ARB_EN, 0);
+-	wr32(PW_WRAP_EN, 0);
+-	wr32(PW_MUX_SEL, MANUAL_MODE);
+-	wr32(PW_MAN_EN, 1);
+-	wr32(PW_DIO_EN, 0);
+-	wr32(PW_MAN_CMD, (OP_WR << 13) | (OP_CSL << 8));
+-	wr32(PW_MAN_CMD, (OP_WR << 13) | (OP_OUTS << 8));
+-	wr32(PW_MAN_CMD, (OP_WR << 13) | (OP_CSH << 8));
+-	for (i = 0; i < 4; i++) {                    /* CSL OUTS CSH OUTS x4 */
+-		wr32(PW_MAN_CMD, (OP_WR << 13) | (OP_OUTS << 8));
+-	}
+-	for (i = 0; i < 1000; i++) {                 /* wait_for_sync: SYNC_IDLE2 */
+-		if (W2_SYNC(rd32(PW_WACS2_RDATA)) == SYNC_IDLE) {
+-			break;
+-		}
+-		IODelay(1);
+-	}
+-	wr32(PW_MAN_EN, 0);
+-	wr32(PW_MUX_SEL, WRAPPER_MODE);
+-	IOLog("VIVA PWRAP: spislv reset done\n");
+-
+-	/* 3. enable wrapper + WACS2 + WACS2-only arbitration */
+-	wr32(PW_WRAP_EN, 1);
+-	wr32(PW_WACS2_EN, 1);
+-	wr32(PW_HPRIO_ARB_EN, 0x4);
++	/* 2. spi_mst SPI master enable. The probe maps base1 and pwrap_disable()
++	 *    clears this bit, so it is enabled by default - set it explicitly so a
++	 *    stale lk2nd state cannot leave the SPI master off. */
++	spiWr(SPI_MST_SPIWRAP_EN, 1);
++	IOLog("VIVA PWRAP: spiwrap_en now 0x%x\n", spiRd(SPI_MST_SPIWRAP_EN));
++
++	/* 3. PMIF init: on mt6853 the classic pwrap_init register writes all land on
++	 *    PMIF_INIT_DONE (0x0) because mt6853_regs[] defines no classic control
++	 *    regs - the PMIF engine is self-configuring. Set init-done, then apply
++	 *    the probe's ARB_V3 TIMER_CTRL + IRQ_EVENT_EN_3 enables. */
++	wr32(PMIF_INIT_DONE, 1);
++	wr32(PMIF_TIMER_CTRL, 0x3);
++	wr32(PMIF_IRQ_EN3, rd32(PMIF_IRQ_EN3) | 0x180000);
+ 	IODelay(100);
++	IOLog("VIVA PWRAP: pmif init_done 0x%x timer_ctrl 0x%x irq_en3 0x%x swinf2_sta 0x%08x\n",
++	    rd32(PMIF_INIT_DONE), rd32(PMIF_TIMER_CTRL), rd32(PMIF_IRQ_EN3), rd32(PMIF_SWINF2_STA));
+ 
+-	/* 4. _pwrap_init_reg_clock(1): external clock write + PMIC dummy reads */
+-	wr32(PW_EXT_CK_WRITE, 1);
+-	wacs2NoChk(1, PMIC_DEW_RDDMY_NO, 0x8, NULL);
+-	wr32(PW_RDDMY, 0x8);
+-	wr32(PW_CSHEXT_WRITE, 0);
+-	wr32(PW_CSHEXT_READ, 0);
+-	wr32(PW_CSLEXT_WRITE, 0);
+-	wr32(PW_CSLEXT_READ, 0x0200);
+-	IOLog("VIVA PWRAP: reg_clock done\n");
+-
+-	/* 5. __pwrap_InitSPISLV: PMIC SPI slave configuration */
+-	wacs2NoChk(1, PMIC_RG_SRCLKEN_IN0, 0xf0, NULL);
+-	wacs2NoChk(1, PMIC_RG_SMT_SPI_CLK, 0xf, NULL);
+-	wacs2NoChk(1, PMIC_GPIO_PULLEN0_CLR, 0xf0, NULL);
+-	wacs2NoChk(1, PMIC_RG_SPI_MISO_MODE, 0x1, NULL);
+-	wacs2NoChk(1, PMIC_RG_OCTL_SPI_CLK, 0x8888, NULL);
+-	IOLog("VIVA PWRAP: spislv init done\n");
+-
+-	/* 6. _pwrap_init_dio(1): enable DIO (double-data-rate) mode */
+-	wr32(PW_HPRIO_ARB_EN, 0x4);
+-	for (i = 0; i < 1000; i++) {                 /* wait WRAP_FSM idle */
+-		uint32_t st = rd32(PW_WRAP_STA);
+-		if (WRAP_FSM(st) == 0 && WRAP_DLE(st) == 0) {
+-			break;
+-		}
+-		IODelay(1);
+-	}
+-	wacs2NoChk(1, PMIC_DEW_DIO_EN, 1, NULL);
+-	for (i = 0; i < 1000; i++) {                 /* wait WACS2 idle + sync */
+-		uint32_t x = rd32(PW_WACS2_RDATA);
+-		if (W2_FSM(x) == FSM_IDLE && W2_SYNC(x) == SYNC_IDLE) {
+-			break;
+-		}
+-		IODelay(1);
+-	}
+-	wr32(PW_DIO_EN, 1);
+-	IOLog("VIVA PWRAP: dio on\n");
+-
+-	/* liveness probe at the correct point: the bus is now fully configured
+-	 * (InitSPISLV + dio done). A WACS2 read should COMPLETE the FSM
+-	 * (WFVLDCLR) even though the data is still uncalibrated garbage - SI
+-	 * timing is what sistrobe fixes next, not transaction completion. A
+-	 * timeout here means the SPI engine genuinely cannot finish a transfer
+-	 * (dead bus), so skip the calibration sweeps. One retry covers a
+-	 * transient FSM-still-busy right after dio. */
++	/* 4. liveness: a PMIF read should complete the SWINF_2 FSM (WFVLDCLR). Dump
++	 *    the access-violation + monitor state on failure to tell an MPU/firewall
++	 *    reject from a dead SPI master. One retry covers a transient busy FSM. */
+ 	IODelay(100);
+ 	{
+-		IOReturn lr = wacs2NoChk(0, PMIC_DEW_READ_TEST, 0, &r);
++		IOReturn lr = pmifNoChk(0, PMIC_DEW_READ_TEST, 0, &r);
+ 		if (lr != kIOReturnSuccess) {
+ 			IODelay(50);
+-			lr = wacs2NoChk(0, PMIC_DEW_READ_TEST, 0, &r);
+-		}
+-		IOLog("VIVA PWRAP: post-dio read_test ret %d rdata 0x%x wrap_en %x wacs2_en %x "
+-		    "dio_en %x arb %x ifrao2_sta %x\n", (int)lr, r, rd32(PW_WRAP_EN),
+-		    rd32(PW_WACS2_EN), rd32(PW_DIO_EN), rd32(PW_HPRIO_ARB_EN),
+-		    infraRd(AT_IFRAO_CG0_STA));
+-		if (lr != kIOReturnSuccess) {
+-			IOLog("VIVA PWRAP: WACS2 cannot complete a transaction - bus dead\n");
+-			return;
+-		}
+-	}
+-
+-	/* 7. _pwrap_init_sistrobe(0): SI strobe calibration */
+-	found = 0;
+-	si_sample_ctrl = 0;
+-	for (si_en_sel = 0; si_en_sel < 8; si_en_sel++) {
+-		for (si_ck_sel = 0; si_ck_sel < 2; si_ck_sel++) {
+-			si_sample_ctrl = (si_en_sel << 6) | (si_ck_sel << 5);
+-			wr32(PW_SI_SAMPLE_CTRL, si_sample_ctrl);
+-			wacs2NoChk(0, PMIC_DEW_READ_TEST, 0, &r);
+-			if (r == 0x5aa5) {
+-				found = 1;
+-				break;
+-			}
+-		}
+-		if (found) {
+-			break;
+-		}
+-	}
+-	IOLog("VIVA PWRAP: sistrobe sample en %d ck %d ctrl 0x%x rdata 0x%x\n",
+-	    si_en_sel, si_ck_sel, si_sample_ctrl, r);
+-
+-	/* SI data-line delay sweep: find the write/read boundary */
+-	for (si_dly = 0; si_dly < 10; si_dly++) {
+-		wacs2NoChk(1, PMIC_RG_SPI_DLY_SEL, si_dly, NULL);
+-		found = 0;
+-		for (i = 0; i < 30; i++) {
+-			wacs2NoChk(1, PMIC_DEW_WRITE_TEST, test_data[i], NULL);
+-			wacs2NoChk(0, PMIC_DEW_WRITE_TEST, 0, &r);
+-			if ((r & 0x7fff) != (test_data[i] & 0x7fff)) {
+-				found = 1;
+-				break;
+-			}
+-		}
+-		if (found) {
+-			break;
++			lr = pmifNoChk(0, PMIC_DEW_READ_TEST, 0, &r);
+ 		}
++		IOLog("VIVA PWRAP: post-init read_test ret %d rdata 0x%x swinf2_sta 0x%08x "
++		    "pmic_vio 0x%x pmif_vio 0x%x mon_sta 0x%x\n", (int)lr, r,
++		    rd32(PMIF_SWINF2_STA), rd32(PMIF_PMIC_VIO0), rd32(PMIF_PMIF_VIO0),
++		    rd32(PMIF_MONITOR_STA));
+ 	}
+-	IOLog("VIVA PWRAP: sistrobe dly %d\n", si_dly);
+-
+-	si_sample_ctrl += 0x20;                       /* non-FPGA */
+-	wr32(PW_SI_SAMPLE_CTRL, si_sample_ctrl);
+-	if (si_dly == 10) {
+-		si_dly--;
+-	}
+-
+-	/* ULPOSC calibration (PMIC_WRAP_ULPOSC_CAL) */
+-	si_en_sel = (rd32(PW_SI_SAMPLE_CTRL) << 23) >> 29;
+-	si_ck_sel = (rd32(PW_SI_SAMPLE_CTRL) << 26) >> 31;
+-	clk_edge_no = (((si_en_sel * 2 + si_ck_sel) * 100) * 3846 / 3846 + 50) / 100;
+-	si_en_sel = clk_edge_no / 2;
+-	si_ck_sel = clk_edge_no % 2;
+-	si_sample_ctrl = (1 << 19) | (si_en_sel << 6) | (si_ck_sel << 5);
+-	wr32(PW_SI_SAMPLE_CTRL_ULPOSC, si_sample_ctrl);
+-	IOLog("VIVA PWRAP: sistrobe ulposc ctrl 0x%x\n", si_sample_ctrl);
+-
+-	/* read test */
+-	wacs2NoChk(0, PMIC_DEW_READ_TEST, 0, &r);
+-	IOLog("VIVA PWRAP: sistrobe read_test rdata 0x%x (want 5aa5)\n", r);
+-
+-	/* 8. _pwrap_wacs2_write_test(0) */
+-	wacs2NoChk(1, PMIC_DEW_WRITE_TEST, 0xa55a, NULL);
+-	wacs2NoChk(0, PMIC_DEW_WRITE_TEST, 0, &r);
+-	IOLog("VIVA PWRAP: wacs2 write_test rdata 0x%x (want a55a)\n", r);
+-
+-	/* 9. _pwrap_enable: full arbitration + all WACS channels */
+-	wr32(PW_HPRIO_ARB_EN, 0xfbb7f);
+-	wr32(PW_WACS0_EN, 1);
+-	wr32(PW_WACS1_EN, 1);
+-	wr32(PW_WACS2_EN, 1);
+-	wr32(PW_WACS3_EN, 1);
+-	wr32(PW_WACS_P2P_EN, 1);
+-	wr32(PW_WACS_MD32_EN, 1);
+-	wr32(PW_STAUPD_CTRL, 5);
+-	wr32(PW_WDT_CTRL, 0x3f);
+-	wr32(PW_WDT_SRC_EN_0, 0xffffffff);
+-	wr32(PW_WDT_SRC_EN_1, 0xffffffff);
+-	wr32(PW_TIMER_CTRL, 3);
+-	wr32(PW_INT0_EN, 0xffffffff);
+-	wr32(PW_INT1_EN, 0x1fff);
+-	IODelay(1000);
+-
+-	/* 10. Initialization Done */
+-	wr32(PW_INIT_DONE0, 1);
+-	wr32(PW_INIT_DONE1, 1);
+-	wr32(PW_INIT_DONE2, 1);
+-	wr32(PW_INIT_DONE3, 1);
+-	wr32(PW_INIT_DONE_P2P, 1);
+-	wr32(PW_INIT_DONE_MD32, 1);
+-	IODelay(1000);
+ 
+-	/* 11. _pwrap_lock_SPISLVReg: lock the PMIC SPI slave registers */
+-	wacs2NoChk(1, PMIC_SPISLV_KEY, 0, NULL);
++	/* 5. driver's Write Test: DEW_WRITE_TEST <- 0xa55a then read back. This is
++	 *    the probe's own pass/fail check - definitive proof the PMIC answered. */
++	pmifNoChk(1, PMIC_DEW_WRITE_TEST, 0xa55a, NULL);
++	pmifNoChk(0, PMIC_DEW_WRITE_TEST, 0, &r);
++	IOLog("VIVA PWRAP: pmif write_test rdata 0x%x (want a55a)\n", r);
+ 
+-	IOLog("VIVA PWRAP: athens init complete; wacs2_rdata 0x%x\n", rd32(PW_WACS2_RDATA));
++	IOLog("VIVA PWRAP: athens PMIF init complete; swinf2_sta 0x%08x\n", rd32(PMIF_SWINF2_STA));
+ }
+ 
+ IOReturn
+@@ -517,25 +419,8 @@
+ 	if (value == NULL || (addr & 1) || addr > 0xfffe) {
+ 		return kIOReturnBadArgument;
+ 	}
+-	uint32_t cmd = (addr >> 1) << 16;       /* bit 31 clear: a read */
+-	if (cmd & 0x80000000u) {
+-		return kIOReturnNotPermitted;
+-	}
+-	IOReturn ret = kIOReturnTimeout;
+-	IOLockLock(fLock);
+-	if (WACS_FSM(rd32(PWRAP_WACS2_RDATA)) == WACS_FSM_WFVLDCLR) {
+-		wr32(PWRAP_WACS2_VLDCLR, 1);    /* a previous read left it waiting */
+-	}
+-	if (waitFSM(WACS_FSM_IDLE)) {
+-		wr32(PWRAP_WACS2_CMD, cmd);
+-		if (waitFSM(WACS_FSM_WFVLDCLR)) {
+-			*value = rd32(PWRAP_WACS2_RDATA) & 0xffff;
+-			wr32(PWRAP_WACS2_VLDCLR, 1);
+-			ret = kIOReturnSuccess;
+-		}
+-	}
+-	IOLockUnlock(fLock);
+-	return ret;
++	/* PMIF read: SWINF_2_ACC=adr, wait WFVLDCLR, RDATA&0xffff, VLD_CLR=1. */
++	return pmifNoChk(0, addr, 0, value);
+ }
+ 
+ bool
+@@ -569,17 +454,8 @@
+ 		IOLog("VIVA PWRAP: refused PMIC write 0x%04x <- 0x%x\n", addr, value);
+ 		return kIOReturnNotPermitted;
+ 	}
+-	IOReturn ret = kIOReturnTimeout;
+-	IOLockLock(fLock);
+-	if (WACS_FSM(rd32(PWRAP_WACS2_RDATA)) == WACS_FSM_WFVLDCLR) {
+-		wr32(PWRAP_WACS2_VLDCLR, 1);
+-	}
+-	if (waitFSM(WACS_FSM_IDLE)) {
+-		wr32(PWRAP_WACS2_CMD, 0x80000000u | ((addr >> 1) << 16) | value);
+-		ret = kIOReturnSuccess;
+-	}
+-	IOLockUnlock(fLock);
+-	return ret;
++	/* PMIF write: SWINF_2_WDATA=value, SWINF_2_ACC=(1<<29)|addr. */
++	return pmifNoChk(1, addr, value, NULL);
+ }
+ 
+ /*
+@@ -638,16 +514,9 @@
+ 		return ret;
+ 	}
+ 	uint32_t v = (old & ~mask) | value;
+-	IOLockLock(fLock);
+-	ret = kIOReturnTimeout;
+-	if (WACS_FSM(rd32(PWRAP_WACS2_RDATA)) == WACS_FSM_WFVLDCLR) {
+-		wr32(PWRAP_WACS2_VLDCLR, 1);
+-	}
+-	if (waitFSM(WACS_FSM_IDLE)) {
+-		wr32(PWRAP_WACS2_CMD, 0x80000000u | ((addr >> 1) << 16) | (v & 0xffff));
+-		ret = waitFSM(WACS_FSM_IDLE) ? kIOReturnSuccess : kIOReturnTimeout;
+-	}
+-	IOLockUnlock(fLock);
++	/* PMIF write (pmifNoChk locks fLock itself): SWINF_2_WDATA=v,
++	 * SWINF_2_ACC=(1<<29)|addr. The readback readPMIC waits for FSM idle. */
++	ret = pmifNoChk(1, addr, v & 0xffff, NULL);
+ 	if (ret == kIOReturnSuccess && (readPMIC(addr, &now) != kIOReturnSuccess || (now & mask) != value)) {
+ 		ret = kIOReturnIOError;
+ 	}
+diff --git a/iokit/Kernel/arm/VivaPMIC.h b/iokit/Kernel/arm/VivaPMIC.h
+--- a/iokit/Kernel/arm/VivaPMIC.h
++++ b/iokit/Kernel/arm/VivaPMIC.h
+@@ -45,15 +45,20 @@
+ 	bool waitFSM(uint32_t fsm);
+ 	inline uint32_t rd32(uint32_t off) { return *(volatile uint32_t *)(fRegs + off); }
+ 	inline void wr32(uint32_t off, uint32_t v) { *(volatile uint32_t *)(fRegs + off) = v; }
+-	/* athens (MT6853) pwrap bring-up: raw WACS2 transaction + MMIO helpers. */
+-	IOReturn wacs2NoChk(uint32_t write, uint32_t addr, uint32_t wdata, uint32_t *rdata);
++	/* athens (MT6853) pwrap bring-up: PMIF/ARB_V3 SWINF_2 transaction + MMIO. */
++	bool waitPMIFFSM(uint32_t fsm);
++	IOReturn pmifNoChk(uint32_t write, uint32_t addr, uint32_t wdata, uint32_t *rdata);
+ 	void athensPwrapInit(void);
++	inline uint32_t spiRd(uint32_t off) { return fSpiRegs ? *(volatile uint32_t *)(fSpiRegs + off) : 0; }
++	inline void spiWr(uint32_t off, uint32_t v) { if (fSpiRegs) *(volatile uint32_t *)(fSpiRegs + off) = v; }
+ 	inline uint32_t infraRd(uint32_t off) { return *(volatile uint32_t *)(fInfraRegs + off); }
+ 	inline void infraWr(uint32_t off, uint32_t v) { *(volatile uint32_t *)(fInfraRegs + off) = v; }
+ 	inline uint32_t topRd(uint32_t off) { return *(volatile uint32_t *)(fTopRegs + off); }
+ 
+ 	IOMemoryMap *fMap;
+ 	vm_offset_t  fRegs;
++	IOMemoryMap *fSpiMap;
++	vm_offset_t  fSpiRegs;
+ 	IOMemoryMap *fInfraMap, *fTopMap;
+ 	vm_offset_t  fInfraRegs, fTopRegs;
+ 	IOLock      *fLock;

@@ -335,9 +335,12 @@ def athens_devices(ph, phandle, gic_ph, ecid):
         node('pwrap', [
             ph(),
             ('compatible', cstr('mediatek,mt6781-pwrap')),
-            # idx0 pwrap@10026000, idx1 infracfg_ao@10001000 (clock gates for
-            # the spi/wrap clocks + reset), idx2 topckgen@10000000 (ulposc mux).
-            ('reg', io(0x10026000, 0x1000) + io(0x10001000, 0x1000) + io(0x10000000, 0x1000)),
+            # MT6853 pwrap is ARB_V3/PMIF (drivers/soc/mediatek/mtk-pmic-wrap.c
+            # pwrap_mt6853): idx0 pwrap@10026000 (PMIF SWINF_2 regs), idx1
+            # spi_mst@10028000 (PMICSPI_MST_SPIWRAP_EN), idx2 infracfg_ao@10001000
+            # (spi/wrap clock gates + reset), idx3 topckgen@10000000 (ulposc mux).
+            ('reg', io(0x10026000, 0x1000) + io(0x10028000, 0x1000) +
+                    io(0x10001000, 0x1000) + io(0x10000000, 0x1000)),
         ], [node('pmic', [
             ph(),
             ('compatible', cstr('mediatek,mt6359-pmic')),

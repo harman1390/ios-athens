@@ -3,6 +3,47 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15i - gpu12 LOG: WACS2 genuinely dead -> ROOT CAUSE = WRONG PROTOCOL; patch 0188 re-ports to MT6853 PMIF/ARB_V3 <<<
+
+GPU12 RESULT (.tmp-patch/gpu12-tail.bin): init ran end-to-end but WACS2 read
+still timed out AFTER full config:
+  post-dio read_test ret -536870186 rdata 0x0 wrap_en 1 wacs2_en 1 dio_en 1
+  arb 0 ifrao2_sta 3000 -> "WACS2 cannot complete a transaction - bus dead"
+wrap_en/wacs2_en/dio_en all read back 1 (config writes DO stick), clocks on,
+but the SPI transaction never completes. => NOT a clock/config problem.
+
+ROOT CAUSE (100% confirmed vs exact-device drivers/soc/mediatek/mtk-pmic-wrap.c):
+MT6853 pwrap is ARB_V3/PMIF, NOT classic WACS2. pwrap_mt6853 uses mt6853_regs[]
+(PMIF_SPI_PMIF_* @ 0xC80+) + mt6853_regs1[] (spi_mst). mt6853_regs[] defines NO
+classic WRAP_EN/ARB_EN/WACS2_EN/INIT_DONE -> all classic pwrap_init writes land
+on offset 0 (PMIF_INIT_DONE); the PMIF engine is self-configuring. Slave
+pmic_mt6359 .caps=0 -> Android runs NO sidly/dual-io/security/slave-reset.
+Patch 0186/0187 ported the WRONG (mt6785 WACS2) protocol - that's why it died.
+
+CONFIRMED PMIF/ARB_V3 SPEC (mt6853_regs[], pwrap_read16/write16):
+  read:  SWINF_2_STA(0xca8) FSM=(x>>1)&7 idle -> SWINF_2_ACC(0xc80)=adr ->
+         wait FSM==WFVLDCLR(6) -> RDATA(0xc94)&0xffff -> VLD_CLR(0xca4)=1
+  write: SWINF_2_WDATA(0xc84)=wdata -> SWINF_2_ACC(0xc80)=(1<<29)|adr (no wait)
+  addr = raw 16-bit PMIC BYTE addr (dew_regs: DIO_EN=0x40c READ_TEST=0x40e
+  WRITE_TEST=0x410 RDDMY=0x424 SPISLV_KEY=0x44a; WRITE_TEST_VAL=0xa55a)
+  init:  clocks(ifrao2 spi/wrap) + spi_mst SPIWRAP_EN(spi_mst@0x10028000+0x14)
+         + PMIF_INIT_DONE(0x0)=1 + TIMER_CTRL(0x3e4)=3 + IRQ_EN3(0x450)|=0x180000
+  init-done status = SWINF_2_STA(0xca8) bit15 (PWRAP_STATE_INIT_DONE0_V3)
+  diag:  PMIC_ACC_VIO_INFO_0=0xf50, PMIF_ACC_VIO_INFO_0=0xf80, MONITOR_STA=0x4f4
+Clocks confirmed fine: ulposc is always-on root XO -> osc_d10 -> pwrap_ulposc_sel
+(mux default) -> fpwrap_ulposc_ck -> ifrao2 PMIC_TMR/PMIC_AP gates (enabled).
+
+PATCH 0188 (xnu/patches/0188-athens-pwrap-pmif-arbv3.patch) + mkadt.py 4-range
+reg [pwrap@10026000, spi_mst@10028000, infracfg@10001000, topckgen@10000000]:
+re-ports VivaPwrap to PMIF. readPMIC/writePMIC/writeRegulator/athensPwrapInit all
+use SWINF_2. Verified: patch applies clean to post-0187, reproduces work files.
+
+TEST: build gpu13 via CI (patches/** trigger), repack, flash, pull sweetlog.
+READ: post-init read_test ret + write_test rdata(0xa55a?) + swcid/hwcid. If
+write_test=0xa55a and IDs=0x59xx -> PMIC WORKS -> GPU power -> IOAcceleratorES.
+If read_test still times out -> check swinf2_sta FSM + pmic_vio/pmif_vio/mon_sta
+in log (MPU/firewall reject vs dead SPI master vs needs-more-init).
+
 ## >>> ATHENS HANDOFF 2026-11-15h - gpu12 BUILT: patch 0187 (fca3376, CI 43608274936) <<<
 
 CI 43608274936 SUCCESS. Kernel .tmp-patch/dl12/kernel.development.sweet
