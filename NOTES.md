@@ -2361,3 +2361,31 @@ NOT DONE / RISKS:
 - vsram_md DA_VOSEL is [14:8] of 0x1f32 (railsRead already >>8 &0x7f).
 - Userspace Metal (VivaMTLDriver.bundle) NOT built yet - needs iOS SDK;
   check ../viva-gpu CI for a macOS runner that can produce it.
+
+### 0182 KERNEL BUILT + BOOTED (2026-11-14)
+
+- CI run 43578171782 SUCCESS. Patch 0182 compiled clean (no errors).
+- Kernel: kout/0182/kernel.development.sweet (17.9 MB). Verified new
+  code in binary: 'clk_cfg_4' x2, 'mt6853-mali' x1, 'VIVA GPU' x27.
+- Boot image: shim/out/athens-boot-gpu.img (repacked with existing
+  shim Image.gz; clang absent on Windows so reused prior shim).
+  cmdline: ufs-rw + cpus=8 sweetlog=1 ufslogsecs=5 sweetfb_keep=1
+  vivagpu=2 vivagpufreq=390 (lowest OPP, safest first power-on).
+- fastboot boot -> device left fastboot, booting iOS now.
+- GPU power-on runs at boot (vivagpu=2 -> powerOn -> mfgOn rails+
+  MTCMOS+clock -> maliInit GPU_ID/softReset/powerCores/MMU -> publish).
+  Selftest is NOT automatic - needs 'gpu selftest' over USB link later.
+- EXPECTED SWEETLOG markers if HW port correct:
+  'VIVA GPU: driver started (vivagpu=2)', 'MFG0..MFG5 on',
+  'clock: 390 MHz, mfgpll con0/con1', 'GPU_ID 0x........',
+  'id 0x........ cores 0x........ l2 on',
+  'VIVA GPU: accelerator published (MetalPluginName VivaMTLDriver)'.
+- FAILURE markers to watch: 'no power ack', 'MFG power-up failed',
+  'GPU_ID 0x0: the GPU does not answer', 'shader cores not ready',
+  'reset did not complete', kernel panic.
+- USERSPACE ready: downloaded upstream CI artifact
+  viva-gpu-ios/VivaMTLDriver.bundle (15 MB arm64 iOS16 BNDL,
+  NSPrincipalClass VMDevice) -> ios/viva-gpu-artifacts/. Installs to
+  /System/Library/Extensions/ in rootfs (sweet-root-tweaks.py pattern);
+  mkuserdata.sh shows the exact target path. NOT yet injected - kernel
+  power-on must be proven first.
