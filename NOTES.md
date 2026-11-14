@@ -2730,3 +2730,51 @@ OPEN / NEXT
   AthensSPI.cpp; regenerated the 0183 AthensSPI hunk (now 2 hunks:
   include + diagnostic). Reverse-apply verified clean.
 - NEW BUILD: CI run 43588710370.
+
+## 2026-11-14 gpu6 boot PANICKED at FindBSDRoot/UFS ENOMEM -> carved-DMA fix (commit bc3c7bf)
+
+- gpu6 (CI 43588710370 = gpu5 kernel + AthensSPI whole-plane diagnostic)
+  flashed + booted. USER reported panic; the pulled SWEETLOG was STALE
+  (header totalbytes/flushseq byte-identical to gpu5 = 405815/22), i.e.
+  gpu6 wrote NOTHING to the log -> it died before the log writer init.
+- USER then captured the panic screen via adb. Decoded panic string:
+  "FindBSDRoot: SWEET UFS root ufsroot0 unavailable: 12
+  @IOKitBSDInit.cpp:778". This is the XNU root-device path, NOT a GPU or
+  stray-writer panic.
+- VERIFIED (source, errno.h:102 ENOMEM=12): sweet_ufs_rootdev ->
+  sweet_ufs_init. Enumerated EVERY return path: error 12 can ONLY come
+  from the DMA-buffer allocation (lines ~833/841). ufs_take_over_host,
+  ufs_find_partition/ufs_lookup_partition, ufs_scsi return only
+  ENXIO/ENOENT/EIO/ETIMEDOUT/EBUSY/EINVAL/EPERM - none is 12.
+- ROOT CAUSE (verified, not guessed): with --highmem XNU manages RAM ONLY
+  via /chosen dram-base/dram-size = the high bank 0x100000000+. There is
+  NO low-bank RAM and NO reserved-memory node. So the kmem_alloc_contig
+  fallback ml_io_map(0x4e000000) maps a physical address BELOW every DRAM
+  bank XNU declares -> not valid RAM -> returns NULL -> ENOMEM. The
+  fallback is effectively DEAD under highmem; every boot depends solely on
+  kmem_alloc_contig finding ~64 contiguous pages in the high bank.
+  gpu5 found them; gpu6 did not -> panic. (833 vs 841 sub-case not
+  distinguished - no fresh log - but both are the same DMA-alloc failure.)
+- NOTE: the "going backwards" feel = this panic is at root-mount, an
+  EARLIER stage than gpu5's userspace reach. Whether the AthensSPI
+  diagnostic contributed to memory pressure is UNPROVEN; the carve makes
+  UFS immune to allocator state regardless, and the diagnostic is kept
+  (it runs before FindBSDRoot and now cannot affect the carved DMA).
+- FIX (commit bc3c7bf), two parts, both fact-based:
+  * tools/mkadt.py: carve a dedicated 2 MiB UFS DMA region just below the
+    panic-log carve (UFS_DMA_SIZE=0x200000), 64 KiB-aligned, shrink
+    mem_size so the page allocator never hands it out, expose physical
+    address as /sweet-ufs dma-phys. Verified: ufs_dma=[0x1bfcf0000,
+    0x1bfef0000), panic=[0x1bfeff000,0x1bffff000), no overlap, inside DRAM
+    top 0x1bffff000, dramc-rk1 untouched, dram-size=0xbfcf0000.
+  * xnu/patches/0184-athens-ufs-carved-dma.patch: sweet_ufs_init reads
+    dma-phys and ml_io_map()s it directly when present, bypassing
+    kmem_alloc_contig -> removes BOTH ENOMEM paths deterministically.
+    dma-phys absent on viva/qemu -> old kmem_alloc_contig+fallback kept.
+  * Patch validated (check_patch_counts OK), generated from post-0183
+    baseline (logs/xnu-src confirmed post-0183: has 0183 diag + 0177
+    pollcap). Reverse-apply verified.
+- NEW BUILD: CI run 43591977976 (push-triggered on xnu/patches/**).
+- STILL OPEN: GPU match (0183 diag still in this build - will finally
+  report whether mali nub exists once UFS mounts); touch reset 0x00;
+  stray-writer panic; VivaMTLDriver.bundle staged.
