@@ -1,0 +1,63 @@
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -170,7 +170,7 @@
+     "   {"
+     "     'IOClass'         = VivaGPUAccelerator;"
+     "     'IOProviderClass' = IOPlatformDevice;"
+-    "     'IONameMatch'     = 'mediatek,mt6853-mali';"
++    "     'IONameMatch'     = 'mediatek,mali';"
+     "   },"
+     "   {"
+     "     'IOClass'         = SweetHIDButtons;"
+diff --git a/iokit/Kernel/arm/VivaGPU.cpp b/iokit/Kernel/arm/VivaGPU.cpp
+--- a/iokit/Kernel/arm/VivaGPU.cpp
++++ b/iokit/Kernel/arm/VivaGPU.cpp
+@@ -906,6 +906,7 @@
+ VivaGPUAccelerator::start(IOService *provider)
+ {
+ 	int mode = 0;
++	IOLog("VIVA GPU: start() entered, provider %s\n", provider ? provider->getName() : "null");
+ 	if (!PE_parse_boot_argn("vivagpu", &mode, sizeof(mode)) || mode <= 0) {
+ 		IOLog("VIVA GPU: off (boot-arg vivagpu=1 for bring-up, 2 to power at boot and publish)\n");
+ 		return false;
+@@ -955,8 +956,10 @@
+ 	fFastLock = IOSimpleLockAlloc();
+ 	fCallLock = IOSimpleLockAlloc();
+ 	fWorkLoop = IOWorkLoop::workLoop();
+-	if (fWorkLoop == NULL || fProbeLock == NULL || fFastLock == NULL || fCallLock == NULL ||
+-	    !IOAcceleratorES::start(provider)) {
++	bool accelOk = IOAcceleratorES::start(provider);
++	if (fWorkLoop == NULL || fProbeLock == NULL || fFastLock == NULL || fCallLock == NULL || !accelOk) {
++		IOLog("VIVA GPU: start bail workloop=%p probe=%p fast=%p call=%p accelStart=%d\n", fWorkLoop,
++		    fProbeLock, fFastLock, fCallLock, accelOk);
+ 		return false;
+ 	}
+ 	for (int i = 0; i < 6; i++) {
+@@ -986,6 +989,7 @@
+ 	};
+ 	if (fGate == NULL || fTimer == NULL || fDvfsTimer == NULL || fWorkLoop->addEventSource(fGate) != kIOReturnSuccess ||
+ 	    fWorkLoop->addEventSource(fTimer) != kIOReturnSuccess || fWorkLoop->addEventSource(fDvfsTimer) != kIOReturnSuccess) {
++		IOLog("VIVA GPU: start bail gate=%p timer=%p dvfs=%p\n", fGate, fTimer, fDvfsTimer);
+ 		return false;
+ 	}
+ 	for (int i = 0; i < 3; i++) {
+diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -1601,8 +1601,15 @@
+ 	nub = new IOPlatformDevice;
+ 	if (nub) {
+ 		if (!nub->init( from, gIODTPlane )) {
++			const char *dbgName = from ? from->getName() : "?";
++			if (dbgName && (strstr(dbgName, "gpu") || strstr(dbgName, "mali")))
++				IOLog("SWEET NUB: init FAILED for %s\n", dbgName);
+ 			nub->free();
+ 			nub = NULL;
++		} else {
++			const char *dbgName = from ? from->getName() : "?";
++			if (dbgName && (strstr(dbgName, "gpu") || strstr(dbgName, "mali")))
++				IOLog("SWEET NUB: created %s\n", dbgName);
+ 		}
+ 	}
+ 	return nub;

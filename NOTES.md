@@ -2389,3 +2389,38 @@ NOT DONE / RISKS:
   /System/Library/Extensions/ in rootfs (sweet-root-tweaks.py pattern);
   mkuserdata.sh shows the exact target path. NOT yet injected - kernel
   power-on must be proven first.
+
+## 2026-11-14 GPU boot test RESULT: driver never matched (frozen logo)
+
+- Booted shim/out/athens-boot-gpu.img (vivagpu=2, vivagpufreq=390,
+  sweetlog=1, sweetfb_keep=1). Device showed FROZEN APPLE LOGO.
+- Pulled SWEETLOG (sdc59 skip=13048823 count=1025 -> gpu-log.bin/txt,
+  405 KB total, ring NOT wrapped - all boot msgs present).
+- FINDING: ZERO 'VIVA GPU' bytes in raw log. Other Viva drivers logged
+  fine (VIVA KP/GPIO/I2C/PWRAP/EINT). backboardd IOAcceleratorES
+  matching -> 0 found. => VivaGPUAccelerator::start() NEVER RAN = no
+  match. NOT a power-on fault - the driver never got that far.
+- VERIFIED all match layers correct: ADT gpu node present
+  (compatible+6reg+5irq), KCT IONameMatch entry in kernel binary,
+  driver class compiled, createNubs makes IOPlatformDevice for every
+  arm-io child, compareName checks compatible (exact match).
+- CONFIRMED-DATA fix (real RMX2117 mt6853.dts, NOT guesses):
+  real node is mali@13000000 compatible="mediatek,mali","arm,mali-valhall"
+  reg=<0 0x13000000 0 0x4000> (ONE region; MFG blocks are SEPARATE nodes:
+  mfgcfg_clk@13fbf000, sleep/scpsys@10006000, topckgen@10000000,
+  apmixed@1000c000, infracfg_ao@10001000). Driver still needs all 6 reg
+  regions via mapDeviceMemoryWithIndex(0..5) so kept consolidated.
+  All 6 bases VERIFIED vs real DT. Interrupts SPI 364-368 = GPU/MMU/JOB/
+  EVENT/PWR confirmed; spi()=32+n is CORRECT (SweetGIC FIRST_SPI=32).
+- Changed mkadt.py node 'gpu'->'mali', compatible->'mediatek,mali';
+  KCT IONameMatch->'mediatek,mali'. (Cosmetic/faithful - NOT expected to
+  be the match fix since old string was also self-consistent.)
+- ADDED DIAGNOSTICS (patch 0183) to localize non-match:
+  * IOPlatformExpert::createNub logs 'SWEET NUB: created/FAILED mali'
+    (nub creation / init failure)
+  * VivaGPU::start() logs 'start() entered' + instrumented the two
+    previously-SILENT bail paths (workloop/locks/accelStart, gate/timer).
+- NEXT: rebuild -> boot -> pull log. Outcomes: 'SWEET NUB created mali'
+  + no 'start() entered' = match failure; 'init FAILED' = nub init;
+  'start() entered'+bail = specific start failure; 'start() entered'+
+  'driver started' = GPU powers on (then watch MFG/GPU_ID markers).

@@ -422,9 +422,9 @@ def athens_devices(ph, phandle, gic_ph, ecid):
         # MT6781: mfgcfg 0x13fbf000, SPM/scpsys 0x10006000, topckgen
         # 0x10000000, apmixed 0x1000c000, infracfg_ao 0x10001000 (MEASURE
         # infracfg on live FDT; MFG domains here are mfg0,1,2,3,5).
-        node('gpu', [
+        node('mali', [
             ph(),
-            ('compatible', cstr('mediatek,mt6853-mali')),
+            ('compatible', cstr('mediatek,mali')),
             ('reg', u64(0x13000000 - SOC_BASE, 0x4000, 0x13fbf000 - SOC_BASE, 0x1000,
                         0x10006000 - SOC_BASE, 0x1000, 0x10000000 - SOC_BASE, 0x1000,
                         0x1000c000 - SOC_BASE, 0x1000, 0x10001000 - SOC_BASE, 0x1000)),
