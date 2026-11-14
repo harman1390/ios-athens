@@ -1,14 +1,19 @@
 --- a/bsd/sweet_hfs/core/hfs_vnops.c
 +++ b/bsd/sweet_hfs/core/hfs_vnops.c
-@@ -6410,6 +6410,7 @@
+@@ -6410,8 +6410,12 @@
  	u_int32_t gnv_flags = 0;
  	int protectable_target = 0;
  	int nocache = 0;
 +	int mkstep = 0;
  	vnode_t old_doc_vp = NULL;
  
++	{ static int en; if (en < 1024) { en++; printf("hfs_makenode ENTER name=%.*s\n",
++	    (int)cnp->cn_namelen, cnp->cn_nameptr); } }
++
  #if CONFIG_PROTECT
-@@ -6470,6 +6471,7 @@
+ 	struct cprotect *entry = NULL;
+ 	int32_t cp_class = -1;
+@@ -6470,6 +6474,7 @@
  	/* Check if were out of usable disk space. */
  	if ((hfs_freeblks(hfsmp, 1) == 0) && (vfs_context_suser(ctx) != 0)) {
  		error = ENOSPC;
@@ -16,7 +21,7 @@
  		goto exit;
  	}
  
-@@ -6550,6 +6552,7 @@
+@@ -6550,6 +6555,7 @@
     	if (hfsmp->hfs_flags & HFS_QUOTAS) {
  		if ((error = hfs_quotacheck(hfsmp, 1, attr.ca_uid, attr.ca_gid,
  									vfs_context_ucred(ctx)))) {
@@ -24,7 +29,7 @@
  			goto exit;
  		}
  	}	
-@@ -6585,12 +6588,14 @@
+@@ -6585,12 +6591,14 @@
  	 */
  	if ((protected_mount) && (protectable_target)) {
  		error = cp_setup_newentry(hfsmp, dcp, cp_class, attr.ca_mode, &entry);
@@ -39,7 +44,7 @@
  	if ((error = hfs_start_transaction(hfsmp)) != 0) {
  	    goto exit;
  	}
-@@ -6603,16 +6608,19 @@
+@@ -6603,16 +6611,19 @@
  	cnid_t new_id;
  
  	/* Reserve some space in the Catalog file. */
@@ -59,7 +64,7 @@
  	error = cat_create(hfsmp, new_id, &in_desc, &attr, &out_desc);
  	if (error == 0) {
  		/* Update the parent directory */
-@@ -6639,6 +6647,7 @@
+@@ -6639,6 +6650,7 @@
  		 * at this point.
  		 */
  		if ((attr.ca_fileid != 0) && (protected_mount) && (protectable_target)) {
@@ -67,7 +72,7 @@
  			error = cp_setxattr (NULL, entry, hfsmp, attr.ca_fileid, XATTR_CREATE);
  			
  			if (error) {
-@@ -6730,6 +6739,7 @@
+@@ -6730,6 +6742,7 @@
  	 */
  	error = hfs_getnewvnode(hfsmp, dvp, cnp, &out_desc, gnv_flags, &attr, 
  							NULL, &tvp, &newvnode_flags);
@@ -75,7 +80,7 @@
  	if (error)
  		goto exit;
  
-@@ -6823,6 +6833,7 @@
+@@ -6823,6 +6836,7 @@
  			panic ("hfs_makenode: no cpentry for cnode (%p)", cp);
  		}
  
@@ -83,7 +88,7 @@
  		error = cp_generate_keys (hfsmp, cp, CP_CLASS(cp->c_cpentry->cp_pclass), keywrap_flags, &keyed_entry);
  		if (error == 0) {
  			/* 
-@@ -6892,6 +6903,16 @@
+@@ -6892,6 +6906,16 @@
  exit:
  	cat_releasedesc(&out_desc);
  	
@@ -120,7 +125,27 @@
  		return EIO; 
  	}
  
-@@ -1033,6 +1037,7 @@
+@@ -999,7 +1003,7 @@
+ 	if (descp != NULL) {
+ 		HFSPlusCatalogKey * pluskey = NULL;
+ 		pluskey = (HFSPlusCatalogKey *)&iterator->key;
+-	
++
+ 		builddesc(pluskey, cnid, hint, encoding, isadir(recp), descp);
+ 	}
+ 
+@@ -1010,6 +1014,10 @@
+ 	hfs_free_type(iterator, struct BTreeIterator);
+ 	hfs_free_type(recp, CatalogRecord);
+ 
++	{ static int lk; int merr = MacToVFSError(result);
++	  if (lk < 512 && result != 0 && result != btNotFound) { lk++;
++	    printf("cat_lookupbykey ERR result=%d errno=%d parent=%u\n",
++	        result, merr, keyp->hfsPlus.parentID); } }
+ 	return MacToVFSError(result);
+ }
+ 
+@@ -1033,6 +1041,7 @@
  	FSBufferDescriptor btdata;
  	u_int32_t datalen;
  	int result = 0;
@@ -128,7 +153,7 @@
  	u_int32_t encoding = kTextEncodingMacRoman;
  	int modeformat;
  
-@@ -1046,6 +1051,7 @@
+@@ -1046,6 +1055,7 @@
  	bto = hfs_malloc_type(struct btobj);
  	bto->iterator.hint.nodeNum = 0;
  
@@ -136,7 +161,7 @@
  	result = buildkey(hfsmp, descp, &bto->key, 0);
  	if (result)
  		goto exit;
-@@ -1064,6 +1070,7 @@
+@@ -1064,6 +1074,7 @@
  		 *  3) There are no thread or catalog records for this ID 
  		 */		 
  	buildthreadkey(new_fileid, (CatalogKey *) &bto->iterator.key);
@@ -144,7 +169,7 @@
  	result = BTInsertRecord(fcb, &bto->iterator, &btdata, datalen);
  	if (result) {
  		goto exit;
-@@ -1079,6 +1086,7 @@
+@@ -1079,6 +1090,7 @@
  	
  	bcopy(&bto->key, &bto->iterator.key, sizeof(bto->key));
  
@@ -152,7 +177,7 @@
  	result = BTInsertRecord(fcb, &bto->iterator, &btdata, datalen);
  	if (result) {
  		if (result == btExists)
-@@ -1112,6 +1120,11 @@
+@@ -1112,6 +1124,11 @@
  	(void) BTFlushPath(fcb);
  	hfs_free_type(bto, struct btobj);
  
@@ -164,3 +189,21 @@
  	return MacToVFSError(result);
  }
  
+--- a/bsd/sweet_hfs/core/hfs_vfsutils.c
++++ b/bsd/sweet_hfs/core/hfs_vfsutils.c
+@@ -2114,6 +2114,7 @@
+ 		return EOVERFLOW;
+ 	
+ 	case btBadNode:			/* -32731 */
++		{ static int m2v; if (m2v < 512) { m2v++; printf("MacToVFSError EIO btBadNode err=%d\n", (int)err); } }
+ 		return EIO;
+ 	
+ 	case memFullErr:		/*  -108 */
+@@ -2147,6 +2148,7 @@
+ 		return ENXIO;
+ 
+ 	default:
++		{ static int m2vd; if (m2vd < 512) { m2vd++; printf("MacToVFSError EIO default err=%d\n", (int)err); } }
+ 		return EIO;		/*   +5 */
+ 	}
+ }

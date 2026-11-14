@@ -3,6 +3,47 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15u - DIAG 9b2603c RESULT: ZERO hfs_makenode prints on live storm => EIO is UPSTREAM of create (lookup/VFS); patch 0196 extended to cover lookup+MacToVFSError <<<
+
+BOOT RESULT (athens-boot-0196.img, run 43642300303 / 9b2603c, userdata=varfix):
+- boot-args CONFIRMED correct kernel: `... cpus=8 sweetlog=1 sweetfb_hz=0
+  vivagpu=2 vivagpufreq=390 ufslogsecs=5`. Root = `/dev/ufsroot0 on / (hfs,
+  journaled)`.
+- Apple logo DISAPPEARED -> black screen (<1min). NOT a fix — diag-only build.
+  Likely backboardd took over display but no UI renders (crash storm continues).
+- Crash storm UNCHANGED: 500 CRASH lines (tccd 320, mobileactivation/dmd/
+  assistantd/ScreenTimeAgent 36, fitnesscoachingd 32, driverkitd 4). No panic.
+- **DECISIVE: ZERO `hfs_makenode ERR`, `cat_create`, `cat_acquire_cnid` prints.**
+  hfs_makenode IS the shared create/mkdir/mknod helper (vnop_create:217,
+  vnop_mkdir:5516). On an active storm it printed NOTHING => either creates
+  never reach it, or they succeed and EIO is elsewhere.
+- ns2=OS_REASON_SIGNAL (reason.h:89); code 0x5/0x6 are signal subcodes NOT
+  confirmed errno. sweetscan/sweetnull were OFF this boot => no userspace
+  error strings captured (diagnostic gap).
+
+REVISED HYPOTHESIS (evidence-based): EIO is in the LOOKUP/path-resolution
+layer, not create. `mkpath_np`/`stat` on a missing component should return
+ENOENT; if `cat_lookupbykey`->`BTSearchRecord`->`MacToVFSError` returns EIO
+instead, mkpath aborts BEFORE mkdir => hfs_makenode never runs => zero prints.
+`cat_lookupbykey` (hfs_catalog.c:~780) is called by EVERY named op
+(stat/open/lookup/path-walk) and had NO instrumentation = the coverage hole.
+
+PATCH 0196 EXTENDED (still diagnostic, now 3 files, 209 lines):
+- hfs_vnops.c hfs_makenode: + ENTER print (name=, rate 1024) -> is create
+  reached? keeps mkstep + ERR prints.
+- hfs_catalog.c cat_lookupbykey: + ERR print (raw result + mapped errno +
+  parent cnid, rate 512, skips clean btNotFound misses).
+- hfs_vfsutils.c MacToVFSError: + EIO prints at btBadNode + default arms
+  (raw err code, rate 512) -> UNIVERSAL catalog-Btree->EIO net, catches
+  lookup+create+insert+everything.
+Validated: patch -p1 applies clean vs bt-art, output == diag copies.
+NEXT BUILD will definitively localize: if MacToVFSError/cat_lookupbykey ERR
+fire => catalog B-tree lookup is the EIO source (see raw code); if hfs_makenode
+ERR fires => create path after all; if NONE fire but storm continues => EIO is
+NOT catalog (journal/extents/vnode/VFS/non-HFS) -> pivot.
+
+## >>> ATHENS HANDOFF 2026-11-15t - DIAG KERNEL 9b2603c BUILT+FLASHED (athens-boot-0196.img); booting to capture hfs_makenode EIO stage <<<
+
 ## >>> ATHENS HANDOFF 2026-11-15s - EIO ROOT CAUSE NARROWED TO HFS CATALOG/BTREE (cprotect RULED OUT); patch 0196 instruments makenode+catalog raw errors <<<
 
 VARFIX BOOT RESULT (ios16-root-varfix.simg, complete via dd tail): STILL Apple
