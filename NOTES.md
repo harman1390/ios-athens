@@ -3,7 +3,54 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
-## >>> ATHENS HANDOFF 2026-11-15l - gpu13 SCREEN = APPLE LOGO ONLY; scan-out gap isolated; patch 0189 FBSTAT diag <<<
+## >>> ATHENS HANDOFF 2026-11-15m - TOUCH noflash fix (patch 0190) + gpu14 build FLAKED on conf; both pushed together <<<
+
+GPU14 BUILD FAILED BUT NOT THE CODE: CI run 43614429894 (commit dcc3ab0 =
+patch 0189 FBSTAT) failed at `make[3]: build_all_recurse_into_conf Error 2` -
+the iokit CONF/config-header generation step, which runs BEFORE any arm driver
+compiles. Patch 0189 only touches iokit/Kernel/arm/SweetFramebuffer.cpp, so it
+CANNOT have caused a conf failure; gpu13 (891f05e) built the identical conf
+step fine => TRANSIENT/FLAKY parallel-build failure, not a regression. No
+clang `file:line:col: error:` anywhere in the log (only tolerated patch-skip
+warnings). Just re-run.
+
+TOUCH ROOT CAUSE (confirmed vs vendor nt36xxx_* sources):
+  Panel = oppo,tp_noflash / nf_nt36672c JDI = NO-FLASH => hw_crc=0, fw loads to
+  small internal SRAM (0x0-0x2B4A8). Driver DEFAULTED to nt36672a (hw_crc=1
+  FLASH map) because trim-ID read returned an unrecognised ID -> took the
+  hardware-CRC download path (writes BLD CRC regs 0x3F1xx that don't exist on a
+  noflash chip) -> firmware never booted -> "reset state timeout (last 0x00)".
+  Firmware blob itself is CORRECT (built-in == installed == research, all
+  139264 B byte-identical). SPI write protocol verified byte-for-byte vs vendor.
+
+PATCH 0190 (0190-athens-nt36672c-noflash.patch) - faithful noflash port:
+  - Full vendor memory maps (nt36xxx_mem_map.h): MAP_672A/6772/6525/6676F/6526/
+    6675; MAP_NF aliases MAP_6525 (hw_crc=0). Default map now noflash.
+  - trim_id_table ported 1:1 (was an incomplete subset) -> correct map on match.
+  - engReset() (0x5A->0x7FFF80) added; start() does vendor order eng_reset->
+    resx high->10ms->trim; fwDownload pulses TP_RESX around eng_reset per retry.
+  - bootReady() already wrote POR_CD=0xA0 for hw_crc=0 (verified correct).
+  - discoverEventBuf(): noflash maps disagree on EVENT_BUF (0x11A00 vs 0x11E00);
+    download is map-independent so fw can boot on the "wrong" page -> probe
+    sibling pages for RESET_COMPLETE before declaring failure.
+  - chipTrim logs RAW 6 ID bytes ("trim raw swrst 0x.. id ..") so a real boot
+    shows the actual chip ID even if no table entry matches.
+  - set_bld_hw_crc length now 3B for hw_crc==1, 4B for hw_crc>1 (was always 3B).
+  - fSwrst resynced to selected map after trim (was left at last-tried candidate).
+  - fMapStore mutable copy so runtime event_buf discovery is safe.
+  Verified: applies CLEAN to post-0180 baseline (GNU patch), reproduces work
+  file byte-exact (29849 B), pure LF + UTF-8 (em-dash preserved). Found+fixed 2
+  self-inflicted compile bugs pre-commit (stray dup `bool`, broken \n escape).
+  Brace/paren/bracket balance 0, no unterminated strings, all 15-field map
+  inits match struct, all constants/helpers defined. Local compile NOT possible
+  on Windows (xnu-cc.py needs macOS clang+buildtree) -> CI is the compiler.
+
+NEXT BUILD tests BOTH 0189 (SWEET FBSTAT -> display scan-out gap) AND 0190
+(touch noflash) in one run. On device expect: "trim raw swrst .. id .." then
+"trim id -> <map>" then "firmware download ok" then touch reports. If trim
+still unrecognised, the raw ID bytes tell us the real chip -> extend table.
+
+=== prior handoff 2026-11-15l - gpu13 SCREEN = APPLE LOGO ONLY; scan-out gap isolated; patch 0189 FBSTAT diag ===
 
 USER SAW: Apple logo ONLY, no GUI. Log proves backboardd+SpringBoard ALIVE
 (routine "SMP --- sample 39" spindump thread dumps, NOT a crash) and GUI

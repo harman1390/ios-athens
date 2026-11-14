@@ -1,6 +1,19 @@
 # RMX2117 (Athens) Touch — Reversed Engineering from PitchBlack TWRP
 
-Status: **driver implemented (`xnu/patches/0180-*.patch`) — build + on-device test pending**
+Status: **driver implemented (`0180`) + noflash fix (`0190`) — on-device test pending**
+
+> **2026-11-15 update — root cause CONFIRMED + fixed in `0190`:** gpu13 showed
+> `reset state timeout (last 0x00)` -> `firmware download failed`. The chip is
+> `oppo,tp_noflash`/`nf_nt36672c` JDI = **noflash `hw_crc=0`** (fw→internal SRAM
+> 0x0–0x2B4A8), but `0180` defaulted to the `nt36672a` **flash `hw_crc=1`** map on
+> an unrecognised trim ID → it ran the hardware-CRC download path (writes
+> `0x3F1xx` BLD-CRC regs that don't exist on noflash) → fw never booted. The fw
+> blob itself is correct (built-in == installed == research, all 139264 B).
+> `0190` ports the full vendor `nt36xxx_mem_map.h` maps + `trim_id_table`
+> 1:1, defaults to noflash, adds `eng_reset` + TP_RESX pulse, `POR_CD=0xA0`,
+> `EVENT_BUF` auto-discovery (`0x11A00` vs `0x11E00`), `hw_crc>1` length fix,
+> and logs the **raw 6 trim-ID bytes** so the real chip ID is captured even on
+> a marginal read. Awaiting build+boot to confirm `firmware download ok`.
 
 ## Verified live hardware (from running PitchBlack recovery)
 
@@ -76,7 +89,11 @@ Driver config (from `mt_chip_conf`): cpol=0 cpha=0, MSB first, `high_time=low_ti
 
 ### Remaining verification gaps
 - **Clock mux/gate values** — `spi_sel`/gate bits from `clk-mt6853.c`, never live-read. First suspect if SPI4 doesn't answer.
-- **`nf`-driver deltas** — the exact noflash driver isn't public; if the trim/map/protocol diverges from generic `nt36xxx`, the trim read will report it in the boot log.
+- ~~**`nf`-driver deltas**~~ — RESOLVED by `0190`: the divergence was real —
+  the chip IS the noflash family (`hw_crc=0`) but `0180` fell back to the
+  `nt36672a` flash map (`hw_crc=1`) on an unrecognised trim ID. `0190` ports
+  the complete vendor trim table + maps and defaults to noflash; raw trim-ID
+  bytes are now logged so any residual ID mismatch is diagnosable.
 - **Nav buttons** — `touchpanel,button-type=4` in the board dtsi; report bytes 61-62 (`0xF8` flag) not implemented (`TOUCH_KEY_NUM=0` upstream too).
 
 ## Sources

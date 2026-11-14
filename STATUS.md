@@ -176,7 +176,7 @@ LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
 |---|---|---|
 | Framebuffer console | ✅ | LK fb 0x77e20000 1080×2400 stride 4352 (ARBG) — panic UI renders |
 | IOMobileFramebuffer / CoreAnimation | ⬜ | ios-sweet upstream has the full software-render stack to adapt |
-| Touch | ❌ blocked | gpu13: `ATHENS TOUCH: nt36672c_jdi.bin not found -> built-in fw -> reset state timeout (last 0x00) -> firmware download failed` + `VIVA I2C: unsupported clocks (source 0 Hz, speed 400000)`. Driver binds (spi4 node present) but controller never leaves reset — needs fw blob in rootfs AND/OR SPI reset + I2C clock fix. See docs/ATHENS-TOUCH.md |
+| Touch | ❌ root cause found, fix pending build | gpu13: `nt36672c_jdi.bin not found -> built-in fw -> reset state timeout (last 0x00) -> firmware download failed`. CONFIRMED chip = `oppo,tp_noflash`/`nf_nt36672c` JDI = **noflash hw_crc=0**, but driver defaulted to nt36672a flash map (hw_crc=1) -> wrong BLD-CRC download path -> fw never boots. fw blob itself is correct (all 3 copies byte-identical 139264B). **Patch 0190** = faithful noflash port (full vendor trim table+maps, eng_reset, POR_CD, event_buf 0x11A00/0x11E00 auto-discover, raw trim-ID log). Awaiting build. See docs/ATHENS-TOUCH.md |
 | Keys (PWR/VOL) | ✅ working (see Buttons row) | PWRKEY/HOMEKEY=MT6359 PMIC keys (EINT118) confirmed delivering HID events on gpu13; vol-down=EINT80 GPIO key untested |
 | Battery/charger | ⬜ | MT6359 FGADC + MT6360 |
 | Wi‑Fi/BT | ⬜ | on-die CONNSYS_6853 connac2x2 (wifi@0x18000000 SPI377, consys@0x18002000, btif@0x1100c000 — stock mt6853.dtb) — viva's connac driver/registry work is the reference to adapt |
