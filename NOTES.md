@@ -2719,3 +2719,14 @@ OPEN / NEXT
 - NEW BUILD: CI run 43587874869.
 - STILL OPEN: GPU match; touch reset-state 0x00; stray-writer panic;
   VivaMTLDriver.bundle staged.
+
+## 2026-11-14 build 43587874869 FAILED -> fixed gIODTPlane include -> 43588710370
+
+- 43587874869 compile FAILED: AthensSPI.cpp:172,178 'use of undeclared
+  identifier gIODTPlane'. gIOServicePlane comes via IOService.h but
+  gIODTPlane is declared in IOKit/IODeviceTreeSupport.h (VivaBattery.cpp
+  includes it). NOT a logic bug - missing include only.
+- FIX (commit 1b7a9eb): added #include <IOKit/IODeviceTreeSupport.h> to
+  AthensSPI.cpp; regenerated the 0183 AthensSPI hunk (now 2 hunks:
+  include + diagnostic). Reverse-apply verified clean.
+- NEW BUILD: CI run 43588710370.
