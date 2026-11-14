@@ -2812,3 +2812,42 @@ OPEN / NEXT
   other files). logs/xnu-src is git-ignored reference only; the PATCH is
   the source of truth for builds. Future patches touching sweet_ufs.c
   MUST be generated against the dxb buildtree, not logs/xnu-src.
+
+## 2026-11-14 gpu8 carved-DMA HUNG -> reverted; real fix is CAP_64AS alloc (commit 1d61e5c)
+
+- gpu8 (carved DMA 0x1bfcf0000) did NOT panic - it HUNG. Screen looped
+  "rootvnode is not set" + ATHENS TOUCH fw retry. NO sweetlog was written
+  (verified: correct tail offset has only STALE gpu5 data).
+- FIRST pulled the WRONG window: skip=13042688 read ~28MiB before the
+  tail. sdc59=userdata has 13049848 4K-blocks; correct tail skip=13045752.
+  gpu8-tail.bin then showed SWEETLOG@12578816 + 6x SWEETPAN - but the
+  SWEETLOG header total=405815 seq=22 is byte-identical to gpu5 = STALE.
+  gpu8 wrote nothing -> hung BEFORE sweetlog_start (su.ready never set).
+- gpu5 console (gpu8-console.txt, the stale log) is the ROSETTA STONE:
+    "SWEET UFS: host cap 0x3587071f, DMA at 0x103f28000"
+    "SWEET UFS: userdata on LUN 2 ... read-write, DMA at 0x103f28000"
+    "hfs: mounted iOSRoot on device b(1,0)"  -> reached USERSPACE.
+  0x103f28000 is ~63MiB into the high bank AND >4GiB -> proves (a) UFS host
+  does 64-bit DMA and (b) gpu5's kernel had CAP_64AS max_pnum=0, NOT dxb's
+  <4GiB hardcode. ANSWERS the open question above: gpu5 was built with the
+  CAP_64AS path (0177 applied), dxb builds skip 0177 -> <4GiB -> ENOMEM.
+- WHY the carve hung: 0x1bfcf0000 is ~6.95GiB (top of bank). ufs_take_over
+  _host writes it to REG_UTRLBA/UTRLBAU; host accepted it but DMA never
+  completed -> ufs_scsi polled forever -> sweet_ufs_init never returned.
+  logs/xnu-src documents the SAME failure for an earlier 0xfd000000 carve
+  (inside dram_r1 scribble range). Fixed carves outside managed RAM are
+  unreliable for UFS DMA; managed-pool pages (kmem_alloc_contig) are the
+  proven path.
+- FIX (commit 1d61e5c): patch 0184 REGENERATED as 0184-athens-ufs-cap64as-
+  dma.patch - ports the authoritative logs/xnu-src alloc block into dxb:
+    max_pnum = (ufs_rd(REG_CAP)&CAP_64AS) ? 0 : <4GiB   (CAP read after
+    ml_io_map; REG_CAP/CAP_64AS/ufs_rd all present in dxb)
+    + ufsdma boot-arg/0x4e000000 fixed low-bank fallback if kmem fails.
+  mkadt.py REVERTED: UFS_DMA_SIZE carve + dma-phys prop removed, dram-size
+  back to panic-only carve. logs/xnu-src dma-phys carve block removed to
+  match. git apply --check OK vs dxb buildtree.
+- NEW BUILD: CI run 43596846980.
+- VERIFY NEXT BOOT: sweetlog should show "SWEET UFS: host cap ... DMA at
+  0x1..." (a managed-pool addr, NOT 0x1bfcf0000) then "hfs: mounted
+  iOSRoot" -> userspace. If it hangs again, the DMA addr will show whether
+  kmem returned an unreachable high page (then bound max_pnum).
