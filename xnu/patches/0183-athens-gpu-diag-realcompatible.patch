@@ -58,3 +58,40 @@ diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.c
  		}
  	}
  	return nub;
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index 2e07385..30ff149 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -50,6 +50,32 @@ SweetPlatformExpert::start(IOService *provider)
+ 	}
+ 	registerService();
+ 	IOLog("SWEET: platform expert registered\n");
++	/*
++	 * GPU match diag: createNub runs in configure() before the log ring
++	 * captures, so dump the device nubs it produced here instead - one
++	 * IOPlatformDevice per arm-io DT child, attached to this expert.
++	 */
++	{
++		OSIterator *it = getChildIterator(gIOServicePlane);
++		if (it) {
++			IORegistryEntry *e;
++			while ((e = (IORegistryEntry *) it->getNextObject())) {
++				const char *nm = e->getName();
++				const char *cn = e->getMetaClass()->getClassName();
++				const char *cp = NULL;
++				OSObject *po = e->getProperty("compatible");
++				if (po) {
++					if (OSData *d = OSDynamicCast(OSData, po))
++						cp = (const char *)d->getBytesNoCopy();
++					else if (OSString *s = OSDynamicCast(OSString, po))
++						cp = s->getCStringNoCopy();
++				}
++				IOLog("SWEET NUB2: child %s (%s) compat=%s\n",
++				      nm ? nm : "?", cn ? cn : "?", cp ? cp : "?");
++			}
++			it->release();
++		}
++	}
+ 	return true;
+ }
+ 
