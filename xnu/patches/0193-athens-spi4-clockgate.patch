@@ -1,0 +1,39 @@
+diff --git a/iokit/Kernel/arm/AthensSPI.cpp b/iokit/Kernel/arm/AthensSPI.cpp
+--- a/iokit/Kernel/arm/AthensSPI.cpp
++++ b/iokit/Kernel/arm/AthensSPI.cpp
+@@ -63,8 +63,12 @@
+ #define SPI_SEL_LSB         16
+ #define SPI_SEL_VAL         3u
+ #define TOP_MUX_SPI_SHIFT   26
+-/* infracfg_ao ifrao_spi4 gate (reg2): set ofs 0xa4, bit 25 */
++/* infracfg_ao ifrao_spi4 gate (ifrao4_cg_regs): set 0xa4 clr 0xa8 sta 0xac,
++   bit 25. mtk_clk_gate_ops_setclr: enable=CLR write, disable=SET write.
++   (clk-mt6853.c CLK_IFRAO_SPI4 / clk-gate.c mtk_cg_clr_bit) */
+ #define IFRAO4_CG_SET       0x0a4
++#define IFRAO4_CG_CLR       0x0a8
++#define IFRAO4_CG_STA       0x0ac
+ #define IFRAO_SPI4_BIT      25
+ 
+ OSDefineMetaClassAndStructors(AthensSPI, IOService);
+@@ -227,7 +231,20 @@
+ 		top[CLK_CFG_UPDATE / 4] = 1u << TOP_MUX_SPI_SHIFT;
+ 	}
+ 	if (fInfraRegs != 0) {
+-		*(volatile uint32_t *)(fInfraRegs + IFRAO4_CG_SET) = 1u << IFRAO_SPI4_BIT;
++		/* Enable the ifrao_spi4 clock gate. With mtk_clk_gate_ops_setclr a
++		 * CLR write enables (bit runs -> sta reads 0); a SET write gates it
++		 * off. Writing SET here would leave the whole SPI4 register block
++		 * clock-gated -> every read returns 0x00000000 and transfers no-op. */
++		volatile uint32_t *cg = (volatile uint32_t *)fInfraRegs;
++		uint32_t mask = 1u << IFRAO_SPI4_BIT;
++		cg[IFRAO4_CG_CLR / 4] = mask;
++		uint32_t sta = cg[IFRAO4_CG_STA / 4];
++		for (int i = 0; i < 8 && (sta & mask) != 0; i++) {
++			IODelay(100);
++			sta = cg[IFRAO4_CG_STA / 4];
++		}
++		IOLog("ATHENS SPI: ifrao_spi4 gate sta 0x%08x (%s)\n",
++			sta, (sta & mask) ? "STILL GATED" : "running");
+ 	}
+ 	/*
+ 	 * SPI4 pins must be muxed to function 2 (the pinctrl "spimode_default"
