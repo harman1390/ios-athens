@@ -41,15 +41,31 @@ logging before/after func + irq/rst func. Generated vs REAL gpu16 buildtree
 flash, expect "pinmux spi4 ... func 0 0 0 0 -> 2 2 2 2" then real trim id +
 "firmware download ok" + touch reports.
 
-DISPLAY (gpu16 FBSTAT, decisive): `swaps 7 copies 7 flips 5 inPlace 2
-shown.buf 1 flipReady 1 vblankOvl 1 scanLive 0 scanFrames 0 scanFallbacks 0
-period 215424`. GUI composites+flips fine, but scanLive=0 scanFrames=0 = the
-scan-out engine pulls ZERO frames -> nothing streams to the panel. NOT a
-frame-end-switch bug: scan-out itself isn't running. Panel's boot logo comes
-from a different path (DSI cmd-mode GRAM or LK static). NEXT: find what
-enables scan-out in SweetFramebuffer (DSI video-mode engine / overlay->DSI
-route / panel video-vs-command mode) - the counter names say which stage is
-dead. This is now the top display lead, independent of touch.
+DISPLAY - CORRECTED (almost chased a phantom bug): gpu16 FBSTAT
+`swaps 7 copies 7 flips 5 inPlace 2 shown.buf 1 flipReady 1 vblankOvl 1
+scanLive 0 scanFrames 0 scanFallbacks 0 period 215424`. scanLive/scanFrames
+measure the OPTIONAL vivascanout feature (NOT in cmdline) -> 0 is expected,
+NOT a bug. REAL path = copy+flip: LK fb 0x77e20000 buf0 / 0x7920c000 buf1,
+panel VIDEO-mode DSI (lcm=nt36672c_fhdp_dsi_vdo_dphy_jdi_120, 120Hz). iOS
+touches ZERO DSI regs - inherits LK's OVL->DSI->panel stream; only writes
+pixels + flips OVL_L_ADDR at OVL0_2L frame-end (all verified working:
+flips=5, frame-end polled). VERDICT: display hardware path WORKS - 7 real
+frames presented to panel. "Apple logo only" = static boot-logo frame;
+backboardd/SpringBoard threads PARKED (SMP sample dumps = periodic samples,
+alive not crashed) with nothing new to render because SpringBoard never
+produced the home screen. swaps froze at 7 = no content changes, NOT a
+scan-out failure.
+
+GUI BLOCKER (real, was mis-attributed to display): userspace crash storm -
+123 crashes / 12 daemon types (accountsd x31, dmd x18, mobileactivation x14,
+chronod/liveactivitiesd sig5 code 0x600000001 SIGTRAP at shared PC
+0x198f746dc, etc.) "Too many corpses". dyld shared cache maps fine
+("not in trust cache" = WARNING only; SIP relaxed via ADT asmb lp-sip0).
+backboardd+SpringBoard launched + did IOK/AKS init but stalled before home
+screen. = the KNOWN long-standing trust-cache/signing/entitlement userspace
+problem (patches 0031-0036, sweet_amfi, CS_PLATFORM_BINARY, dyld crash
+triage) - NOT a display bug. Next GUI work = triage the sig5 crash root
+cause; display needs no fix.
 
 === prior handoff 2026-11-15n - gpu15 build FAILED on 0189 decl-order bug -> patch 0191 fix; TOUCH 0190 compiled CLEAN ===
 
