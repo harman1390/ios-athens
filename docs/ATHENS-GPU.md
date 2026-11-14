@@ -165,3 +165,45 @@ Step 7 is the userspace build+inject (the repo is ready; the blocker is
 iOS SDK + rootfs packaging). Full GPU-accelerated GUI = both, plus the
 viva display-sync patches (0111-0137) that make frames wait on GPU
 fences — port those only after basic submit works.
+
+## VERIFIED register data (2026-11-14, from MT6359/MT6853 kernel source)
+
+Reference sources saved in `research/mt6853/`:
+- `mt6359-registers.h` — full MT6359 pwrap register map
+- `mt6359-regulator.c` — regulator voltage tables/ranges
+- `mtk_gpufreq_plat.c` — MT6853 gpufreq power/clock/volt/OPP logic
+
+**VGPU = buck_vproc1** (phandle 0x83, confirmed via live-dt):
+- EN  `MT6359_RG_BUCK_VPROC1_EN_ADDR`    = 0x1708  (CON0, bit0)
+- VOSEL `MT6359_RG_BUCK_VPROC1_VOSEL_ADDR` = 0x172e (ELR0, [6:0])
+- DA_VOSEL `MT6359_DA_VPROC1_VOSEL_ADDR`  = 0x1726 (DBG0, [6:0])
+- DA_EN `MT6359_DA_VPROC1_EN_ADDR`       = 0x1728  (DBG1, bit0)
+- Range 0.4–1.194 V, step 6.25 mV → code = (uV−400000)/6250, linear
+
+**VSRAM_GPU = ldo_vsram_md** (phandle 0x84, confirmed):
+- EN  `MT6359_RG_LDO_VSRAM_MD_EN_ADDR`    = 0x1f2c  (CON0, bit0)
+- VOSEL `MT6359_RG_LDO_VSRAM_MD_VOSEL_ADDR` = 0x1b46 (ELR, [6:0])
+- DA_VOSEL `MT6359_DA_VSRAM_MD_VOSEL_ADDR`  = 0x1f32 (VOSEL1, [6:0]<<8)
+- DA_EN(B) `MT6359_DA_VSRAM_MD_B_EN_ADDR`   = 0x1f2e (MON)
+- Range 0.5–1.10 V (MT6359; MT6359P to 1.294 V), step 6.25 mV → code = (uV−500000)/6250
+
+**Volt switch order** (mtk_gpufreq_plat.c __mt_gpufreq_volt_switch):
+rising → set VSRAM then VGPU; falling → set VGPU then VSRAM; settle
+~µs per mV (rising 12.5 mV/µs, falling 5 mV/µs). VGPU also has a
+REGULATOR_MODE_FAST/NORMAL (PWM/auto) mode select.
+
+**MTCMOS** (mt_gpufreq_mtcmos_control): power-on order mfg0, mfg1, then
+shader-gated mfg2/mfg3/mfg5 by SHADER_PRESENT bits; power-off reverses.
+MT6853 = 5 domains (vs MT6781's 4) → SPM_MFG_PWR_CON index map + status
+bits differ; read clk-mt6853-pg.c / spm register defs for exact addrs.
+
+**Still needed before power-on works:**
+- SPM MTCMOS PWR_CON/status register offsets for the 5 MT6853 domains
+- MFGPLL apmixed offsets for MT6853 (CON0/CON1/PWR_CON0 may differ)
+- topckgen mfg_sel mux bits + CK_CFG_UPDATE for MT6853
+- mfgcfg 0x13fbf000 sub-register offsets (ATHENS-GPU.md says same base)
+- infracfg_ao bus-protection regs for MFG1 equivalent
+- GPU IRQ numbers (gpufreq/mali SPI 364-368 per mkadt comment — verify)
+- OPP table values (g_opp_table built from segment+efuse at runtime;
+  not a static array in this file — find mt6853 opp table source)
+- SHADER_PRESENT read for MC3 core count
