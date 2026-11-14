@@ -1,0 +1,53 @@
+diff --git a/iokit/Kernel/arm/AthensSPI.cpp b/iokit/Kernel/arm/AthensSPI.cpp
+--- a/iokit/Kernel/arm/AthensSPI.cpp
++++ b/iokit/Kernel/arm/AthensSPI.cpp
+@@ -11,12 +11,13 @@
+  *   STATUS0 0x1c (busy=b0)  STATUS1 0x20  PAD_SEL 0x24  CFG2 0x28
+  * FIFO 32 B, DMA packet <= 1024 B, packet_loop <= 255.
+  *
+- * Bus setup (live FDT / clk-mt6853.c): spi_sel mux -> msdcpll_d4 ~96 MHz
++ * Bus setup (live FDT / clk-mt6853.c): spi_sel mux -> mainpll_d5_d4 (the DT
++ * parent-clk; msdcpll_d4 is gated on this UFS part)
+  * (topckgen CLK_CFG_6+0x70 lsb16 w2, update reg +0x04 bit26), bus gate
+  * ifrao_spi4 (infracfg_ao +0xa4 set bit25). SPI4 pins SCK=12 MISO=13
+  * MOSI=97 CS=98 all func2 - the bootloader/pinctrl already muxes them
+  * (verified working in recovery); chip conf mode 0 MSB, sck high=low=5
+- * (~9.6 MHz of the ~96 MHz source, matching the 9.6 MHz DT max).
++ * (~8 MHz of the mainpll_d5_d4 source, under the ~9.6 MHz DT max).
+  */
+ #include <IOKit/IOLib.h>
+ #include <IOKit/IOBufferMemoryDescriptor.h>
+@@ -55,13 +56,17 @@
+ #define SPI_STATUS0_BUSY    (1u << 0)
+ #define SPI_PACKET_SIZE     1024u
+ 
+-/* topckgen CLK_CFG_6 spi_sel mux (reg1): lsb 16, width 2, value 3 = msdcpll_d4 */
++/* topckgen CLK_CFG_6 spi_sel mux (reg1): lsb 16, width 2.
++ * Live DT spi4 clocks: parent-clk=CLK_TOP_MAINPLL_D5_D4 (= spi_parents[1]),
++ * sel-clk=CLK_TOP_SPI_SEL, spi-clk=CLK_IFRAO_SPI4. Android therefore runs the
++ * bus on mainpll_d5_d4 (mainpll/20, always live), NOT msdcpll_d4 which is
++ * gated on this UFS device -> dead SCK -> MISO reads 0x00. */
+ #define CLK_CFG6            0x070
+ #define CLK_CFG6_SET        0x074
+ #define CLK_CFG6_CLR        0x078
+ #define CLK_CFG_UPDATE      0x004
+ #define SPI_SEL_LSB         16
+-#define SPI_SEL_VAL         3u
++#define SPI_SEL_VAL         1u
+ #define TOP_MUX_SPI_SHIFT   26
+ /* infracfg_ao ifrao_spi4 gate (ifrao4_cg_regs): set 0xa4 clr 0xa8 sta 0xac,
+    bit 25. mtk_clk_gate_ops_setclr: enable=CLR write, disable=SET write.
+@@ -221,9 +226,10 @@
+ 		return false;
+ 	}
+ 
+-	/* spi_sel mux -> msdcpll_d4 (~96 MHz) and the bus gate ifrao_spi4.
+-	 * Both are one-off: if the bases aren't in the ADT the block keeps
+-	 * whatever the bootloader left (recovery shows the defaults work). */
++	/* spi_sel mux -> mainpll_d5_d4 (live-DT parent-clk) and the bus gate
++	 * ifrao_spi4. Both are one-off: if the bases aren't in the ADT the
++	 * block keeps whatever the bootloader left (recovery shows the
++	 * defaults work). */
+ 	if (fTopRegs != 0) {
+ 		volatile uint32_t *top = (volatile uint32_t *)fTopRegs;
+ 		top[CLK_CFG6_CLR / 4] = SPI_SEL_VAL << SPI_SEL_LSB;
