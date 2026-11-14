@@ -3,6 +3,38 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-14a - TOUCH DRIVER WORKS; FW EMBEDDED; DISPLAY=NO GPU <<<
+
+VERIFIED ON DEVICE (logs/athens-spifix2-log.txt, kernel a9774ba):
+- "ATHENS SPI: spi4 ready" - fixed-PA DMA carve-out WORKS. Root cause
+  chain: physmask 0xFFFFFFFF00000000 impossible -> corrected to <4GiB but
+  avail window is ALL >4GiB (0x102830000-0x1bfefc000) so NO alloc can give
+  sub-4GiB -> switched to IOMemoryDescriptor::withPhysicalAddress on the
+  pstore carve-out 0x4d010000 (~896KiB Android ramoops, reserved+iOS-unused
+  +below dram_r0). Same pattern SweetSurface/SweetFramebuffer use.
+- "ATHENS TOUCH: NT36672C on nt36672a map, 1080x2400 (fw pending)",
+  EINT14 registered, backboardd opened AthensNT36672C via
+  IOHIDEventServiceUserClient. Driver binds + exposes to userspace.
+- Blocker was ONLY missing firmware file in flashed rootfs.
+
+FW FIX (commit 6a2599e): embedded nt36672c_jdi.bin (139264B) as
+nt36672c_fw.h C-array in patch 0180; fwUpdate() falls back to it when
+vnode_open(/usr/share/firmware/touch/...) fails. Avoids risky userdata
+reflash AND 3h IPSW rootfs rebuild. CI run 43573644960 building.
+
+DISPLAY FINDING: scan-out pipeline WORKS (OVL0_2L INTSTA frame-complete
+latches, swaps 1-5 composited, DSI/panel proven by Apple logo). Black GUI
+= NO GPU: backboardd matches IOProviderClass=AGXAccelerator -> none.
+Full iOS GUI needs a GPU driver (large gated work). PATH TO VISIBLE
+TOUCH without GPU: kernel draws test pattern + touch-contact dots into
+the panel framebuffer (CPU, no GPU) - SweetFramebuffer already exposes
+panel kernel VA. NOT yet implemented - next milestone after fw confirms.
+
+NEXT: when 43573644960 kernel lands -> athens-mkboot.sh ufs-rw
+(ATHENS_EXTRA="sweetlog=1 cpus=8") -> repack w/ existing shim Image.gz
+(no clang locally) -> flash boot -> boot ~4min, TAP SCREEN -> recovery
+-> pull skip=13048823 -> expect "firmware download ok" + contact reports.
+
 ## >>> ATHENS HANDOFF 2026-11-13m - SPI DMA MASK BUG = TOUCH BLOCKER; FIXED IN PATCH <<<
 
 ROOT CAUSE of "ATHENS SPI: missing regs map, work loop or DMA buffer":
