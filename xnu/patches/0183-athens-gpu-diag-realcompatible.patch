@@ -59,10 +59,10 @@ diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.c
  	}
  	return nub;
 diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
-index 2e07385..30ff149 100644
+index 2e07385..9d134bc 100644
 --- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
 +++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
-@@ -50,6 +50,32 @@ SweetPlatformExpert::start(IOService *provider)
+@@ -50,6 +50,33 @@ SweetPlatformExpert::start(IOService *provider)
  	}
  	registerService();
  	IOLog("SWEET: platform expert registered\n");
@@ -72,7 +72,8 @@ index 2e07385..30ff149 100644
 +	 * IOPlatformDevice per arm-io DT child, attached to this expert.
 +	 */
 +	{
-+		OSIterator *it = getChildIterator(gIOServicePlane);
++		OSIterator *it = IORegistryIterator::iterateOver(
++		    gIOServicePlane, kIORegistryIterateRecursively);
 +		if (it) {
 +			IORegistryEntry *e;
 +			while ((e = (IORegistryEntry *) it->getNextObject())) {
@@ -86,7 +87,7 @@ index 2e07385..30ff149 100644
 +					else if (OSString *s = OSDynamicCast(OSString, po))
 +						cp = s->getCStringNoCopy();
 +				}
-+				IOLog("SWEET NUB2: child %s (%s) compat=%s\n",
++				IOLog("SWEET NUB2: %s (%s) compat=%s\n",
 +				      nm ? nm : "?", cn ? cn : "?", cp ? cp : "?");
 +			}
 +			it->release();
