@@ -3,6 +3,41 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15y - *** DECISIVE: ZERO unix syscalls return EIO *** crash storm is SYNTHESIZED/architectural (no SEP, no data volume, no Data Protection); broadened 0197 to catch real errno <<<
+
+0197 v1 RESULT (athens-boot-eio.img, run 43647789507, .tmp-patch/eio-log.txt,
+1935 lines, flush#6):
+- **ZERO `SWEET EIO-SYSCALL` lines** — NO unix syscall returned EIO(5) during
+  the entire boot+storm. Instrumentation confirmed in binary + boot-args
+  correct (sweetlog=1). Crash storm DID happen: 148 CRASH (tccd 88,
+  mobileactivation/dmd/assistantd/ScreenTimeAgent 12, fitnesscoachingd 8,
+  driverkitd 4). hfs_makenode ENTER=300 (creates still work).
+- => Foundation/libsystem is SYNTHESIZING EIO(5) in userspace, OR it comes
+  from a NON-unix path (mach trap / IOKit / persona / keybag). NOT a unix
+  syscall errno.
+
+ARCHITECTURAL ROOT (kernel log, high confidence):
+- `init_data_protection: No SEP present on this device` — NO Secure Enclave.
+- `SWEET SEP: AppleSEPManager registered (stub)`, `AppleKeyStore registered
+  (stub)` — SEP/keybag are STUBS returning 0x0 for all selectors.
+- `IODeviceTree:/arm-io/pearl-sep -> none`, `ApplePearlSEPDriver -> none`.
+- `MKB_INIT: mount point (/private/var/) does not support Data Protection`,
+  `Unable to set /private/var//tmp to class D!`, `MKBUserSessionNeedsMount=1`.
+- Daemons DO call AKS selectors (sel 0/7/14/17/103) and get 0x0 (stub success).
+
+INTERPRETATION: iOS temp-dir init + keychain access require Data Protection
+(protection-class set on dirs, key unwrap for keychain-2.db) which needs
+SEP/keybag — STUBBED/ABSENT. The ops that need it fail; Foundation reports
+generic EIO(5). Could ALSO be a unix syscall returning a NON-EIO errno
+(ENOTSUP/ENODEV/etc) that Foundation maps to EIO — my v1 only caught EIO.
+
+0197 v2 (207be70, run 43649611331, building): broadened catch to
+EIO+ENOTSUP+EOPNOTSUPP+ENODEV+EROFS+ENOSYS+ENXIO+ESTALE+EREMOTE+ENOLINK+ENOSR,
+prints `err=%d code sys comm`. If a unix syscall returns one of these on the
+temp/keychain path => exact op+real errno found. If STILL nothing => error is
+mach-trap or pure-userspace synthesis => pivot to mach_syscall/IOKit/persona
+instrumentation OR address data-volume/SEP gap directly.
+
 ## >>> ATHENS HANDOFF 2026-11-15x - SWEETSCAN GOT REAL ERRORS: temp-dir EIO(5)+keychain open fail; varfix skeleton CONFIRMED present; EIO = NON-create op -> patch 0197 syscall-level EIO catch <<<
 
 SWEETSCAN RESULT (athens-boot-scan.img = eba2140 kernel + sweetscan/sweetnull
