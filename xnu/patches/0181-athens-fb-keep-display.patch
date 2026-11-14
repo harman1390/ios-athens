@@ -1,0 +1,33 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -204,7 +204,8 @@
+ 	uint64_t      fNextCopy;      /* absolute time the next copy may start (fDuty) */
+ 	uint64_t      fCopies, fCopyNs;
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
++	bool          fKeepOn;        /* sweetfb_keep: ignore power-off, keep last frame */
+ 	/* K0c: frames held back for the GPU */
+ 	bool          fRetry;         /* the pending frame waits for the GPU: try again at the next tick */
+ 	uint32_t      fGpuTicks;      /* consecutive ticks the pending frame waited */
+@@ -381,6 +382,9 @@
+ 	fDuty = MIN(MAX(fDuty, 1u), 100u);
+ 	fGpuWaitMax = 12;
+ 	PE_parse_boot_argn("sweetfb_gpuwait", &fGpuWaitMax, sizeof(fGpuWaitMax));
++	int keep = 0;
++	PE_parse_boot_argn("sweetfb_keep", &keep, sizeof(keep));
++	fKeepOn = keep != 0;
+ 	fScanOvl = -1;
+ 	fScanLock = IOLockAlloc();
+ 	if (fScanLock == NULL) {
+@@ -1892,6 +1896,10 @@
+ 	case kSweetFBRequestPowerChange:
+ 		if (args->scalarInputCount >= 1) {
+ 			bool off = args->scalarInput[0] == 0;
++			if (off && fFB->fKeepOn) {
++				IOLog("SWEET FB: display off ignored (sweetfb_keep)\n");
++				break;
++			}
+ 			IOLockLock(fFB->fLock);
+ 			if (off != fFB->fPowerOff) {
+ 				fFB->fPowerOff = off;
