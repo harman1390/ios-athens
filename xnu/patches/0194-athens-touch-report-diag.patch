@@ -1,0 +1,49 @@
+diff --git a/iokit/Kernel/arm/hid/AthensNT36672C.cpp b/iokit/Kernel/arm/hid/AthensNT36672C.cpp
+--- a/iokit/Kernel/arm/hid/AthensNT36672C.cpp
++++ b/iokit/Kernel/arm/hid/AthensNT36672C.cpp
+@@ -218,6 +218,7 @@
+ 	uint8_t                fFwVer;
+ 	bool                   fFwDone;
+ 	uint32_t               fWdtCnt;
++	uint32_t               fDbgReports;   /* valid touch reports logged (diag) */
+ };
+ 
+ OSDefineMetaClassAndStructors(AthensNT36672C, SweetHIDTouch);
+@@ -693,6 +694,7 @@
+ 	 * instance without start() ever assigning these. */
+ 	fPrevMap = 0;
+ 	fWdtCnt = 0;
++	fDbgReports = 0;
+ 	fFwDone = false;
+ 	fFwVer = 0;
+ 	fBus = NULL;
+@@ -710,6 +712,7 @@
+ {
+ 	fPrevMap = 0;
+ 	fWdtCnt = 0;
++	fDbgReports = 0;
+ 	fFwDone = false;
+ 	fFwVer = 0;
+ 	fInterrupt = NULL;
+@@ -887,4 +890,20 @@
+ 		}
+ 	}
+ 	fPrevMap = map;
+-}
++	/* diag: log the first valid touch reports so touch can be confirmed
++	 * from the sweetlog without needing the GUI on screen. */
++	if (map != 0 && fDbgReports < 24) {
++		uint32_t x = 0, y = 0;
++		for (uint32_t i = 0; i < NVT_MAX_FINGERS; i++) {
++			uint32_t pos = 1 + 6 * i;
++			uint8_t id = pd[pos] >> 3, st = pd[pos] & 7;
++			if (id == 0 || id > NVT_MAX_FINGERS || (st != 1 && st != 2)) continue;
++			x = (pd[pos + 1] << 4) | (pd[pos + 3] >> 4);
++			y = (pd[pos + 2] << 4) | (pd[pos + 3] & 0x0F);
++			break;
++		}
++		IOLog("ATHENS TOUCH: report %u fingers map 0x%x first x=%u y=%u\n",
++		    fDbgReports, map, x, y);
++		fDbgReports++;
++	}
++}
