@@ -1,0 +1,166 @@
+--- a/bsd/sweet_hfs/core/hfs_vnops.c
++++ b/bsd/sweet_hfs/core/hfs_vnops.c
+@@ -6410,6 +6410,7 @@
+ 	u_int32_t gnv_flags = 0;
+ 	int protectable_target = 0;
+ 	int nocache = 0;
++	int mkstep = 0;
+ 	vnode_t old_doc_vp = NULL;
+ 
+ #if CONFIG_PROTECT
+@@ -6470,6 +6471,7 @@
+ 	/* Check if were out of usable disk space. */
+ 	if ((hfs_freeblks(hfsmp, 1) == 0) && (vfs_context_suser(ctx) != 0)) {
+ 		error = ENOSPC;
++		mkstep = 10;
+ 		goto exit;
+ 	}
+ 
+@@ -6550,6 +6552,7 @@
+    	if (hfsmp->hfs_flags & HFS_QUOTAS) {
+ 		if ((error = hfs_quotacheck(hfsmp, 1, attr.ca_uid, attr.ca_gid,
+ 									vfs_context_ucred(ctx)))) {
++			mkstep = 9;
+ 			goto exit;
+ 		}
+ 	}	
+@@ -6585,12 +6588,14 @@
+ 	 */
+ 	if ((protected_mount) && (protectable_target)) {
+ 		error = cp_setup_newentry(hfsmp, dcp, cp_class, attr.ca_mode, &entry);
++		mkstep = 7;
+ 		if (error) {
+ 			goto exit;
+ 		}
+ 	}
+ #endif
+ 
++	mkstep = 1;
+ 	if ((error = hfs_start_transaction(hfsmp)) != 0) {
+ 	    goto exit;
+ 	}
+@@ -6603,16 +6608,19 @@
+ 	cnid_t new_id;
+ 
+ 	/* Reserve some space in the Catalog file. */
++	mkstep = 3;
+ 	if ((error = cat_preflight(hfsmp, CAT_CREATE, NULL, 0))) {
+ 		hfs_systemfile_unlock(hfsmp, lockflags);
+ 		goto exit;
+ 	}
+ 
++	mkstep = 4;
+ 	if ((error = cat_acquire_cnid(hfsmp, &new_id))) {
+ 		hfs_systemfile_unlock (hfsmp, lockflags);
+ 		goto exit;
+ 	}
+ 
++	mkstep = 5;
+ 	error = cat_create(hfsmp, new_id, &in_desc, &attr, &out_desc);
+ 	if (error == 0) {
+ 		/* Update the parent directory */
+@@ -6639,6 +6647,7 @@
+ 		 * at this point.
+ 		 */
+ 		if ((attr.ca_fileid != 0) && (protected_mount) && (protectable_target)) {
++			mkstep = 6;
+ 			error = cp_setxattr (NULL, entry, hfsmp, attr.ca_fileid, XATTR_CREATE);
+ 			
+ 			if (error) {
+@@ -6730,6 +6739,7 @@
+ 	 */
+ 	error = hfs_getnewvnode(hfsmp, dvp, cnp, &out_desc, gnv_flags, &attr, 
+ 							NULL, &tvp, &newvnode_flags);
++	mkstep = 8;
+ 	if (error)
+ 		goto exit;
+ 
+@@ -6823,6 +6833,7 @@
+ 			panic ("hfs_makenode: no cpentry for cnode (%p)", cp);
+ 		}
+ 
++		mkstep = 11;
+ 		error = cp_generate_keys (hfsmp, cp, CP_CLASS(cp->c_cpentry->cp_pclass), keywrap_flags, &keyed_entry);
+ 		if (error == 0) {
+ 			/* 
+@@ -6892,6 +6903,16 @@
+ exit:
+ 	cat_releasedesc(&out_desc);
+ 	
++	if (error && cnp && cnp->cn_nameptr) {
++		static int mkerr_count = 0;
++		if (mkerr_count < 512) {
++			mkerr_count++;
++			printf("hfs_makenode ERR step=%d err=%d dvp=%s name=%.*s\n",
++				   mkstep, error, dvp->v_name ? dvp->v_name : "?",
++				   (int)cnp->cn_namelen, (const char *)cnp->cn_nameptr);
++		}
++	}
++	
+ #if CONFIG_PROTECT
+ 	/*  
+ 	 * We may have jumped here in error-handling various situations above.
+--- a/bsd/sweet_hfs/core/hfs_catalog.c
++++ b/bsd/sweet_hfs/core/hfs_catalog.c
+@@ -285,6 +285,8 @@
+ 		}
+ 		if (result) {
+ 			/* For any other error, return the result */
++			static int fae_err = 0;
++			if (fae_err < 256) { fae_err++; printf("cat_acquire_cnid: file_attribute_exist err=%d cnid=%u\n", result, nextCNID); }
+ 			return result;
+ 		}
+ 
+@@ -315,6 +317,8 @@
+ 	}	
+ 	else {
+ 		/* For any other situation, just bail out */
++		static int bts_err = 0;
++		if (bts_err < 256) { bts_err++; printf("cat_acquire_cnid: BTSearchRecord unexpected result=%d cnid=%u\n", result, nextCNID); }
+ 		return EIO; 
+ 	}
+ 
+@@ -1033,6 +1037,7 @@
+ 	FSBufferDescriptor btdata;
+ 	u_int32_t datalen;
+ 	int result = 0;
++	int cstep = 0;
+ 	u_int32_t encoding = kTextEncodingMacRoman;
+ 	int modeformat;
+ 
+@@ -1046,6 +1051,7 @@
+ 	bto = hfs_malloc_type(struct btobj);
+ 	bto->iterator.hint.nodeNum = 0;
+ 
++	cstep = 1;
+ 	result = buildkey(hfsmp, descp, &bto->key, 0);
+ 	if (result)
+ 		goto exit;
+@@ -1064,6 +1070,7 @@
+ 		 *  3) There are no thread or catalog records for this ID 
+ 		 */		 
+ 	buildthreadkey(new_fileid, (CatalogKey *) &bto->iterator.key);
++	cstep = 2;
+ 	result = BTInsertRecord(fcb, &bto->iterator, &btdata, datalen);
+ 	if (result) {
+ 		goto exit;
+@@ -1079,6 +1086,7 @@
+ 	
+ 	bcopy(&bto->key, &bto->iterator.key, sizeof(bto->key));
+ 
++	cstep = 3;
+ 	result = BTInsertRecord(fcb, &bto->iterator, &btdata, datalen);
+ 	if (result) {
+ 		if (result == btExists)
+@@ -1112,6 +1120,11 @@
+ 	(void) BTFlushPath(fcb);
+ 	hfs_free_type(bto, struct btobj);
+ 
++	if (result) {
++		static int cc_err = 0;
++		if (cc_err < 256) { cc_err++; printf("cat_create: ERR cstep=%d rawresult=%d fileid=%u\n", cstep, result, new_fileid); }
++	}
++
+ 	return MacToVFSError(result);
+ }
+ 

@@ -126,6 +126,21 @@ def vardirs(root):
             ('private/var/MobileDevice', 0, 0, 0o755),
             ('private/var/lockdownd', 0, 0, 0o755),
             ('private/var/log/com.apple.xpc.launchd', 0, 0, 0o755),
+            # data-volume dirs the daemon crash storm needs (gpu19 diag:
+            # NSTemporaryDirectory -> /var/folders/.../T and keychain ->
+            # /Library/Keychains -> /private/var/Keychains both EIO when the
+            # parent is absent). folders/Keychains were missing entirely.
+            ('private/var/folders', 0, 0, 0o755),
+            ('private/var/Keychains', 0, 0, 0o755),
+            ('private/var/db/diagnostics', 272, 272, 0o751),
+            ('private/var/db/uuidtext', 272, 272, 0o755),
+            ('private/var/db/diagnostics/timesync', 272, 272, 0o755),
+            ('private/var/MobileActivation', 0, 0, 0o755),
+            ('private/var/itunesstored', 0, 0, 0o755),
+            ('private/var/MobileGestalt', 0, 0, 0o755),
+            ('private/var/backups', 0, 0, 0o755),
+            ('private/var/local', 0, 0, 0o755),
+            ('private/var/lib', 0, 0, 0o755),
             ('private/var/mobile/Library/Caches', MOBILE, MOBILE, 0o755),
             ('private/var/mobile/Library/Cookies', MOBILE, MOBILE, 0o755),
             ('private/var/mobile/Library/Logs', MOBILE, MOBILE, 0o755),

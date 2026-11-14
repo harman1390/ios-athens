@@ -3,6 +3,107 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15s - EIO ROOT CAUSE NARROWED TO HFS CATALOG/BTREE (cprotect RULED OUT); patch 0196 instruments makenode+catalog raw errors <<<
+
+VARFIX BOOT RESULT (ios16-root-varfix.simg, complete via dd tail): STILL Apple
+logo. Fresh SWEETLOG (flush#37, .tmp-patch/varfix-log.txt): crash storm
+UNCHANGED — 764 crash lines (tccd 424, assistantd 72, mobileactivationd 68,
+dmd 68, ScreenTimeAgent 68, fitnesscoachingd 60, driverkitd 4). Same errors:
+`Failed to initialize/create darwin user temp directory` EIO(5), fitnesscoachingd
+temp-dir suffix EIO(5), `/Library/Keychains/keychain-2.db` unable to open.
+Keychain DID progress: `mkpath_np /Library/Keychains` EIO -> now `open_v2
+.../keychain-2.db unable to open` = pre-seeded dir helped it get FURTHER but
+create/open still EIO. => mkdir/create itself returns EIO; missing-dirs was
+necessary but NOT sufficient.
+
+CONFIRMED FACTS (source+log, not guesses):
+- /private/var is a PLAIN DIR on the root HFS+ volume — NOT a separate mount,
+  NOT bindfs. Only bindfs_mount error was for /private/preboot/.../firmware.
+- Mount flags 0x1480d000: MNT_CPROTECT(0x80) CLEAR -> cp_fs_protected()=FALSE
+  -> cprotect (cp_setup_newentry/cp_setxattr/cp_generate_keys) is SKIPPED.
+  Those paths return EPERM/EINVAL anyway, never EIO -> EIO is NOT cprotect.
+- bindfs returns ENOTSUP for create/mkdir (no write vnops) -> not EIO source.
+- HFS journal replayed clean, volume mounted journaled rw. No fs write errors.
+- => EIO is in the catalog/B-tree/vnode/journal create path: cat_preflight /
+  cat_acquire_cnid / cat_create / hfs_getnewvnode / hfs_start_transaction.
+- MacToVFSError (hfs_vfsutils.c:2098): btBadNode->EIO AND default->EIO. So the
+  REAL B-tree error code is MASKED — must capture raw `result`, not errno.
+
+PATCH 0196 (xnu/patches/0196-athens-hfsmakenode-diag.patch, NEW): instruments
+- hfs_vnops.c hfs_makenode: `mkstep` marker before each stage (1=trans,
+  3=preflight,4=acquire_cnid,5=cat_create,6=setxattr,7=setupentry,8=getnewvnode,
+  9=quotacheck,10=ENOSPC,11=genkeys) + printf `hfs_makenode ERR step=%d
+  err=%d dvp=%s name=%.*s` at exit (rate-limited 512).
+- hfs_catalog.c cat_acquire_cnid: prints raw BTSearchRecord/file_attribute_exist
+  `result` before EIO/return (rate-limit 256).
+- hfs_catalog.c cat_create: `cstep` (1=buildkey,2=BTInsert-thread,3=BTInsert-rec)
+  + prints raw `result` before MacToVFSError masks it (rate-limit 256).
+Validated: patch -p1 dry-run+apply OK vs bt-art (fully-patched tree thru 0195;
+only 0026+0041 ever touch these files so context is exact). printf->console->
+SWEETLOG via patch 0047. Types verified (cn_nameptr=char*, cn_namelen=int,
+v_name=const char*, cnid_t=u_int32_t).
+
+NEXT: commit+push 0196 (athens branch, xnu/patches/** triggers CI) -> build ->
+flash diag boot (reuse athens-boot-diag.img cmdline OR rebuild shim) -> boot
+varfix userdata -> pull SWEETLOG -> read mkstep/cstep/rawresult to pinpoint the
+exact failing B-tree/catalog call. THEN implement the functional fix.
+
+## >>> ATHENS HANDOFF 2026-11-15r - CRASH STORM ROOT CAUSE FOUND = /private/var skeleton incomplete (EIO on dir create); varfix image building <<<
+
+DIAGNOSIS (gpu19 kernel + diagnostic boot-args, NO rebuild): added
+`sweetscan=`+`sweetnull=` for the 7 crashers (tccd,dmd,assistantd,
+mobileactivation,ScreenTimeAgent,fitnesscoachingd,driverkitd) -> kernel dumps
+heap strings + stderr on each abort. Captured the real NSException reasons:
+- dmd/ScreenTimeAgent/fitnesscoachingd/tccd: `Failed to create/initialize
+  darwin user temp directory` / `NSTemporaryDirectory` -> **EIO (5)**.
+  Path = /var/folders/<2>/<~30char-hash>/T/ (per-user, confstr-created).
+- mobileactivationd: `mkpath_np /Library/Keychains: [5] EIO` + `Failed to
+  query keychain` -> /Library/Keychains symlinks to /private/var/Keychains.
+- Shared sig6 = NSException inside dispatch_once -> std::terminate -> abort
+  (symbolized via ipsw dyld a2s on the .symbols subcache).
+
+ROOT CAUSE (evidence, not guess): the iOS rootfs has NO real APFS data
+volume, so /private/var is a plain dir on the HFS+ root that must be seeded by
+hand. The athens skeleton was INCOMPLETE — /private/var/folders and
+/private/var/Keychains were ABSENT. HFS+ itself is healthy: journal replayed
+clean, `iOSRoot` mounted journaled rw, systembag.kb keybag present, db dirs
+present. EIO (not ENOENT) on create is the open question — likely a secondary
+op during vnode create, but pre-seeding the missing parents is the proven
+sweet fix and is necessary regardless.
+
+FIX APPLIED (unverified until boot): expanded vardirs() in
+tools/sweet-root-tweaks.py — added private/var/{folders,Keychains,
+MobileActivation,itunesstored,MobileGestalt,backups,local,lib} +
+db/diagnostics/timesync. Rebuilt on /root/iosroot-work/ios16-root.img (still
+has VivaMTLDriver.bundle) -> NEW tools/stream-img2simg.py (streaming,
+constant-memory; viva-img2simg.py OOM'd buffering ~12GB in 7.7GB WSL) ->
+ios16-root-varfix.simg.
+
+CAVEAT: /var/folders now exists but the per-user <hash>/T subdirs still need
+runtime mkdir. If mkdir itself returns EIO on HFS+, temp-dir crashes persist
+-> then instrument hfs_makenode/cprotect path. Keychains should be fully fixed
+(the dir now exists, no runtime mkdir needed for the leaf).
+
+NEXT: flash ios16-root-varfix.simg to userdata (simg2img-free path; use
+`fastboot flash -S 64M` — chunk count now 27,852 @16MB RAW so tail bug likely
+gone, dd fallback ready), boot with sweetlog=1 + same sweetscan/sweetnull
+diag args, pull ring, compare crash counts + check for SpringBoard render.
+
+FLASH RESULT (2026-11-15): ios16-root-varfix.simg = 871 sparse chunks (NEW
+tools/stream-img2simg.py — streaming, constant-mem, folds <64-blk zero gaps
+into RAW so no tiny chunks; viva-img2simg.py OOM'd @7.7GB WSL). Flashed
+`fastboot flash -S 64M userdata` -> transfers 1-187/188 OKAY, **188/188 FAILED
+"sparse image write failure" AGAIN** — proves it is NOT chunk structure. Root
+cause of tail fail: last fastboot cmd expands a single FILL chunk of
+9,453,790 blocks (~38.7GB zeros = HFS free space) into one ~38.7GB device
+write the ABL can't do. Splitting FILL won't help (16B on wire, still packs
+into one -S cmd). DD FIX: unwritten = imgblk ~3.1M..12582911. Extracted
+ios16-root.img bs=4096 skip=3000000 -> tail2.gz (395MB) -> adb push ->
+recovery `gunzip -c /tmp/tail2.gz | dd of=/dev/block/sdc59 bs=4096
+seek=3000000 conv=notrunc` (toybox dd NEEDS conv=notrunc else ftruncate EINVAL)
+-> 9,582,912 rec, 37GB, EXIT=0. userdata = complete varfix image. Booted iOS
+(diag boot img still flashed). AWAITING sweetlog pull to verify crash storm.
+
 ## >>> ATHENS HANDOFF 2026-11-15q - GPU/METAL CONFIRMED WORKING (vmg cmd buffers); touch bus woke (ff) but chip silent; Apple logo = crash storm, NOT GPU <<<
 
 gpu19 (commit e22ffd7, patch 0195 SPI parent-clock mainpll_d5_d4) BUILT via CI
