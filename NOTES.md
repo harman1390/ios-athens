@@ -3,7 +3,55 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
-## >>> ATHENS HANDOFF 2026-11-15n - gpu15 build FAILED on 0189 decl-order bug -> patch 0191 fix; TOUCH 0190 compiled CLEAN <<<
+## >>> ATHENS HANDOFF 2026-11-15o - gpu16 booted: TOUCH root cause = SPI4 pins never muxed -> patch 0192 pinmux fix; DISPLAY still Apple-logo (FBSTAT pending) <<<
+
+GPU16 BUILD SUCCESS: CI run 43618107826, commit e8d0764 (patches 0189 FBSTAT +
+0190 touch-noflash + 0191 decl-order). Kernel verified: has "trim raw swrst",
+"event_buf ->", "firmware download ok", "nt36525"/"nt36772", "SWEET FBSTAT".
+Built shim/out/athens-boot-gpu16.img (reused shim Image.gz; `fastboot boot`
+fails "Too many links" on this LK -> flash boot + reboot is the working path).
+User flashed+booted. Screen: APPLE LOGO ONLY (display still not presenting).
+
+SWEETLOG PULLED (.tmp-patch/gpu16-ring.bin -> gpu16-log.txt, 410 KB, flush#52).
+TOUCH DECISIVE RESULT: `ATHENS TOUCH: trim raw swrst 0x3f0fe/0x1f01a/0x1c0be
+id 00 00 00 00 00 00` on ALL THREE reset addrs -> SPI reads return ALL ZEROS.
+Trim unrecognised -> correctly kept noflash nt36525 map (0190 worked) -> fw
+download ran but `reset state timeout (last 0x00)` every retry (backboardd
+re-probes via IOHIDEventServiceUserClient). NOT a map/fw problem: the chip
+never answers because the BUS is dead.
+
+ROOT CAUSE (confirmed, not guessed): iOS has NO pinctrl driver. The touch's
+pinctrl-0 -> spimode_default (phandle 0x195) sets GPIO12=SPI4_MI, GPIO13=
+SPI4_MO, GPIO97=SPI4_CLK, GPIO98=SPI4_CSB all func2 - Android's pinctrl applies
+it at probe. iOS leaves pins at LK/default GPIO func0 (VivaIO.cpp comment even
+says "pin modes left as LK set them (already GPIO)"). Result: SPI controller
+clocks+completes frames (NO transfer timeouts in log) but SCK/CS/MOSI never
+reach the chip and MISO reads a dead GPIO input = 0x00. Verified vs vendor
+pinctrl-mt6853.c (mt6853_pin_mode_range, i_base0=gpio@0x10005000): func field
+= 4 bits/pin, reg 0x0300+(pin/8)*0x10, bit (pin%8)*4. Also live-dt reg_bases
+phandles->nodes decoded; spi4@11018000/touchscreen@0 = oppo,tp_noflash,
+reset-gpio=33 irq-gpio=14 spi-max-freq=8.16MHz. Only spi4 gets an AthensSPI
+nub (one "spi4 ready" in log) so hardcoding SPI4 pins is safe.
+
+PATCH 0192 (0192-athens-spi4-pinmux.patch): adds VivaGPIO::getPinFunc/
+setPinFunc/pinFuncField (mt6853 mux calc, RMW via existing gpio@0x10005000
+map) + AthensSPI::start() muxes GPIO12/13/97/98->func2 and GPIO14/33->func0,
+logging before/after func + irq/rst func. Generated vs REAL gpu16 buildtree
+(xnu-buildtree artifact); GNU patch verified byte-exact. NEXT: build gpu17,
+flash, expect "pinmux spi4 ... func 0 0 0 0 -> 2 2 2 2" then real trim id +
+"firmware download ok" + touch reports.
+
+DISPLAY (gpu16 FBSTAT, decisive): `swaps 7 copies 7 flips 5 inPlace 2
+shown.buf 1 flipReady 1 vblankOvl 1 scanLive 0 scanFrames 0 scanFallbacks 0
+period 215424`. GUI composites+flips fine, but scanLive=0 scanFrames=0 = the
+scan-out engine pulls ZERO frames -> nothing streams to the panel. NOT a
+frame-end-switch bug: scan-out itself isn't running. Panel's boot logo comes
+from a different path (DSI cmd-mode GRAM or LK static). NEXT: find what
+enables scan-out in SweetFramebuffer (DSI video-mode engine / overlay->DSI
+route / panel video-vs-command mode) - the counter names say which stage is
+dead. This is now the top display lead, independent of touch.
+
+=== prior handoff 2026-11-15n - gpu15 build FAILED on 0189 decl-order bug -> patch 0191 fix; TOUCH 0190 compiled CLEAN ===
 
 GPU15 BUILD (run 43616980296, commit 65c7e9d) FAILED - but this is the REAL
 error gpu14's conf-flake was hiding. gpu14 died at `build_all_recurse_into_
