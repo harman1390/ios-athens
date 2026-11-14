@@ -2626,3 +2626,47 @@ OPEN / NEXT
 - STILL OPEN: GPU match (nub existence now being tested); touch
   reset-state 0x00; stray-writer panic (separate, intermittent);
   VivaMTLDriver.bundle staged not injected.
+
+## 2026-11-14 GPU diag boot #4 RESULT: NUB2 still silent -> switched to whole-plane walk
+
+- Built athens-boot-gpu4.img from CI 43584629140 (SWEET NUB2 dumps
+  platform-expert service-plane children: name/class/compatible).
+  Diagnostic strings verified present in the kernel binary.
+- Flashed boot, rebooted. USER: panic again (same stray-writer, see
+  below). Pulled SWEETLOG (~7MB nonzero, 77580 lines).
+- FINDINGS:
+  * 'SWEET: platform expert registered' IS captured (proves start()
+    reached the diagnostic point).
+  * ZERO 'SWEET NUB2', ZERO 'child ', ZERO 'compat=' - the
+    getChildIterator(gIOServicePlane) block produced NO output even
+    though the strings are in the binary. => iterator was empty/NULL.
+  * Drivers still registered (SEP/WDT/AMFI/VIVA KP/PWRAP/GPIO/I2C/HID,
+    ATHENS SPI spi4 ready, SWEET FB/GIC/EINT).
+  * Log ends in same stray-writer panic: 'ZCHECK pn 0x38000 pa
+    0xe0000000 bad 191 ... 0x4d4d4d4d' + POOLSCAN never-used. NOT GPU.
+- ROOT CAUSE hypothesis (verified partially, NOT yet proven):
+  IOService::attach(provider) DOES use gIOServicePlane
+  (IOService.cpp:856 attachToParent(provider, gIOServicePlane)). So
+  device nubs SHOULD be gIOServicePlane children of the platform
+  expert. But getChildIterator(gIOServicePlane) on `this` returned
+  nothing. Possible: attach() ran but children attach under a different
+  effective parent, OR attach() failed silently for these nubs, OR
+  getChildIterator needs a child-set that isn't populated yet. NOT yet
+  confirmed which.
+- VERIFIED interrupt encoding is fine: GIC #interrupt-cells=2, spi()
+  emits (INTID=32+n, flags) 2 cells; mali 5 specifiers=10 cells,
+  concatenated correctly. reg u64==io() (SOC_BASE-relative) - same as
+  working spi4. Node structure identical to working arm-io children.
+- FIX (commit a1fc8de): replaced getChildIterator with
+  IORegistryIterator::iterateOver(gIOServicePlane,
+  kIORegistryIterateRecursively) - the exact call IOCatalogue.cpp:705
+  uses - walking the WHOLE service plane from gRegistryRoot. Dumps
+  every entry's name/class/compatible. This removes ALL parent/plane/
+  attach-timing doubt: if the mali nub exists ANYWHERE in the service
+  plane it will appear; if absent, nub creation itself is broken.
+  Verified IORegistryIterator : public OSIterator (OSIterator* assign
+  OK), iterateOver declared in IORegistryEntry.h (reachable via
+  IOService.h->IOPlatformExpert.h), getProperty borrowed-ptr no release.
+- NEW BUILD: CI run 43586049946.
+- STILL OPEN: GPU match; touch reset-state 0x00; stray-writer panic;
+  VivaMTLDriver.bundle staged.
