@@ -2424,3 +2424,37 @@ NOT DONE / RISKS:
   + no 'start() entered' = match failure; 'init FAILED' = nub init;
   'start() entered'+bail = specific start failure; 'start() entered'+
   'driver started' = GPU powers on (then watch MFG/GPU_ID markers).
+
+## 2026-11-14 GPU diag boot #2 RESULT: still no match, panic was userspace/ramoops-stale
+
+- Built kernel from CI run 43581545159 (patches thru 0183 with
+  'mediatek,mali' compatible + createNub/start diagnostics). Repacked
+  boot image shim/out/athens-boot-gpu2.img with sweetfb_hz=0 added to
+  cmdline (framebuffer copies every vsync tick = smoothest CPU path;
+  NOT a 120Hz panel mode - panel timing is separate).
+- fastboot boot FAILED ('Too many links'); flashed boot partition
+  directly: fastboot flash boot ... OKAY, reboot. GPT/other partitions
+  untouched.
+- Pulled SWEETLOG -> gpu2-log.txt (405 KB, 6291 lines). RESULT:
+  * ZERO 'SWEET NUB', ZERO 'VIVA GPU', ZERO 'start() entered' - the
+    exact-name 'mali' diagnostic stayed silent for EVERY node.
+  * backboardd IOAcceleratorES matching -> 0 found (unchanged).
+  * NO kernel panic in SWEETLOG - userspace ran to liveactivitiesd.
+    Tail = repeated userspace daemon crashes (chronod SIG5, accountsd
+    SIG6, ReportCrash) + ATHENS TOUCH reset-state timeouts.
+  * ramoops /sys/fs/pstore/console-ramoops-0 = STALE ANDROID panic
+    (UsbFfs-worker OOM, Nov 1) - NOT the iOS boot. The 'panic' the user
+    saw is NOT captured as a kernel panic; likely userspace crash-loop
+    visual or a panic that auto-rebooted before log flush.
+- INTERPRETATION: 'SWEET NUB' silence means either (a) mali node never
+  reaches createNub (ADT->DT drop / not an arm-io child in gIODTPlane),
+  or (b) getName()!="mali" so the exact-match guard skipped it. The
+  broad 'node=%s' diagnostic (commit 9cf4557) now logs EVERY createNub
+  node name to distinguish these.
+- NEW BUILD: CI run 43583130785 (athens, workflow_dispatch) with 0183
+  broadened to 'SWEET NUB: node=%s' for all nodes + 'init FAILED'.
+  Will show: is 'mali' iterated? what does getName() return? does
+  IOPlatformDevice::init fail on the 6-region reg?
+- STILL OPEN: touch reset-state timeout (SPI status reads 0x00 after
+  fw download); GPU match unresolved; VivaMTLDriver.bundle staged but
+  not injected (kernel power-on unproven).
