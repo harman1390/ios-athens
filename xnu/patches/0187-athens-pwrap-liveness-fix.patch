@@ -1,0 +1,54 @@
+diff --git a/iokit/Kernel/arm/VivaPwrap.cpp b/iokit/Kernel/arm/VivaPwrap.cpp
+--- a/iokit/Kernel/arm/VivaPwrap.cpp
++++ b/iokit/Kernel/arm/VivaPwrap.cpp
+@@ -364,19 +364,6 @@
+ 	wr32(PW_CSLEXT_READ, 0x0200);
+ 	IOLog("VIVA PWRAP: reg_clock done\n");
+ 
+-	/* liveness probe: does a WACS2 read complete (FSM reaches WFVLDCLR)?
+-	 * Data need not be 0x5aa5 yet (sistrobe calibrates the SI phase), but a
+-	 * completed transaction proves the engine+clock are alive. A timeout
+-	 * means dead - abort before the long calibration sweeps. */
+-	{
+-		IOReturn lr = wacs2NoChk(0, PMIC_DEW_READ_TEST, 0, &r);
+-		IOLog("VIVA PWRAP: post-regclock read_test ret %d rdata 0x%x\n", (int)lr, r);
+-		if (lr != kIOReturnSuccess) {
+-			IOLog("VIVA PWRAP: WACS2 dead after reg_clock - aborting init\n");
+-			return;
+-		}
+-	}
+-
+ 	/* 5. __pwrap_InitSPISLV: PMIC SPI slave configuration */
+ 	wacs2NoChk(1, PMIC_RG_SRCLKEN_IN0, 0xf0, NULL);
+ 	wacs2NoChk(1, PMIC_RG_SMT_SPI_CLK, 0xf, NULL);
+@@ -405,6 +392,30 @@
+ 	wr32(PW_DIO_EN, 1);
+ 	IOLog("VIVA PWRAP: dio on\n");
+ 
++	/* liveness probe at the correct point: the bus is now fully configured
++	 * (InitSPISLV + dio done). A WACS2 read should COMPLETE the FSM
++	 * (WFVLDCLR) even though the data is still uncalibrated garbage - SI
++	 * timing is what sistrobe fixes next, not transaction completion. A
++	 * timeout here means the SPI engine genuinely cannot finish a transfer
++	 * (dead bus), so skip the calibration sweeps. One retry covers a
++	 * transient FSM-still-busy right after dio. */
++	IODelay(100);
++	{
++		IOReturn lr = wacs2NoChk(0, PMIC_DEW_READ_TEST, 0, &r);
++		if (lr != kIOReturnSuccess) {
++			IODelay(50);
++			lr = wacs2NoChk(0, PMIC_DEW_READ_TEST, 0, &r);
++		}
++		IOLog("VIVA PWRAP: post-dio read_test ret %d rdata 0x%x wrap_en %x wacs2_en %x "
++		    "dio_en %x arb %x ifrao2_sta %x\n", (int)lr, r, rd32(PW_WRAP_EN),
++		    rd32(PW_WACS2_EN), rd32(PW_DIO_EN), rd32(PW_HPRIO_ARB_EN),
++		    infraRd(AT_IFRAO_CG0_STA));
++		if (lr != kIOReturnSuccess) {
++			IOLog("VIVA PWRAP: WACS2 cannot complete a transaction - bus dead\n");
++			return;
++		}
++	}
++
+ 	/* 7. _pwrap_init_sistrobe(0): SI strobe calibration */
+ 	found = 0;
+ 	si_sample_ctrl = 0;

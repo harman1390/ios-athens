@@ -3,6 +3,75 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15g - gpu12: patch 0187 fixes premature liveness probe <<<
+
+FIX (patch 0187, xnu/patches/0187-athens-pwrap-liveness-fix.patch): the
+gpu11 post-regclock read_test fired BEFORE InitSPISLV/dio/sistrobe - before
+Android ever does a PMIC read - so its timeout was a likely FALSE NEGATIVE.
+0187 removes that early abort and moves the liveness check to AFTER dio (bus
+fully configured). It now also logs wrap_en/wacs2_en/dio_en/arb/ifrao2_sta
+readback so a still-dead bus shows whether config writes even stuck.
+Verified: applies clean to post-0186 baseline, reproduces new file exactly.
+
+EXHAUSTIVE pre-build verification (all confirmed, no guessing):
+- Clocks RUNNING: ifrao2 sta=+0x90 correct reg (clk-mt6853.c); 0x3000 = bits
+  12,13 gated only; PMIC_TMR(bit0)/PMIC_AP(bit1)=0=running. clk_cfg8=0x2010001
+  -> pwrap_ulposc_sel mux=0 -> osc_d10 (always-on XO); fpwrap_ulposc_ck is a
+  fixed FACTOR (no gate). Whole chain live - gating was never the bug.
+- Register map + WACS2 protocol byte-identical to mt6785/MT6359 HAL.
+- Init sequence faithful: reset_spislv(CSL,OUTS,CSH,OUTSx4), reg_clock,
+  InitSPISLV, dio, sistrobe, write_test, enable, INIT_DONE, lock - all match.
+- All 11 PMIC addrs confirmed vs mt6853_upmu_hw.h (FILTER_CON0=0x42,
+  SMT_CON1=0x32, DRV_CON1=0x3a, RG_SPI_CON0=0x408, DEW_*=0x40c-0x426,
+  SPISLV_KEY=0x44a); MT6359_PMIC_REG_BASE=0. HWCID=0x8 SWCID=0xa.
+- mt6359-pmic is a pwrap@10026000 child -> WACS2 IS the transport (spi_mst
+  @10028000 is separate, mt6785 HAL doesn't use it).
+
+IF post-dio read_test STILL times out -> bus genuinely can't complete a
+transfer. Then suspects (need evidence, not guesses): pinmux (SPI pads not
+routed to pwrap), spi_mst block needs enable, PMIC SPI-slave power domain,
+or MT6853 needs PMIF. IF it completes -> sistrobe calibrates -> swcid/hwcid
+0x59xx -> PMIC works -> GPU power -> IOAcceleratorES -> GUI.
+
+## >>> ATHENS HANDOFF 2026-11-15f - gpu11 LOG ANALYZED: clocks ON, WACS2 read timeout <<<<
+
+gpu11 (e43b136) booted to logo, forced recovery, pulled sweetlog tail
+(.tmp-patch/gpu11-tail.bin, 16 MiB). VIVA PWRAP stage lines, verbatim:
+
+    init_done0 0xa000a wacs2_en 0xa000a wacs2_rdata 0x0 (fsm 0, init 0)
+    init-done clear; running athens pwrap init
+    athens init; pre ifrao2_sta 0x3000 clk_cfg8 0x2010001 wrap_en 0x0
+    clocks on, ifrao2_sta 0x3000 (0=running)
+    spislv reset done
+    reg_clock done
+    post-regclock read_test ret -536870186 rdata 0x0      <-- TIMEOUT
+    WACS2 dead after reg_clock - aborting init
+    post-init wacs2_rdata 0x0 (fsm 0 init 0)
+    probe swcid/hwcid ret -536870186 val 0x0
+    WACS2 still dead after athens init, not using it
+    VIVA GPU: no PMIC wrapper
+
+CONFIRMED from log + clk-mt6853.c:
+- All 3 ADT reg maps worked (ifrao2_sta/clk_cfg8/wrap_en returned real vals).
+- ifrao2 sta=+0x90 IS the right reg (clk-mt6853.c ifrao2_cg_regs sta_ofs=0x90).
+  0x3000 = bits12,13 gated (I2C1+reserved); PMIC_TMR(bit0)/PMIC_AP(bit1)=0
+  = RUNNING. => pwrap spi/wrap clocks were ALREADY on; gating was NOT the bug.
+- clk_cfg8=0x2010001 -> pwrap_ulposc_sel mux=(>>2)&7=0 -> osc_d10 parent. OK.
+- ret -536870186 = kIOReturnTimeout: WACS2 FSM never reached WFVLDCLR.
+
+ROOT-CAUSE HYPOTHESIS (to verify, not confirmed): the post-regclock read_test
+is MY extra probe placed BEFORE InitSPISLV/dio/sistrobe - i.e. before the SPI
+slave is configured and SI timing calibrated. Android does NO read test there;
+its first PMIC reads are inside _pwrap_init_dio/_pwrap_init_sistrobe AFTER
+InitSPISLV+dio. So the timeout is likely a FALSE NEGATIVE - bus not yet
+configured. FIX: remove early abort; move liveness check to AFTER dio; let
+sistrobe/write_test run (bounded ~few sec even if dead).
+
+If bus STILL dead after full config -> remaining suspects (unverified):
+pinmux (SPI pads not routed to pwrap), spi_mst@0x10028000 needs enable, PMIC
+SPI-slave power domain off, or MT6853 uses PMIF not WACS2 (unlikely - mt6359
+is a pwrap child + WACS2 offsets match mt6785 exactly).
+
 ## >>> ATHENS HANDOFF 2026-11-15e - gpu11 BUILT: pwrap/WACS2 bring-up (commit e43b136, CI 43605565018) <<<
 
 Patch 0186 (xnu/patches/0186-athens-pwrap-bringup.patch) + mkadt.py 3-range
