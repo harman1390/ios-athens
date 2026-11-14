@@ -3,6 +3,24 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15e - gpu11 BUILT: pwrap/WACS2 bring-up (commit e43b136, CI 43605565018) <<<
+
+Patch 0186 (xnu/patches/0186-athens-pwrap-bringup.patch) + mkadt.py 3-range
+pwrap reg. CI 43605565018 SUCCESS. Kernel .tmp-patch/dl/kernel.development.sweet
+(17,940,176 B) — all new VIVA PWRAP stage strings confirmed in binary.
+Repacked shim/out/athens-boot-gpu11.img (17,483,776 B): gpu10 cmdline verbatim
+(sweetlog=1 ufslogsecs=5 sweetfb_hz=0 vivagpu=2 vivagpufreq=390 cpus=8 ...),
+backup/boot.img base, shim Image.gz kernel slot, payload ramdisk. VERIFIED:
+cmdline match + 3-range pwrap reg (0x10026000/0x10001000/0x10000000) in payload.
+
+TEST: fastboot flash boot shim/out/athens-boot-gpu11.img; boot ~60-90s; force
+recovery; pull sweetlog tail (sdc59 skip=13045752 count=4096). READ the stage
+lines: clocks on/ifrao2_sta -> spislv reset -> reg_clock -> post-regclock
+read_test ret -> spislv init -> dio -> sistrobe sample/dly/read_test ->
+wacs2 write_test -> post-init wacs2_rdata -> probe swcid/hwcid.
+If swcid/hwcid return real IDs (0x59xx) -> PMIC WORKS -> GPU power path opens.
+If a stage stalls, that exact step is the blocker (no guessing).
+
 ## >>> ATHENS HANDOFF 2026-11-15d - PWRAP BRING-UP SPEC 100% CONFIRMED (exact athens kernel) <<<
 
 Source of truth = exact athens kernel `techyminati/android_kernel_realme_mt6853`
