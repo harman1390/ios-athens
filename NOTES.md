@@ -2670,3 +2670,52 @@ OPEN / NEXT
 - NEW BUILD: CI run 43586049946.
 - STILL OPEN: GPU match; touch reset-state 0x00; stray-writer panic;
   VivaMTLDriver.bundle staged.
+
+## 2026-11-14 GPU diag boot #5 RESULT: whole-plane walk at platform-start ALSO empty -> moved to late driver
+
+- Built athens-boot-gpu5.img from CI 43586049946 (SWEET NUB2 now uses
+  IORegistryIterator::iterateOver(gIOServicePlane,
+  kIORegistryIterateRecursively) - whole service plane from gRegistryRoot,
+  the exact call IOCatalogue.cpp:705 uses). Flashed boot, rebooted.
+- USER: panic again (stray-writer). Pulled SWEETLOG - NOTE: needed an
+  8 MiB pull (skip=13046798 count=2048); the 1025-block pull caught only
+  stale/zero data. Header 'SWEETLOG' v1 ring=4MiB totalbytes=405815
+  flushseq=22 = FRESH gpu5 boot.
+- FINDINGS (verified from log, not guessed):
+  * Boot reached USERSpace: launchd exec, dyld_shared_cache mapping,
+    backboardd running, SpringBoard exec - full userspace came up.
+  * 'platform expert registered' printed; ZERO 'SWEET NUB2', ZERO
+    'compat=' - even the whole-plane recursive walk produced NO output.
+  * backboardd log line 886-887: 'path IODeviceTree:/arm-io ->
+    IOPlatformDevice' + 'children of arm-io in IODeviceTree' - the DT
+    plane DOES have the tree; drivers DID match arm-io children (SEP,
+    WDT, VIVA KP/PWRAP/GPIO/I2C, ATHENS SPI spi4 ready, SWEET FB/GIC/EINT,
+    touch bind+fw attempt).
+  * 'ATHENS TOUCH: reset state timeout (last 0x00)' still present.
+- VERIFIED (source, not assumed):
+  * IOService::attach(provider) -> attachToParent(provider,
+    gIOServicePlane) (IOService.cpp:856). nubs attach in service plane.
+  * SweetPlatformExpert::processTopLevel creates nubs for cpus-children,
+    root-children, AND arm-io-children (line 119), all attach(this).
+  * Chain is SYNCHRONOUS: IODTPlatformExpert has no own start(); inherits
+    IOPlatformExpert::start -> configure -> IODTPlatformExpert::configure
+    -> processTopLevel -> SweetPlatformExpert::processTopLevel -> createNubs.
+    So ALL nubs (incl mali) exist BEFORE 'platform expert registered' and
+    before my diagnostic.
+  * getNextObject needs no reset(); iterateOver matches IOCatalogue use;
+    metaCast(const char*) on OSMetaClassBase; fromPath returns retained
+    ptr (VivaBattery pattern).
+- UNRESOLVED WHY platform-start iterateOver saw nothing: candidates are
+  (a) nubs attach to `this` but child-set links populate later than
+  start(), (b) iterateOver returned NULL, (c) service-plane entries not
+  reachable from gRegistryRoot at that instant. NOT yet distinguished.
+- FIX (commit 633ccf9): moved diagnostic into AthensSPI::start - a
+  guaranteed arm-io child driver that runs AFTER every nub exists. It
+  now dumps: svcIter NULL-check + recursive gIOServicePlane walk counting
+  entries + every IOPlatformDevice name/compatible ('ATHENS GPNUB'),
+  fromPath('/arm-io/mali', gIODTPlane) presence, and gIODTPlane total
+  count. Distinguishes nub-absent vs wrong-plane vs NULL-iterator vs
+  attach-failure in ONE boot.
+- NEW BUILD: CI run 43587874869.
+- STILL OPEN: GPU match; touch reset-state 0x00; stray-writer panic;
+  VivaMTLDriver.bundle staged.
