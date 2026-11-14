@@ -3,6 +3,72 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15w - *** SPRINGBOARD STALL ROOT CAUSE SYMBOLICATED *** not display/GPU/errno: SpringBoard's launch-sentinel thread blocks in a SYNCHRONOUS XPC to the managed-config service (MCProfileConnection checkIn -> profiled/mdmd) that never replies; sampling those daemons NOW <<<
+
+sweetfb_keep=1 BOOT RESULT (.tmp-patch/eio2-log.txt, 9249 lines, flush#116):
+- `SWEET FB: display off ignored (sweetfb_keep)` fired; every FBSTAT
+  `powerOff 0`, `swaps 5 copies 5 flips 3` FROZEN for rest of log. CONFIRMED:
+  display sleep was NOT the cause; SpringBoard simply stops producing frames.
+- 0197v2 broadened errno catch fired 1668x but ONLY benign codes:
+  err=78/ENOSYS sys=#535 x1550 (every exec), err=102/EOPNOTSUPP ioctl x61
+  (wifid/mediaserverd = missing radios), err=45/ENOTSUP fcntl/work_interval/
+  setpriority x57 (keybagd class-D etc). **ZERO actual EIO.** => Foundation's
+  temp-dir/keychain EIO(5) is SYNTHESIZED userspace-side (missing SEP/Data
+  Protection/data-volume layer) - same architectural gap sweet/viva tolerate.
+
+SMP SYMBOLICATION (installed ipsw 3.1.745 in WSL; tools/sweet-crash.py on
+.tmp-patch/sb-smp.txt) - SpringBoard is ALIVE, all threads parked in
+mach_msg waits, NOT crashed/deadlocked. Decisive stacks:
+- **t0 (launch sentinel, THE gate):** `SBPrepareLaunchSentinelIfNecessary` ->
+  `BYSetupAssistantPrepareLaunchSentinel` -> `iOS_BYSetupAssistantNeedsToRun`
+  -> `MCProfileConnection(CloudConfiguration) shouldShowCloudConfigurationUI`
+  -> `checkInIfNeeded` -> `checkIn` -> `_xpc_connection_send_message_with_reply_sync`
+  = **blocked waiting for the managed-config/MDM daemon to answer check-in.**
+- t2: `FBSProfileManager startService` -> `MCProfileConnection managedAppIDs`
+  -> same checkIn XPC wait (same service).
+- t1/t5/t7: `_BMXPCFileManager`/`BMCache` `createDirectoryAtPath`/
+  `fileHandleForFileAtPath` -> XPC wait = **mobilebackup2 (BackupAgent2)**,
+  never launched.
+- t3: `PLClientLogger permissionForClientID` -> XPC wait = **tccd**,
+  crash-looping 545x.
+- t4: `UIEventFetcher threadMain` runloop = idle/healthy main loop.
+
+WHY THE XPC HANGS (plist analysis, System/Library/LaunchDaemons):
+- `com.apple.managedconfiguration.profiled`: MachServices
+  com.apple.managedconfiguration.profiled{,.public}; LaunchEvents =
+  keybagd.first_unlock / LoginKit.isLoggedIn / lowpowermode / provisioning.
+  Exec'd ONCE (pid123, log line 1306) then SILENT - no IOKit/AKS/crash =
+  alive-but-stuck OR exited before servicing. KeepAlive = PathState on
+  /var/mobile/Library/UserConfigurationProfiles/profiledRunning.
+- `com.apple.devicemanagementclient.mdmd`: vends mdmdservice; LaunchEvents =
+  longLivedTokenChanged ONLY -> never launches on non-MDM device (by design).
+- `com.apple.mobilebackup2` = /usr/libexec/BackupAgent2 --oneshot, vends
+  com.apple.lockdown.mobilebackup2; NEVER exec'd.
+- `tccd` MachServices com.apple.tccd; crash-loops sig5.
+- All binaries EXIST + valid arm64 Mach-O in rootfs (verified).
+- `checkIn`/`xpc_send_message_with_reply_sync` has NO timeout -> infinite hang.
+
+LINEAGE CONTEXT (NOTES 2443/2446): on sweet, SpringBoard was held in
+`BKSSystemShellService _checkIn`/`checkInAndWaitForDataMigration` - fixed by
+LastSystemVersion. Athens cleared that gate; this managed-config checkIn is
+the NEXT launch gate. The prefs meant to skip it (MCForceShowCloudConfig-
+urationUI:False, LockdownActivationIndicatesCloudConfigurationAvailable:
+False, SetupDone) do NOT short-circuit checkInIfNeeded - the XPC runs first.
+
+ACTION: built `shim/out/athens-boot-smp.img` = SAME 0197v2 kernel + same
+cmdline + `sweetsample=SpringBoard,backboardd,profiled,mdmd,tccd,
+mobileactivation,containermanager,nanoprefsyncd,cfprefsd,BackupAgent2`
+(boot-arg only, patch 0054 sampler already in kernel; names = exact proc_name
+comm, 16-char truncated). FLASHED + rebooting. Sampler: first sample 90s,
+then every 120s x40. Will show EXACTLY what profiled/mdmd/BackupAgent2/
+tccd/containermanager are blocked on -> names the shared dependency (likely
+Data Protection/keybag stub or a container/IOKit service).
+
+NEXT: ~15-20 min boot -> recovery -> pull ring -> symbolicate new SMP dumps
+(same sweet-crash.py+ipsw flow). If profiled/mdmd/etc all block on the SAME
+call (e.g. AppleKeyStore/SEP stub, containermanagerd, a missing IOKit
+service), that's the single fix point for the whole launch-gate chain.
+
 ## >>> ATHENS HANDOFF 2026-11-15z - *** CROSS-REPO RESEARCH + REAL GUI BLOCKER IDENTIFIED *** crash storm is NORMAL (sweet/viva prove it); actual blocker = display-off + possible SW-renderer crash-guard; sweetfb_keep=1 test IN FLIGHT <<<
 
 CROSS-REPO RESEARCH (user asked: how do other repos get GUI+touch):
