@@ -2458,3 +2458,125 @@ NOT DONE / RISKS:
 - STILL OPEN: touch reset-state timeout (SPI status reads 0x00 after
   fw download); GPU match unresolved; VivaMTLDriver.bundle staged but
   not injected (kernel power-on unproven).
+
+================================================================================
+2026-11-14 FULL-DAY HANDOFF - ATHENS GPU PORT (MT6853 / Mali-G57 MC3)
+================================================================================
+
+GOAL (unchanged): real iOS GUI on RMX2117 via the Mali GPU. Long-term fix =
+port viva's WORKING Mali-G57 kernel driver + viva-gpu userspace Metal stack.
+User rejected the SW-renderer/rootfs-only shortcut.
+
+--------------------------------------------------------------------------------
+VERIFIED HARDWARE DATA (all from real RMX2117 mt6853.dts / live DT, NOT guesses)
+--------------------------------------------------------------------------------
+GPU node (real): mali@13000000
+  compatible = "mediatek,mali", "arm,mali-valhall"
+  reg       = <0 0x13000000 0 0x4000>          (Mali MMIO only, ONE region)
+  interrupts= SPI 364(GPU) 365(MMU) 366(JOB) 367(EVENT) 368(PWR), lvl-high
+  spi()=32+n is CORRECT (SweetGIC FIRST_SPI=32)
+MFG power/clock blocks are SEPARATE DT nodes (driver still needs them
+consolidated into the synthetic node's 6 reg regions, driver order):
+  [0] Mali MMIO   0x13000000 size 0x4000
+  [1] mfgcfg      0x13fbf000 (mfgcfg_clk@)
+  [2] sleep/scpsys 0x10006000
+  [3] topckgen    0x10000000
+  [4] apmixed      0x1000c000
+  [5] infracfg_ao  0x10001000
+MTCMOS domains (5, vs viva's 4): mfg0 mfg1 mfg2 mfg3 mfg5
+  PWR_CON layout same; status bit = 1<<(2+n)
+PMIC = MT6359 (NOT MT6366):
+  VGPU  = buck_vproc1  EN 0x1708 VOSEL 0x172e DA 0x1726/0x1728  (0.4V base)
+  VSRAM = ldo_vsram_md EN 0x1f2c VOSEL 0x1b46 DA 0x1f32/0x1f2e  (0.5V base)
+  (_vgpu-supply=&mt_pmic_vproc1_buck_reg ; _vsram_gpu-supply=&mt_pmic_vsram_md_ldo_reg)
+  vgpu11 buck is a DECOY feeding proc1 - do NOT use it.
+MFGPLL offsets (MT6853, differ from MT6781): CON0 0x268 CON1 0x26c PWR 0x274
+OPP table (MT6853): 390-950 MHz; vgpu 0.575-0.8V ; vsram 0.75-0.8V
+mfgcfg register offsets: IDENTICAL to viva.
+Panel: panel4 = jdi,nt36672c,dphy,vdo,120  => 120Hz-capable panel.
+
+--------------------------------------------------------------------------------
+WHAT WAS DONE (commits, all pushed to origin/athens)
+--------------------------------------------------------------------------------
+2aa69ce  0182 patch: full MT6853 port of VivaGPU.cpp + VivaPwrap.cpp
+         - PMIC defines MT6366->MT6359, per-rail UV decode (SEL_OF removed)
+         - oppSels/OPP table -> MT6853 390-950MHz
+         - railsTo rewritten: enable VGPU->VSRAM, volt_switch ramp order
+         - MTCMOS 5-domain loop (mfg0,1,2,3,5), mfgOn/mfgOff/mfgDump
+         - MFGPLL offsets -> 0x268/0x26c/0x274
+         - MT6853 topckgen defines + mfgClock CLK_CFG_4 mux rewrite
+         - KCT: added 'mediatek,mali' -> VivaGPUAccelerator (kept mt6781 too)
+de1095d  mkadt.py: gpu node -> mali node, 6 reg regions in driver order,
+         real compatible; docs/ATHENS-GPU.md full 10-pt port spec
+eaa0b9f  research: MT6359 rail regs + MT6853 gpufreq/clk/regulator src
+b0db767  0183: real 'mediatek,mali' compatible + createNub/start diagnostics
+7603644  0183 fix: strstr NOT in kernel libkern -> strcmp
+9cf4557  0183: broaden nub diag - log EVERY createNub node name (node=%s)
+81e647b  NOTES update
+
+--------------------------------------------------------------------------------
+CI BUILDS (harman1390/ios-athens, workflow xnu, --ref athens)
+--------------------------------------------------------------------------------
+43578171782  SUCCESS - 0182 MT6853 port compiled clean. Kernel verified to
+             contain 'clk_cfg_4','VIVA GPU' etc. (kout/0182/kernel...sweet)
+43580732155  FAILED - 'strstr' undeclared in IOPlatformExpert.cpp -> fixed 7603644
+43581545159  SUCCESS - 0183 diagnostics + real compatible (strstr->strcmp)
+43583130785  IN PROGRESS - 0183 broadened 'SWEET NUB: node=%s' all nodes
+
+--------------------------------------------------------------------------------
+BOOT TESTS
+--------------------------------------------------------------------------------
+#1 athens-boot-gpu.img  (vivagpu=2 vivagpufreq=390 sweetfb_keep=1)
+   fastboot boot -> FROZEN LOGO. SWEETLOG: ZERO 'VIVA GPU'. backboardd
+   IOAcceleratorES match -> 0 found. => driver NEVER matched (not a
+   power-on fault). Root cause then unknown.
+#2 athens-boot-gpu2.img (same + sweetfb_hz=0; flashed boot partition after
+   'fastboot boot' failed 'Too many links')
+   User saw 'a panic'. Pulled SWEETLOG gpu2-log.txt (405KB):
+   * ZERO 'SWEET NUB','VIVA GPU','start() entered' - exact-name 'mali'
+     guard stayed silent for ALL nodes.
+   * NO kernel panic in SWEETLOG - userspace ran to liveactivitiesd;
+     tail = userspace daemon crash-loop (chronod SIG5, accountsd SIG6,
+     ReportCrash) + ATHENS TOUCH reset-state timeouts.
+   * ramoops console-ramoops-0 = STALE ANDROID OOM panic (Nov 1), NOT iOS.
+   * Payload/boot-img VERIFIED contain 'mediatek,mali' + cmdline args, so
+     the mali node IS in the flashed image (not a stale-ADT issue).
+   CONCLUSION: 'SWEET NUB' silence => either (a) mali node never reaches
+   createNub (ADT->DT drop / not an arm-io child in gIODTPlane), or
+   (b) getName()!="mali" so the exact-match guard skipped logging.
+
+--------------------------------------------------------------------------------
+MATCH PATH (verified in source - should work, so bug is upstream of it)
+--------------------------------------------------------------------------------
+processTopLevel -> createNubs(this, IODTFindMatchingEntries(armio,
+  kIODTExclusive,NULL))  [arm-io children, NO exclusions]
+  -> createNub -> new IOPlatformDevice -> nub->init(from,gIODTPlane)
+  -> attach(platformExpert) -> registerService() -> driver matching
+IOPlatformDevice::compareName -> platformExpert->compareNubName ->
+  IODTCompareNubName -> CompareKey checks name/compatible/device_type/model
+KCT: IONameMatch 'mediatek,mali' + IOProviderClass IOPlatformDevice
+     -> VivaGPUAccelerator  (unconditional, both mt6781+mt6853 entries)
+reg encoding u64 = 8-byte cells matches #address-cells=2/#size-cells=2;
+same encoding as working framebuffer/UFS nodes => init should succeed.
+
+--------------------------------------------------------------------------------
+OPEN / NEXT
+--------------------------------------------------------------------------------
+* Await CI 43583130785 -> repack boot img -> flash -> pull SWEETLOG.
+  'SWEET NUB: node=' dump reveals: is mali iterated? getName() value?
+  'init FAILED'? Then branch:
+    - mali absent from list      => ADT->DT drop; inspect node props
+    - mali present + init FAILED => fix reg/property encoding
+    - mali present + created     => matching fails; inspect compatible
+                                   property bytes on the nub
+* GPU power-on (once matched): watch 'VIVA GPU: driver started',
+  'MFG0..5 on', 'mfgpll', 'GPU_ID 0x..', 'accelerator published'.
+* TOUCH still broken: 'reset state timeout (last 0x00)' after fw
+  download; embedded fw loads (15 parts nt36672a map) but status read
+  returns 0x00 - SPI event-buf/reset-sequence bug, separate from GPU.
+* USERSPACE: VivaMTLDriver.bundle (15MB arm64 iOS16, VMDevice) staged at
+  ios/viva-gpu-artifacts/ - NOT injected until kernel power-on proven.
+* DISPLAY: sweetfb_hz=0 = copy every vsync (smoothest CPU path), NOT 120Hz.
+  True 120Hz needs SWEET_FB_VSYNC_US 16667->8333 AND panel already 120Hz.
+* Local env: NO clang -> reuse shim/out/athens/Image.gz + viva-bootimg.py
+  repack. fastboot boot flaky ('Too many links') -> flash boot partition.
