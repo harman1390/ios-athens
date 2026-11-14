@@ -1,5 +1,5 @@
 --- a/bsd/dev/arm/systemcalls.c	2026-11-15 03:50:58.525417400 +0530
-+++ b/bsd/dev/arm/systemcalls.c	2026-11-15 03:51:14.693768600 +0530
++++ b/bsd/dev/arm/systemcalls.c	2026-11-15 04:13:23.357405800 +0530
 @@ -41,6 +41,8 @@
  extern void dtrace_systrace_syscall_return(unsigned short, int, int *);
  #endif  /* CONFIG_DTRACE */
@@ -9,17 +9,20 @@
  extern void
  unix_syscall(struct arm_saved_state * regs, thread_t thread_act, struct proc * proc);
  
-@@ -181,6 +183,16 @@
+@@ -181,6 +183,19 @@
  	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
  	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
  
-+	/* SWEET EIO-SYSCALL diag: log unix syscalls that return EIO */
-+	if (__improbable(error == EIO)) {
++	/* SWEET EIO-SYSCALL diag: log unix syscalls returning infra-missing errnos
++	 * that userspace (Foundation temp-dir/keychain init) can surface as EIO. */
++	if (__improbable(error == EIO || error == ENOTSUP || error == EOPNOTSUPP ||
++	    error == ENODEV || error == EROFS || error == ENOSYS || error == ENXIO ||
++	    error == ESTALE || error == EREMOTE || error == ENOLINK || error == ENOSR)) {
 +		static uint32_t sweet_eio_sc = 0;
-+		if (sweet_eio_sc < 5000) {
++		if (sweet_eio_sc < 6000) {
 +			sweet_eio_sc++;
-+			printf("SWEET EIO-SYSCALL code=%u sys=%s pid=%d comm=%s\n",
-+			    code, syscallnames[syscode], proc_pid(proc), proc->p_comm);
++			printf("SWEET EIO-SYSCALL err=%d code=%u sys=%s pid=%d comm=%s\n",
++			    error, code, syscallnames[syscode], proc_pid(proc), proc->p_comm);
 +		}
 +	}
 +
