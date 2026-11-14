@@ -2778,3 +2778,37 @@ OPEN / NEXT
 - STILL OPEN: GPU match (0183 diag still in this build - will finally
   report whether mali nub exists once UFS mounts); touch reset 0x00;
   stray-writer panic; VivaMTLDriver.bundle staged.
+
+## 2026-11-14 CORRECTION: 0184 first attempt SKIPPED -> regenerated vs real dxb source
+
+- Build 43591977976 (first carve attempt) SUCCEEDED compiling but patch
+  0184 was SKIPPED: "patch failed: bsd/dev/sweet_ufs.c:822". Kernel binary
+  had ZERO 'carved DMA'/'dma-phys' strings -> change never shipped.
+- ROOT CAUSE of the skip (verified via xnu-buildtree artifact, the REAL
+  patched source): logs/xnu-src has DIVERGED from what dxb produces.
+  dxb SKIPPED patches 0174, 0175, 0177 (and possibly others) - "already
+  upstream, previously applied, or malformed". So dxb's sweet_ufs.c is an
+  OLDER version than logs/xnu-src.
+- CRITICAL DIFFERENCE in dxb's sweet_ufs_init: it FORCES
+  max_pnum = atop_64(1ULL<<32)-1 = DMA alloc constrained to <4GiB, with NO
+  ufsdma/ml_io_map fallback and NO CAP_64AS conditional (those are the
+  skipped 0177 changes). Under --highmem managed RAM is mostly >4GiB; the
+  <4GiB pool is small/fragile -> kmem_alloc_contig intermittently fails ->
+  ENOMEM -> FindBSDRoot panic. This is the REAL panic mechanism.
+- REGENERATED 0184 (commit 9a454f1) against the actual dxb sweet_ufs.c
+  (extracted from xnu-buildtree.tgz): dma-phys carve inserted before the
+  <4GiB alloc which is kept as the else fallback. git apply --check OK,
+  check_patch_counts OK, content verified.
+- CAP_64AS guard (dxb line 558) only rejects >4GiB DMA if host lacks
+  64-bit addressing; MT6853 CAP 0x387071f has bit24 CAP_64AS set -> the
+  0x1bfcf0000 carve is valid.
+- NEW BUILD: CI run 43593130388.
+- OPEN QUESTION (not blocking): why did gpu5 reach userspace if dxb
+  forces <4GiB DMA? Either <4GiB RAM exists and gpu5 got contiguous pages,
+  or gpu5's build applied 0177. Patch application is deterministic per
+  run, so likely <4GiB RAM exists but is fragile. The carve removes the
+  dependency either way.
+- NOTE: logs/xnu-src and dxb have diverged for sweet_ufs.c (and possibly
+  other files). logs/xnu-src is git-ignored reference only; the PATCH is
+  the source of truth for builds. Future patches touching sweet_ufs.c
+  MUST be generated against the dxb buildtree, not logs/xnu-src.
