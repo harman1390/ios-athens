@@ -1,0 +1,25 @@
+diff --git a/iokit/Kernel/arm/VivaPwrap.cpp b/iokit/Kernel/arm/VivaPwrap.cpp
+--- a/iokit/Kernel/arm/VivaPwrap.cpp
++++ b/iokit/Kernel/arm/VivaPwrap.cpp
+@@ -79,8 +79,19 @@
+ 	    rd32(PWRAP_INIT_DONE0), rd32(PWRAP_WACS2_EN), rdata, WACS_FSM(rdata),
+ 	    (rdata & WACS_INIT_DONE0_V2) != 0);
+ 	if (!(rdata & WACS_INIT_DONE0_V2)) {
+-		IOLog("VIVA PWRAP: WACS2 not initialized by LK, not using it\n");
+-		return false;
++		/* athens: lk2nd does not run the pwrap init that LK did on viva, so
++		 * the init-done flag is clear even if WACS2 is usable. Probe the bus
++		 * with bounded reads (~30 ms each) before giving up: if the PMIC
++		 * answers we can use it anyway. */
++		uint32_t sw = 0, hw = 0;
++		IOReturn r1 = readPMIC(MT6358_SWCID, &sw);
++		IOReturn r2 = readPMIC(MT6358_HWCID, &hw);
++		IOLog("VIVA PWRAP: init-done clear; probe swcid ret %d val 0x%x hwcid ret %d val 0x%x\n",
++		    (int)r1, sw, (int)r2, hw);
++		if (r1 != kIOReturnSuccess && r2 != kIOReturnSuccess) {
++			IOLog("VIVA PWRAP: WACS2 not initialized, not using it\n");
++			return false;
++		}
+ 	}
+ 
+ 	uint32_t hw = 0, sw = 0, top = 0, topint = 0, con = 0, mask = 0, sta = 0, raw = 0;

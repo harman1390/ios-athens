@@ -3,6 +3,97 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15a - gpu9: UFS CAP_64AS FIX CONFIRMED; GUI BLOCKER = PMIC WRAP (pwrap) NOT INIT <<<
+
+BUILD gpu9 (CI 43596846980, kernel.development.sweet -> shim/out/athens-boot-gpu9.img)
+was FLASHED to boot (fastboot flash boot) — Android restore = backup/boot.img.
+Result: device reaches static Apple logo, NO progress bar / GUI. Recovery
+pull of the persistent log gave a FRESH 667 KB console (seq=94) — this is the
+first real gpu9 log, not stale gpu5.
+
+### WHERE LOGS ARE WRITTEN (verified)
+- sweet_ufs.c writes the console ring DIRECTLY into the LAST ~4.2 MiB of the
+  GPT `userdata` partition (raw UFS blocks, NOT a filesystem path).
+- userdata = /dev/block/sdc59 = 13,049,848 4 KiB blocks (53,452,177,408 B).
+- Layout: `base = first_block + nblocks - SWEET_LOG_BLOCKS`;
+  SWEET_LOG_BLOCKS = 1 + SWEET_LOG_SIZE/UFS_BLOCK = 1 + 4 MiB/4 KiB = 1025.
+  Header `SWEETLOG` magic at `base` (block 13045752-1 area); ring starts at
+  `base+1`. Panic records use `SWEETPAN` magic in the same region.
+- Header fields (LE): ver@+8, size@+12(=0x400000), total@+16, seq@+24.
+- READING IT (recovery adb): pull the FINAL 16 MiB = last 4096 blocks,
+  skip = 13045752 blocks of 4096:
+    adb shell "dd if=/dev/block/sdc59 of=/sdcard/tail.bin bs=4096 skip=13045752 count=4096"
+    adb pull /sdcard/tail.bin
+  (Earlier skip=13042688 read ~28 MiB BEFORE the tail -> looked empty. Use
+  13045752.) Header sits ~12.5 MB into that 16 MiB pull.
+
+### VERIFIED gpu9 OBSERVATIONS (from gpu9-console.txt)
+- UFS CAP_64AS fix WORKS: `SWEET UFS: host cap 0x3587071f, DMA at 0x103f24000`
+  (a real managed-pool page >4 GiB, kmem_alloc_contig path — NOT the removed
+  carve 0x1bfcf0000, NOT ufsdma fallback 0x4e000000). userdata on LUN 2
+  read-write; `hfs: mounted iOSRoot`; `BSD root: ufsroot0`. Root+userspace boot.
+- GPU nub EXISTS: `SWEET NUB: node=mali`, `SWEET NUB2: mali (IOPlatformDevice)
+  compat=mediatek,mali`, `ATHENS GPNUB: mali compat=mediatek,mali`,
+  `ATHENS DIAG: DT arm-io/mali=0x...`. `VIVA GPU: start() entered, provider mali`.
+- GUI PROCESSES LAUNCH: `exec SpringBoard` (L796), `exec backboardd` (L876).
+  backboardd drives AppleCLCD + framebuffer (`IOServiceFirstMatch
+  IOMobileFramebuffer`, `open AppleCLCD`, many `SWEET FB: backboardd sel ..`).
+- THE BLOCKER: backboardd repeatedly `matching IOProviderClass=IOAcceleratorES
+  -> 0` (no match). Reason chain (all verified in source):
+    VivaPwrap::start (VivaPwrap.cpp L81-83): WACS2_RDATA=0x00000000 ->
+      `!(rdata & WACS_INIT_DONE0_V2)` -> "WACS2 not initialized by LK, not
+      using it" -> return false BEFORE gVivaPwrap=this/registerService.
+    -> VivaPwrap::wait() returns NULL ->
+    VivaGPUAccelerator::start (VivaGPU.cpp L979-982): "no PMIC wrapper" ->
+      return false BEFORE powerOn/registerService (L1019-1025).
+    -> IOAcceleratorES never published -> backboardd match -> 0 -> no GUI.
+- pwrap DT node IS present: `SWEET NUB: node=pwrap`, `SWEET NUB2: pwrap
+  compat=mediatek,mt6781-pwrap`. pwrap registers DO respond
+  (init_done0=0xa000a, wacs2_en=0xa000a) but WACS2_RDATA=0.
+- SIDE EFFECTS of no pwrap: viva_cpufreq_start (L104) skipped -> no CPU DVFS;
+  RTC unread (calendar 1970); VivaDTNub::publishChildren skipped -> PMIC child
+  devices (mt6359-pmic/keys/gauge) never published.
+- Many userspace daemons CRASH (sig5/sig6: liveactivitiesd, chronod,
+  mobileactivationd, dmd, ScreenTimeAgent, accountsd...) + "Too many corpses"
+  + dyld_shared_cache "not in trust cache". Likely missing entitlements/GPU —
+  secondary to the GUI blocker, not the cause of the static logo.
+- ATHENS TOUCH still loops "reset state timeout (last 0x00)" -> fw download
+  failed (async, non-blocking — confirmed it does NOT block boot).
+
+### PWRAP INVESTIGATION RESULT (2026-11-15, verified vs Linux mtk-pmic-wrap.c)
+- athens pwrap = `mediatek,mt6853-pwrap` @ reg {0x10026000,0x1000}=pwrap +
+  {0x10028000,0x1000}=spi_mst (live-dt/pwrap@10026000; reg-names pwrap/spi_mst).
+  Our ADT only emits the pwrap range (index0) — WACS regs are in that range.
+- VivaPwrap offsets (INIT_DONE0=0x090, WACS2_EN=0x09c, WACS2_CMD=0xc20,
+  WACS2_RDATA=0xc24, WACS2_VLDCLR=0xc28) MATCH Linux mt6779/mt6765 table —
+  correct for MT6853-class pwrap. NOT an offset bug.
+- ROOT CAUSE confirmed: `INIT_DONE` is a SOFTWARE flag. Linux pwrap_init()
+  ends with `pwrap_writel(1, PWRAP_INIT_DONE2/0/1)`. On viva, LK ran this;
+  on athens lk2nd does NOT -> our iOS kernel must run pwrap_init itself.
+  VivaPwrap currently only READS WACS2_RDATA and bails if bit22 clear.
+- pwrap needs clocks `spi`,`wrap`,`ulposc`,`ulposc_osc` (live-dt clock-names;
+  spi+wrap gated in infracfg, ulposc* in topckgen). iOS has NO clock driver,
+  BUT viva_cpufreq.c already pokes clocks directly: INFRA_CG_CLR=0x10001084
+  (clock-gate clear), INFRA_RST0_SET/CLR=0x10001120/124, apmixed PLLs
+  0x1000c2xx. Reuse that mechanism to gate-enable pwrap clocks.
+- FIX PLAN (ordered, each = patch + CI build + fastboot flash test):
+  1) DIAGNOSTIC: in VivaPwrap::start, before the init-done bail, attempt a real
+     PMIC read (SWCID 0x00a expect chip id 0x59 / HWCID) and log result. If it
+     responds, pwrap is already usable -> just relax the check. If garbage/
+     timeout -> need full init.
+  2) If init needed: port minimal pwrap_init writes for mt6779-class:
+     WRAP_EN=1, HIPRIO_ARB_EN, WACS2_EN=1, CS-ext, sidly, WACS0/1/2_EN=1,
+     STAUPD_PRD=5, STAUPD_GRPEN=0xff, then INIT_DONE0/1/2=1 — AFTER enabling
+     spi+wrap clocks via infracfg CG_CLR. Need exact mt6853 clock-gate bits
+     (clk-mt6853.c / mt6853.dts pwrap clock indices) — verify before writing.
+  3) Then WACS2 works -> readPMIC/writeRegulator -> gVivaPwrap set ->
+     registerService -> AthensPMIC child -> GPU powerOn -> IOAcceleratorES ->
+     backboardd renders -> GUI.
+- RISK: wrong clock-gate bit or init write can hang AP/bus. Validate each
+  register against mt6853.dts + clk-mt6853.c before building. Prefer the
+  diagnostic build (step1) first to learn whether clocks are already on.
+- ONCE GUI works: inject VivaMTLDriver.bundle into athens rootfs for Metal.
+
 ## >>> ATHENS HANDOFF 2026-11-14c - GPU PORT: DRIVER ALREADY IN TREE; VIVA-GPU USERSPACE FOUND <<<
 
 USER DIRECTION: abandoned the SW-renderer/userdata-hack path ("will not
