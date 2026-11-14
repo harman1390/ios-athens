@@ -3,6 +3,79 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15d - PWRAP BRING-UP SPEC 100% CONFIRMED (exact athens kernel) <<<
+
+Source of truth = exact athens kernel `techyminati/android_kernel_realme_mt6853`
+(branch k6853v1_64_6360). MT6853 uses shared mt6785 pwrap HAL
+(`drivers/misc/mediatek/pmic_wrap/mt6785/pwrap_hal.c`, MTK_PLATFORM_MT6359=1).
+Single PMIC, PMIC_WRAP_ULPOSC_CAL=1, CRC_SUPPORT. WACS2 protocol in VivaPwrap is
+BYTE-IDENTICAL to mt6785 (cmd=(wr<<31)|((adr>>1)<<16)|data; FSM=(x>>16)&7;
+RDATA&0xffff; VLDCLR=1; INIT_DONE bit22). Offsets NOT the problem.
+
+CONFIRMED register map (mt6785 hal.h, base fRegs=0x10026000):
+WRAP_EN=0x04 DIO_EN=0x08 SI_SAMPLE_CTRL=0x0c SI_SAMPLE_CTRL_ULPOSC=0x1c
+RDDMY=0x20 CSHEXT_WRITE=0x24 CSHEXT_READ=0x28 CSLEXT_WRITE=0x2c CSLEXT_READ=0x30
+EXT_CK_WRITE=0x34 EXT_CK_READ=0x38 STAUPD_CTRL=0x3c STAUPD_GRPEN=0x40
+EINT_STA0_ADR=0x44 WRAP_STA=0x60 HARB_HPRIO=0x68 HPRIO_ARB_EN=0x6c
+MAN_EN=0x7c MAN_CMD=0x80 MAN_RDATA=0x84 MAN_VLDCLR=0x88
+WACS0/1/2/3_EN=0x8c/0x94/0x9c/0xa4 INIT_DONE0/1/2/3=0x90/0x98/0xa0/0xa8
+WACS_P2P_EN=0xac INIT_DONE_P2P=0xb0 WACS_MD32_EN=0xb4 INIT_DONE_MD32=0xb8
+INT0_EN=0xbc INT1_EN=0xcc TIMER_CTRL=0xf0 WDT_CTRL=0xf8 WDT_SRC_EN_0=0xfc
+WDT_SRC_EN_1=0x100 WACS2_CMD=0xc20 WACS2_RDATA=0xc24 WACS2_VLDCLR=0xc28
+SW_RESET=0x2a8 MUX_SEL=0x00
+Bitfields: W2_FSM=(x>>16)&7 W2_SYNC=(x>>20)&1 W2_INITDONE=(x>>22)&1
+WRAP_FSM=(x>>11)&0xf WRAP_DLE=x&7 MAN_FSM=(x>>8)&7. OP: WR=1 CSH=0 CSL=1
+OUTS=8 INS=0xc INQ=0xf. FSM: IDLE=0 REQ=2 WFDLE=4 WFVLDCLR=6. SYNC_IDLE=1.
+MAN cmd=(OP_WR<<13)|(OP_<<8). ARB=0xfbb7f (MT6359).
+
+CONFIRMED clocks (clk-mt6853.c + mt6785 hal.h __pwrap_spi_clk_set):
+infracfg_ao base=0x10001000 (syson@10001000, #clock-cells=1, phandle 0x2f).
+ifrao2 gate regs SET=+0x80 CLR=+0x84 STA=+0x90 ; PMIC_TMR(bit0,wrap)/PMIC_AP
+(bit1,spi) parent fpwrap_ulposc_ck. ACTIVE-LOW: STA=1 gated, CLR-write enables.
+ifrao4: SET=+0xa4 CLR=+0xa8. PMICW_CLOCK_CTRL_CLR=+0x3ac. INFRA_GLOBALCON_RST2
+SET=+0x140 CLR=+0x144. __pwrap_spi_clk_set: CG0_SET=0xf,CG2_SET=0x100,
+PMICW_CLK_CTRL=0x2,soft-reset pulse,CG0_CLR=0xf,CG2_CLR=0x100. topckgen mapped
+but NOT written by pwrap_init (CCF handles mux/factor; default likely osc_d10).
+
+CONFIRMED pwrap_init() order (mt6785 pwrap_hal.c):
+1 __pwrap_spi_clk_set 2 _pwrap_reset_spislv(MAN bit-bang) 3 WRAP_EN=1
+WACS2_EN=1 ARB=0x4 4 _pwrap_init_reg_clock(1): EXT_CK_WRITE=1; wacs2 write
+PMIC_DEW_RDDMY_NO(0x424)=0x8; RDDMY=0x8; CSHEXT=0; CSLEXT_WRITE=0;
+CSLEXT_READ=0x200 5 __pwrap_InitSPISLV: PMIC writes 0x42=0xf0,0x32=0xf,0x98=0xf0,
+0x408=1,0x3a=0x8888 6 _pwrap_init_dio(1): ARB=0x4; wait WRAP_FSM idle;
+wacs2 write PMIC_DEW_DIO_EN(0x40c)=1; wait WACS2 idle+sync; DIO_EN=1
+7 _pwrap_init_sistrobe(0): SI_SAMPLE_CTRL sweep en0-7/ck0-1 until
+PMIC_DEW_READ_TEST(0x40e)==0x5aa5; RG_SPI_DLY_SEL(0x426) sweep 0-9 write/read
+test PMIC_DEW_WRITE_TEST(0x410) boundary; SI_SAMPLE_CTRL+=0x20;
+SI_SAMPLE_CTRL_ULPOSC ULPOSC_CAL 8 _pwrap_wacs2_write_test(0): write 0xa55a,
+read back==0xa55a 9 _pwrap_enable: ARB=0xfbb7f; WACS0/1/2/3/P2P/MD32_EN=1;
+STAUPD_CTRL=5 WDT_CTRL=0x3f WDT_SRC_EN=0xffffffff/x2 TIMER_CTRL=3 INT0=0xffffffff
+INT1=0x1fff 10 INIT_DONE0/1/2/3/P2P/MD32=1 11 _pwrap_lock_SPISLVReg:
+PMIC_SPISLV_KEY(0x44a)=0.
+PMIC SPI addrs (MT6359 base0): DEW_DIO_EN=0x40c READ_TEST=0x40e WRITE_TEST=0x410
+RDDMY_NO=0x424 RG_SPI_DLY_SEL=0x426 RG_SMT_SPI_CLK=0x32 GPIO_PULLEN0_CLR=0x98
+RG_SPI_MISO_MODE=0x408 RG_OCTL_SPI_CLK=0x3a RG_SRCLKEN_IN0=0x42 INT_STA=0x452
+SPISLV_KEY=0x44a. HWCID=0x008 SWCID=0x00a (same as MT6358). SWCID expected 0x59xx.
+Init-phase PMIC writes use raw wacs2_nochk (NOT writePMIC which is allow-listed).
+
+IMPLEMENTED (patch 0186 + mkadt.py, verified):
+- tools/mkadt.py: pwrap reg now 3 ranges -> idx0 pwrap@10026000, idx1
+  infracfg_ao@10001000, idx2 topckgen@10000000 (confirmed consecutive in ADT).
+- VivaPMIC.h: +fInfraMap/fInfraRegs/fTopMap/fTopRegs, wacs2NoChk, athensPwrapInit,
+  infraRd/infraWr/topRd.
+- VivaPwrap.cpp: +all PW_*/AT_*/PMIC_* defines (verified vs mt6785 hal.h +
+  mt6853 upmu_hw.h), wacs2NoChk (= _pwrap_wacs2_nochk), athensPwrapInit =
+  faithful pwrap_init() port: spi_clk_set(infracfg) -> reset_spislv(manual) ->
+  WRAP_EN/WACS2_EN/ARB=4 -> reg_clock -> liveness probe -> InitSPISLV -> dio ->
+  sistrobe(cal) -> write_test -> enable(ARB=fbb7f,all WACS EN) -> INIT_DONE* ->
+  lock_SPISLVReg. Skips InitStaUpd+starve_set (not needed for reg access).
+  Called when init-done clear; then re-probes SWCID/HWCID.
+- Patch verified: applies to bt-art+0185 -> IDENTICAL to logs/xnu-src.
+- mt6785 HAL confirmed = MTK_PLATFORM_MT6359 (mt6885=MT6358 wrong). WACS2 in
+  "pwrap" reg@0x10026000 (spi_mst@0x10028000 is separate SPI-master block).
+- RISK: ifrao2 gate clear assumes ulposc parent (topckgen mux->factor) runs on
+  reset defaults; if WACS2 still dead, check clk_cfg8 mux state (logged).
+
 ## >>> ATHENS HANDOFF 2026-11-15c - gpu10 RESULT: WACS2 genuinely DEAD (probe timeout); MT6853 may need ARB mode / PMIF <<<
 
 gpu10 (patch 0185 probe) flashed + logged. DECISIVE LINE:

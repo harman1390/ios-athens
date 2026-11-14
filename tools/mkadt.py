@@ -335,7 +335,9 @@ def athens_devices(ph, phandle, gic_ph, ecid):
         node('pwrap', [
             ph(),
             ('compatible', cstr('mediatek,mt6781-pwrap')),
-            ('reg', io(0x10026000, 0x1000)),
+            # idx0 pwrap@10026000, idx1 infracfg_ao@10001000 (clock gates for
+            # the spi/wrap clocks + reset), idx2 topckgen@10000000 (ulposc mux).
+            ('reg', io(0x10026000, 0x1000) + io(0x10001000, 0x1000) + io(0x10000000, 0x1000)),
         ], [node('pmic', [
             ph(),
             ('compatible', cstr('mediatek,mt6359-pmic')),

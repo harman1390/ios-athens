@@ -1,0 +1,430 @@
+diff --git a/iokit/Kernel/arm/VivaPwrap.cpp b/iokit/Kernel/arm/VivaPwrap.cpp
+--- a/iokit/Kernel/arm/VivaPwrap.cpp
++++ b/iokit/Kernel/arm/VivaPwrap.cpp
+@@ -52,6 +52,109 @@
+ #define MT6358_PSC_TOP_INT_STATUS0 0x91c
+ #define MT6358_PSC_TOP_INT_RAW_STATUS0 0x91e
+ 
++/*
++ * ================= athens (MT6853) pwrap bring-up =================
++ * Ported from the vendor mt6785 pwrap HAL
++ * (drivers/misc/mediatek/pmic_wrap/mt6785/pwrap_hal.c + pwrap_hal.h,
++ * MTK_PLATFORM_MT6359) and clk-mt6853.c. lk2nd leaves the wrapper
++ * unclocked and uninitialised; Android's CCF enables the spi/wrap gates and
++ * pwrap_init() runs the sequence below. We replicate it with direct MMIO.
++ * The WACS2 register offsets and command format are identical to the ones
++ * this file already uses (verified against mt6785/pwrap_hal.h).
++ */
++
++/* infracfg_ao (syson@10001000) - clk-mt6853.c *_cg_regs + mt6785 hal.h */
++#define AT_IFRAO_CG0_SET    0x080   /* MODULE_SW_CG_0_SET : ifrao2 set   */
++#define AT_IFRAO_CG0_CLR    0x084   /* MODULE_SW_CG_0_CLR : ifrao2 clr   */
++#define AT_IFRAO_CG0_STA    0x090   /* ifrao2 status                    */
++#define AT_IFRAO_CG2_SET    0x0a4   /* MODULE_SW_CG_2_SET : ifrao4 set   */
++#define AT_IFRAO_CG2_CLR    0x0a8   /* MODULE_SW_CG_2_CLR : ifrao4 clr   */
++#define AT_PMICW_CLK_CTRL   0x3ac   /* PMICW_CLOCK_CTRL_CLR             */
++#define AT_INFRA_RST2_SET   0x140   /* INFRA_GLOBALCON_RST2_SET         */
++#define AT_INFRA_RST2_CLR   0x144   /* INFRA_GLOBALCON_RST2_CLR         */
++
++/* topckgen (0x10000000) - clk-mt6853.c CLK_CFG_8: pwrap_ulposc_sel mux */
++#define AT_CLK_CFG_8        0x090
++#define AT_ULPOSC_SEL_SHIFT 2
++
++/* pwrap register offsets (mt6785 pwrap_hal.h; base = fRegs) */
++#define PW_MUX_SEL          0x000
++#define PW_WRAP_EN          0x004
++#define PW_DIO_EN           0x008
++#define PW_SI_SAMPLE_CTRL   0x00c
++#define PW_SI_SAMPLE_CTRL_ULPOSC 0x01c
++#define PW_RDDMY            0x020
++#define PW_CSHEXT_WRITE     0x024
++#define PW_CSHEXT_READ      0x028
++#define PW_CSLEXT_WRITE     0x02c
++#define PW_CSLEXT_READ      0x030
++#define PW_EXT_CK_WRITE     0x034
++#define PW_EXT_CK_READ      0x038
++#define PW_STAUPD_CTRL      0x03c
++#define PW_STAUPD_GRPEN     0x040
++#define PW_WRAP_STA         0x060
++#define PW_HARB_HPRIO       0x068
++#define PW_HPRIO_ARB_EN     0x06c
++#define PW_MAN_EN           0x07c
++#define PW_MAN_CMD          0x080
++#define PW_MAN_RDATA        0x084
++#define PW_MAN_VLDCLR       0x088
++#define PW_WACS0_EN         0x08c
++#define PW_WACS1_EN         0x094
++#define PW_WACS2_EN         0x09c
++#define PW_WACS3_EN         0x0a4
++#define PW_WACS_P2P_EN      0x0ac
++#define PW_WACS_MD32_EN     0x0b4
++#define PW_INIT_DONE0       0x090
++#define PW_INIT_DONE1       0x098
++#define PW_INIT_DONE2       0x0a0
++#define PW_INIT_DONE3       0x0a8
++#define PW_INIT_DONE_P2P    0x0b0
++#define PW_INIT_DONE_MD32   0x0b8
++#define PW_INT0_EN          0x0bc
++#define PW_INT1_EN          0x0cc
++#define PW_TIMER_CTRL       0x0f0
++#define PW_WDT_CTRL         0x0f8
++#define PW_WDT_SRC_EN_0     0x0fc
++#define PW_WDT_SRC_EN_1     0x100
++#define PW_SW_RESET         0x2a8
++#define PW_WACS2_CMD        0xc20
++#define PW_WACS2_RDATA      0xc24
++#define PW_WACS2_VLDCLR     0xc28
++
++/* bit fields (mt6785 pwrap_hal.h GET_* macros) */
++#define W2_RDATA(x)     ((x) & 0xffff)
++#define W2_FSM(x)       (((x) >> 16) & 7)
++#define W2_SYNC(x)      (((x) >> 20) & 1)
++#define W2_INITDONE(x)  (((x) >> 22) & 1)
++#define WRAP_FSM(x)     (((x) >> 11) & 0xf)
++#define WRAP_DLE(x)     ((x) & 7)
++#define MAN_FSM(x)      (((x) >> 8) & 7)
++
++/* manual-mode OP codes + FSM values (mt6785 pwrap_hal.h) */
++#define OP_WR           0x1
++#define OP_CSH          0x0
++#define OP_CSL          0x1
++#define OP_OUTS         0x8
++#define FSM_IDLE        0
++#define FSM_WFVLDCLR    6
++#define SYNC_IDLE       1
++#define MANUAL_MODE     1
++#define WRAPPER_MODE    0
++
++/* PMIC (MT6359) SPI register addresses - mt6853 upmu_hw.h (base 0) */
++#define PMIC_DEW_DIO_EN        0x40c
++#define PMIC_DEW_READ_TEST     0x40e
++#define PMIC_DEW_WRITE_TEST    0x410
++#define PMIC_DEW_RDDMY_NO      0x424
++#define PMIC_RG_SPI_DLY_SEL    0x426
++#define PMIC_RG_SMT_SPI_CLK    0x32
++#define PMIC_GPIO_PULLEN0_CLR  0x98
++#define PMIC_RG_SPI_MISO_MODE  0x408
++#define PMIC_RG_OCTL_SPI_CLK   0x3a
++#define PMIC_RG_SRCLKEN_IN0    0x42
++#define PMIC_SPISLV_KEY        0x44a
++
+ OSDefineMetaClassAndStructors(VivaPwrap, IOService);
+ 
+ extern "C" void viva_wifi_reserve(void);
+@@ -68,11 +171,19 @@
+ 	}
+ 	fLock = IOLockAlloc();
+ 	fMap = provider->mapDeviceMemoryWithIndex(0);
++	fInfraMap = provider->mapDeviceMemoryWithIndex(1);   /* infracfg_ao: clock gates */
++	fTopMap = provider->mapDeviceMemoryWithIndex(2);     /* topckgen: ulposc mux */
+ 	if (fLock == NULL || fMap == NULL) {
+ 		IOLog("VIVA PWRAP: cannot map registers\n");
+ 		return false;
+ 	}
+ 	fRegs = (vm_offset_t)fMap->getVirtualAddress();
++	fInfraRegs = fInfraMap ? (vm_offset_t)fInfraMap->getVirtualAddress() : 0;
++	fTopRegs = fTopMap ? (vm_offset_t)fTopMap->getVirtualAddress() : 0;
++	if (fInfraRegs == 0 || fTopRegs == 0) {
++		IOLog("VIVA PWRAP: cannot map infracfg/topckgen (infra 0x%llx top 0x%llx)\n",
++		    (unsigned long long)fInfraRegs, (unsigned long long)fTopRegs);
++	}
+ 
+ 	uint32_t rdata = rd32(PWRAP_WACS2_RDATA);
+ 	IOLog("VIVA PWRAP: init_done0 0x%x wacs2_en 0x%x wacs2_rdata 0x%08x (fsm %u, init %u)\n",
+@@ -80,16 +191,20 @@
+ 	    (rdata & WACS_INIT_DONE0_V2) != 0);
+ 	if (!(rdata & WACS_INIT_DONE0_V2)) {
+ 		/* athens: lk2nd does not run the pwrap init that LK did on viva, so
+-		 * the init-done flag is clear even if WACS2 is usable. Probe the bus
+-		 * with bounded reads (~30 ms each) before giving up: if the PMIC
+-		 * answers we can use it anyway. */
++		 * the init-done flag is clear and the clocks/engine are off. Run the
++		 * ported MT6853 init (clocks + WACS2 sequence) before probing. */
++		IOLog("VIVA PWRAP: init-done clear; running athens pwrap init\n");
++		athensPwrapInit();
++		rdata = rd32(PWRAP_WACS2_RDATA);
++		IOLog("VIVA PWRAP: post-init wacs2_rdata 0x%08x (fsm %u init %u)\n",
++		    rdata, WACS_FSM(rdata), (rdata & WACS_INIT_DONE0_V2) != 0);
+ 		uint32_t sw = 0, hw = 0;
+ 		IOReturn r1 = readPMIC(MT6358_SWCID, &sw);
+ 		IOReturn r2 = readPMIC(MT6358_HWCID, &hw);
+-		IOLog("VIVA PWRAP: init-done clear; probe swcid ret %d val 0x%x hwcid ret %d val 0x%x\n",
++		IOLog("VIVA PWRAP: probe swcid ret %d val 0x%x hwcid ret %d val 0x%x\n",
+ 		    (int)r1, sw, (int)r2, hw);
+ 		if (r1 != kIOReturnSuccess && r2 != kIOReturnSuccess) {
+-			IOLog("VIVA PWRAP: WACS2 not initialized, not using it\n");
++			IOLog("VIVA PWRAP: WACS2 still dead after athens init, not using it\n");
+ 			return false;
+ 		}
+ 	}
+@@ -142,6 +257,249 @@
+ 	return false;
+ }
+ 
++/*
++ * _pwrap_wacs2_nochk (mt6785 pwrap_hal.c): a raw WACS2 transaction with no
++ * init-done / sync check - used by pwrap_init() itself before the wrapper is
++ * up. Identical command format to readPMIC/writePMIC.
++ */
++IOReturn
++VivaPwrap::wacs2NoChk(uint32_t write, uint32_t addr, uint32_t wdata, uint32_t *rdata)
++{
++	if (rdata) {
++		*rdata = 0;
++	}
++	if (addr > 0xffff || wdata > 0xffff || (!write && rdata == NULL)) {
++		return kIOReturnBadArgument;
++	}
++	IOReturn ret = kIOReturnTimeout;
++	IOLockLock(fLock);
++	if (waitFSM(WACS_FSM_IDLE)) {
++		wr32(PW_WACS2_CMD, (write ? 0x80000000u : 0) | ((addr >> 1) << 16) | wdata);
++		if (write) {
++			ret = kIOReturnSuccess;
++		} else if (waitFSM(WACS_FSM_WFVLDCLR)) {
++			*rdata = rd32(PW_WACS2_RDATA) & 0xffff;
++			wr32(PW_WACS2_VLDCLR, 1);
++			ret = kIOReturnSuccess;
++		}
++	}
++	IOLockUnlock(fLock);
++	return ret;
++}
++
++/*
++ * athens (MT6853) pwrap bring-up - faithful port of pwrap_init() from the
++ * vendor mt6785 pwrap HAL (MT6359-class). lk2nd does not run this, so the
++ * spi/wrap clocks are gated and the WACS2 engine is uninitialised. Each stage
++ * is logged so a failure pinpoints the exact step. _pwrap_InitStaUpd() and
++ * _pwrap_starve_set() (status-update/auxadc/starvation, not needed for plain
++ * register access) are intentionally omitted for now.
++ */
++void
++VivaPwrap::athensPwrapInit(void)
++{
++	uint32_t r = 0;
++	int i, found, si_en_sel, si_ck_sel, si_dly, si_sample_ctrl, clk_edge_no;
++	static const uint32_t test_data[30] = {
++		0x6996, 0x9669, 0x6996, 0x9669, 0x6996, 0x9669, 0x6996, 0x9669, 0x6996, 0x9669,
++		0x5aa5, 0xa55a, 0x5aa5, 0xa55a, 0x5aa5, 0xa55a, 0x5aa5, 0xa55a, 0x5aa5, 0xa55a,
++		0x1b27, 0x1b27, 0x1b27, 0x1b27, 0x1b27, 0x1b27, 0x1b27, 0x1b27, 0x1b27, 0x1b27,
++	};
++
++	if (fInfraRegs == 0) {
++		IOLog("VIVA PWRAP: no infracfg map - cannot enable clocks\n");
++		return;
++	}
++	IOLog("VIVA PWRAP: athens init; pre ifrao2_sta 0x%x clk_cfg8 0x%x wrap_en 0x%x\n",
++	    infraRd(AT_IFRAO_CG0_STA), fTopRegs ? topRd(AT_CLK_CFG_8) : 0, rd32(PW_WRAP_EN));
++
++	/* 1. __pwrap_spi_clk_set: gate spi/wrap clocks, drop the SPM 26M ctrl,
++	 *    soft-reset pwrap, then ungate -> a clean clock restart. The ifrao2
++	 *    gates are active-low: STA=1 gated, a CLR write enables. */
++	infraWr(AT_IFRAO_CG0_SET, 0xf);
++	infraWr(AT_IFRAO_CG2_SET, 0x100);
++	infraWr(AT_PMICW_CLK_CTRL, 0x2);
++	infraWr(AT_INFRA_RST2_SET, 1);
++	infraWr(AT_INFRA_RST2_CLR, 1);
++	infraWr(AT_IFRAO_CG0_CLR, 0xf);
++	infraWr(AT_IFRAO_CG2_CLR, 0x100);
++	IODelay(100);
++	IOLog("VIVA PWRAP: clocks on, ifrao2_sta 0x%x (0=running)\n", infraRd(AT_IFRAO_CG0_STA));
++
++	/* 2. _pwrap_reset_spislv: manual-mode bit-bang to reset the SPI slave. */
++	wr32(PW_HPRIO_ARB_EN, 0);
++	wr32(PW_WRAP_EN, 0);
++	wr32(PW_MUX_SEL, MANUAL_MODE);
++	wr32(PW_MAN_EN, 1);
++	wr32(PW_DIO_EN, 0);
++	wr32(PW_MAN_CMD, (OP_WR << 13) | (OP_CSL << 8));
++	wr32(PW_MAN_CMD, (OP_WR << 13) | (OP_OUTS << 8));
++	wr32(PW_MAN_CMD, (OP_WR << 13) | (OP_CSH << 8));
++	for (i = 0; i < 4; i++) {                    /* CSL OUTS CSH OUTS x4 */
++		wr32(PW_MAN_CMD, (OP_WR << 13) | (OP_OUTS << 8));
++	}
++	for (i = 0; i < 1000; i++) {                 /* wait_for_sync: SYNC_IDLE2 */
++		if (W2_SYNC(rd32(PW_WACS2_RDATA)) == SYNC_IDLE) {
++			break;
++		}
++		IODelay(1);
++	}
++	wr32(PW_MAN_EN, 0);
++	wr32(PW_MUX_SEL, WRAPPER_MODE);
++	IOLog("VIVA PWRAP: spislv reset done\n");
++
++	/* 3. enable wrapper + WACS2 + WACS2-only arbitration */
++	wr32(PW_WRAP_EN, 1);
++	wr32(PW_WACS2_EN, 1);
++	wr32(PW_HPRIO_ARB_EN, 0x4);
++	IODelay(100);
++
++	/* 4. _pwrap_init_reg_clock(1): external clock write + PMIC dummy reads */
++	wr32(PW_EXT_CK_WRITE, 1);
++	wacs2NoChk(1, PMIC_DEW_RDDMY_NO, 0x8, NULL);
++	wr32(PW_RDDMY, 0x8);
++	wr32(PW_CSHEXT_WRITE, 0);
++	wr32(PW_CSHEXT_READ, 0);
++	wr32(PW_CSLEXT_WRITE, 0);
++	wr32(PW_CSLEXT_READ, 0x0200);
++	IOLog("VIVA PWRAP: reg_clock done\n");
++
++	/* liveness probe: does a WACS2 read complete (FSM reaches WFVLDCLR)?
++	 * Data need not be 0x5aa5 yet (sistrobe calibrates the SI phase), but a
++	 * completed transaction proves the engine+clock are alive. A timeout
++	 * means dead - abort before the long calibration sweeps. */
++	{
++		IOReturn lr = wacs2NoChk(0, PMIC_DEW_READ_TEST, 0, &r);
++		IOLog("VIVA PWRAP: post-regclock read_test ret %d rdata 0x%x\n", (int)lr, r);
++		if (lr != kIOReturnSuccess) {
++			IOLog("VIVA PWRAP: WACS2 dead after reg_clock - aborting init\n");
++			return;
++		}
++	}
++
++	/* 5. __pwrap_InitSPISLV: PMIC SPI slave configuration */
++	wacs2NoChk(1, PMIC_RG_SRCLKEN_IN0, 0xf0, NULL);
++	wacs2NoChk(1, PMIC_RG_SMT_SPI_CLK, 0xf, NULL);
++	wacs2NoChk(1, PMIC_GPIO_PULLEN0_CLR, 0xf0, NULL);
++	wacs2NoChk(1, PMIC_RG_SPI_MISO_MODE, 0x1, NULL);
++	wacs2NoChk(1, PMIC_RG_OCTL_SPI_CLK, 0x8888, NULL);
++	IOLog("VIVA PWRAP: spislv init done\n");
++
++	/* 6. _pwrap_init_dio(1): enable DIO (double-data-rate) mode */
++	wr32(PW_HPRIO_ARB_EN, 0x4);
++	for (i = 0; i < 1000; i++) {                 /* wait WRAP_FSM idle */
++		uint32_t st = rd32(PW_WRAP_STA);
++		if (WRAP_FSM(st) == 0 && WRAP_DLE(st) == 0) {
++			break;
++		}
++		IODelay(1);
++	}
++	wacs2NoChk(1, PMIC_DEW_DIO_EN, 1, NULL);
++	for (i = 0; i < 1000; i++) {                 /* wait WACS2 idle + sync */
++		uint32_t x = rd32(PW_WACS2_RDATA);
++		if (W2_FSM(x) == FSM_IDLE && W2_SYNC(x) == SYNC_IDLE) {
++			break;
++		}
++		IODelay(1);
++	}
++	wr32(PW_DIO_EN, 1);
++	IOLog("VIVA PWRAP: dio on\n");
++
++	/* 7. _pwrap_init_sistrobe(0): SI strobe calibration */
++	found = 0;
++	si_sample_ctrl = 0;
++	for (si_en_sel = 0; si_en_sel < 8; si_en_sel++) {
++		for (si_ck_sel = 0; si_ck_sel < 2; si_ck_sel++) {
++			si_sample_ctrl = (si_en_sel << 6) | (si_ck_sel << 5);
++			wr32(PW_SI_SAMPLE_CTRL, si_sample_ctrl);
++			wacs2NoChk(0, PMIC_DEW_READ_TEST, 0, &r);
++			if (r == 0x5aa5) {
++				found = 1;
++				break;
++			}
++		}
++		if (found) {
++			break;
++		}
++	}
++	IOLog("VIVA PWRAP: sistrobe sample en %d ck %d ctrl 0x%x rdata 0x%x\n",
++	    si_en_sel, si_ck_sel, si_sample_ctrl, r);
++
++	/* SI data-line delay sweep: find the write/read boundary */
++	for (si_dly = 0; si_dly < 10; si_dly++) {
++		wacs2NoChk(1, PMIC_RG_SPI_DLY_SEL, si_dly, NULL);
++		found = 0;
++		for (i = 0; i < 30; i++) {
++			wacs2NoChk(1, PMIC_DEW_WRITE_TEST, test_data[i], NULL);
++			wacs2NoChk(0, PMIC_DEW_WRITE_TEST, 0, &r);
++			if ((r & 0x7fff) != (test_data[i] & 0x7fff)) {
++				found = 1;
++				break;
++			}
++		}
++		if (found) {
++			break;
++		}
++	}
++	IOLog("VIVA PWRAP: sistrobe dly %d\n", si_dly);
++
++	si_sample_ctrl += 0x20;                       /* non-FPGA */
++	wr32(PW_SI_SAMPLE_CTRL, si_sample_ctrl);
++	if (si_dly == 10) {
++		si_dly--;
++	}
++
++	/* ULPOSC calibration (PMIC_WRAP_ULPOSC_CAL) */
++	si_en_sel = (rd32(PW_SI_SAMPLE_CTRL) << 23) >> 29;
++	si_ck_sel = (rd32(PW_SI_SAMPLE_CTRL) << 26) >> 31;
++	clk_edge_no = (((si_en_sel * 2 + si_ck_sel) * 100) * 3846 / 3846 + 50) / 100;
++	si_en_sel = clk_edge_no / 2;
++	si_ck_sel = clk_edge_no % 2;
++	si_sample_ctrl = (1 << 19) | (si_en_sel << 6) | (si_ck_sel << 5);
++	wr32(PW_SI_SAMPLE_CTRL_ULPOSC, si_sample_ctrl);
++	IOLog("VIVA PWRAP: sistrobe ulposc ctrl 0x%x\n", si_sample_ctrl);
++
++	/* read test */
++	wacs2NoChk(0, PMIC_DEW_READ_TEST, 0, &r);
++	IOLog("VIVA PWRAP: sistrobe read_test rdata 0x%x (want 5aa5)\n", r);
++
++	/* 8. _pwrap_wacs2_write_test(0) */
++	wacs2NoChk(1, PMIC_DEW_WRITE_TEST, 0xa55a, NULL);
++	wacs2NoChk(0, PMIC_DEW_WRITE_TEST, 0, &r);
++	IOLog("VIVA PWRAP: wacs2 write_test rdata 0x%x (want a55a)\n", r);
++
++	/* 9. _pwrap_enable: full arbitration + all WACS channels */
++	wr32(PW_HPRIO_ARB_EN, 0xfbb7f);
++	wr32(PW_WACS0_EN, 1);
++	wr32(PW_WACS1_EN, 1);
++	wr32(PW_WACS2_EN, 1);
++	wr32(PW_WACS3_EN, 1);
++	wr32(PW_WACS_P2P_EN, 1);
++	wr32(PW_WACS_MD32_EN, 1);
++	wr32(PW_STAUPD_CTRL, 5);
++	wr32(PW_WDT_CTRL, 0x3f);
++	wr32(PW_WDT_SRC_EN_0, 0xffffffff);
++	wr32(PW_WDT_SRC_EN_1, 0xffffffff);
++	wr32(PW_TIMER_CTRL, 3);
++	wr32(PW_INT0_EN, 0xffffffff);
++	wr32(PW_INT1_EN, 0x1fff);
++	IODelay(1000);
++
++	/* 10. Initialization Done */
++	wr32(PW_INIT_DONE0, 1);
++	wr32(PW_INIT_DONE1, 1);
++	wr32(PW_INIT_DONE2, 1);
++	wr32(PW_INIT_DONE3, 1);
++	wr32(PW_INIT_DONE_P2P, 1);
++	wr32(PW_INIT_DONE_MD32, 1);
++	IODelay(1000);
++
++	/* 11. _pwrap_lock_SPISLVReg: lock the PMIC SPI slave registers */
++	wacs2NoChk(1, PMIC_SPISLV_KEY, 0, NULL);
++
++	IOLog("VIVA PWRAP: athens init complete; wacs2_rdata 0x%x\n", rd32(PW_WACS2_RDATA));
++}
++
+ IOReturn
+ VivaPwrap::readPMIC(uint32_t addr, uint32_t *value)
+ {
+diff --git a/iokit/Kernel/arm/VivaPMIC.h b/iokit/Kernel/arm/VivaPMIC.h
+--- a/iokit/Kernel/arm/VivaPMIC.h
++++ b/iokit/Kernel/arm/VivaPMIC.h
+@@ -45,9 +45,17 @@
+ 	bool waitFSM(uint32_t fsm);
+ 	inline uint32_t rd32(uint32_t off) { return *(volatile uint32_t *)(fRegs + off); }
+ 	inline void wr32(uint32_t off, uint32_t v) { *(volatile uint32_t *)(fRegs + off) = v; }
++	/* athens (MT6853) pwrap bring-up: raw WACS2 transaction + MMIO helpers. */
++	IOReturn wacs2NoChk(uint32_t write, uint32_t addr, uint32_t wdata, uint32_t *rdata);
++	void athensPwrapInit(void);
++	inline uint32_t infraRd(uint32_t off) { return *(volatile uint32_t *)(fInfraRegs + off); }
++	inline void infraWr(uint32_t off, uint32_t v) { *(volatile uint32_t *)(fInfraRegs + off) = v; }
++	inline uint32_t topRd(uint32_t off) { return *(volatile uint32_t *)(fTopRegs + off); }
+ 
+ 	IOMemoryMap *fMap;
+ 	vm_offset_t  fRegs;
++	IOMemoryMap *fInfraMap, *fTopMap;
++	vm_offset_t  fInfraRegs, fTopRegs;
+ 	IOLock      *fLock;
+ 	uint32_t     fTimeouts;
+ };
