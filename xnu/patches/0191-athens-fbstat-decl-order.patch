@@ -1,0 +1,20 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -513,6 +513,8 @@
+ 	fb->flushFrames(true, 0);
+ }
+ 
++static uint64_t sweet_fb_swap_count;
++
+ /* The vsync tick (early false, count = tick number) or an early present: show the newest finished queued swap. */
+ void
+ AppleCLCD::flushFrames(bool early, uint64_t count)
+@@ -659,7 +661,6 @@
+ }
+ 
+ static uint32_t sweet_fb_swaps_logged;
+-static uint64_t sweet_fb_swap_count;
+ static uint32_t sweet_fb_layer_format[SWEET_FB_LAYERS];        /* last fourcc seen per layer, for the log */
+ static uint8_t  sweet_fb_xr8[1024];                             /* XR 10-bit -> 8-bit */
+ 
