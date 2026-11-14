@@ -1,0 +1,33 @@
+--- a/bsd/dev/sweet_ufs.c
++++ b/bsd/dev/sweet_ufs.c
+@@ -822,7 +822,29 @@
+ 		 * [0x4d100000,0x56000000). */
+ 		ufsdma = 0x4e000000;
+ 	}
+-	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, max_pnum, 0,
++	/* athens: /sweet-ufs dma-phys is a carve taken off the top of DRAM by
++	 * mkadt.py, guaranteed free and mappable. Mapping it directly cannot hit
++	 * the contiguous-page search that intermittently returns ENOMEM and
++	 * panics FindBSDRoot (IOKitBSDInit.cpp:778). Absent on viva/qemu -> the
++	 * old paths below are kept unchanged. */
++	uintptr_t const *dmareg = NULL;
++	unsigned int dmasz = 0;
++	uint64_t dma_phys = 0;
++	if (SecureDTGetProperty(node, "dma-phys", (void const **)&dmareg, &dmasz) == kSuccess &&
++	    dmasz >= sizeof(uintptr_t)) {
++		dma_phys = (uint64_t)dmareg[0];
++	}
++	if (dma_phys) {
++		su.dma = (vm_offset_t)ml_io_map((vm_map_address_t)dma_phys, DMA_SIZE);
++		if (!su.dma) {
++			printf("SWEET UFS: carved DMA map failed at 0x%llx\n",
++			    (unsigned long long)dma_phys);
++			return ENOMEM;
++		}
++		su.dma_pa = dma_phys;
++		printf("SWEET UFS: carved DMA region at 0x%llx\n",
++		    (unsigned long long)dma_phys);
++	} else if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, max_pnum, 0,
+ 	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
+ 		/* With the whole managed pool above 4 GiB there is no <4G page to
+ 		 * allocate. Fall back to a fixed low-bank region outside the pool:
