@@ -3,7 +3,35 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
-## >>> ATHENS HANDOFF 2026-11-15m - TOUCH noflash fix (patch 0190) + gpu14 build FLAKED on conf; both pushed together <<<
+## >>> ATHENS HANDOFF 2026-11-15n - gpu15 build FAILED on 0189 decl-order bug -> patch 0191 fix; TOUCH 0190 compiled CLEAN <<<
+
+GPU15 BUILD (run 43616980296, commit 65c7e9d) FAILED - but this is the REAL
+error gpu14's conf-flake was hiding. gpu14 died at `build_all_recurse_into_
+conf` (transient parallel-build flake, NOT code - 0189 only touches
+SweetFramebuffer.cpp and conf runs before arm compiles). gpu15 got PAST conf
+(proving the flake) and reached compilation -> ONE error in the whole tree:
+
+  SweetFramebuffer.cpp:596:7: error: use of undeclared identifier
+  'sweet_fb_swap_count'; did you mean 'sweet_fb_gpu_done'?
+
+ROOT CAUSE: patch 0189's SWEET FBSTAT block sits inside flushFrames()
+(~line 517) and reads the file-static `sweet_fb_swap_count`, but that static
+is declared ~70 lines LATER (line 662). C++ requires declaration before use.
+THE TOUCH CODE IS CLEAN: AthensNT36672C.cpo compiled with ZERO diagnostics -
+patch 0190's noflash port builds fine.
+
+PATCH 0191 (0191-athens-fbstat-decl-order.patch, commit 06e2817): moves
+`static uint64_t sweet_fb_swap_count;` above flushFrames. Generated against
+the REAL post-0189 dxb buildtree (xnu-buildtree artifact from run 43616980296,
+NOT logs/xnu-src which can diverge). Verified: GNU patch applies clean to the
+post-0189 file, reproduces the edit byte-exact (72975 B), pure LF. It is the
+ONLY `file:line:col: error:` in the entire gpu15 log (checked all .cpp/.c).
+
+NEXT BUILD (0190 touch + 0189 FBSTAT + 0191 decl fix) should compile -> gpu16.
+Expect on device: "trim raw swrst .. id .." + "firmware download ok" (touch)
+AND periodic "SWEET FBSTAT" counters (display scan-out gap).
+
+=== prior handoff 2026-11-15m - TOUCH noflash fix (patch 0190) + gpu14 build FLAKED on conf; both pushed together ===
 
 GPU14 BUILD FAILED BUT NOT THE CODE: CI run 43614429894 (commit dcc3ab0 =
 patch 0189 FBSTAT) failed at `make[3]: build_all_recurse_into_conf Error 2` -
