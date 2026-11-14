@@ -3,6 +3,23 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15b - gpu10 BUILT: pwrap WACS2 probe (build 43600586629) <<<
+
+Patch 0185 (xnu/patches/0185-athens-pwrap-probe.patch, commit 42307ca):
+VivaPwrap::start no longer bails silently when WACS_INIT_DONE0_V2 is clear.
+It now does bounded readPMIC probes (SWCID 0x00a, HWCID 0x008, ~30 ms each)
+and logs `VIVA PWRAP: init-done clear; probe swcid ret .. val .. hwcid ret ..
+val ..`. If EITHER read returns kIOReturnSuccess it CONTINUES (gVivaPwrap set,
+registerService, AthensPMIC child, GPU powerOn path live). If both fail it
+returns false as before -> still no IOAcceleratorES.
+DECISIVE TEST: flash gpu10, read sweetlog. `probe swcid ret 0 val 0x59..`
+=> WACS2 works, relax the check permanently (next patch). `ret -536870212`
+(timeout) => need full pwrap_init + clock enable (see plan below).
+Build: CI 43600586629 success; kernel gpu10-art/kernel.development.sweet;
+image shim/out/athens-boot-gpu10.img (verified: probe strings + gpu9 cmdline
+sweetlog=1 ufslogsecs=5 sweetfb_hz=0 vivagpu=2 cpus=8). gpu9 still on boot;
+flash gpu10 over it. Android restore still backup/boot.img.
+
 ## >>> ATHENS HANDOFF 2026-11-15a - gpu9: UFS CAP_64AS FIX CONFIRMED; GUI BLOCKER = PMIC WRAP (pwrap) NOT INIT <<<
 
 BUILD gpu9 (CI 43596846980, kernel.development.sweet -> shim/out/athens-boot-gpu9.img)
