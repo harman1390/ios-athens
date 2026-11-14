@@ -3,6 +3,29 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15h - gpu12 BUILT: patch 0187 (fca3376, CI 43608274936) <<<
+
+CI 43608274936 SUCCESS. Kernel .tmp-patch/dl12/kernel.development.sweet
+(17,940,176 B). VERIFIED in binary: post-dio read_test + cannot-complete +
+enhanced readback fmt PRESENT; post-regclock read_test ABSENT (=0187 applied).
+Repacked shim/out/athens-boot-gpu12.img (17,483,776 B) via viva-bootimg.py
+repack backup/boot.img + shim Image.gz + athens-payload.bin (bypassed clang -
+Image.gz unchanged). VERIFIED in img: post-dio/cannot-complete/vivagpu=2/
+sweetfb_hz=0 all present. ADT 3-range pwrap reg confirmed consecutive
+(0x10026000/0x10001000/0x10000000, SOC_BASE-offset encoded).
+
+TEST: adb reboot bootloader; fastboot flash boot shim/out/athens-boot-gpu12.img;
+fastboot reboot. Boot ~90s (sistrobe does many PMIC transactions), force
+recovery, pull sweetlog tail (sdc59 skip=13045752 count=4096 ->
+.tmp-patch/gpu12-tail.bin). READ: post-dio read_test ret+rdata+reg readback ->
+spislv init -> dio -> sistrobe sample/dly/read_test -> wacs2 write_test ->
+probe swcid/hwcid.
+- post-dio ret SUCCESS -> bus transacts -> sistrobe calibrates -> if swcid/
+  hwcid=0x59xx PMIC WORKS -> GPU power -> IOAcceleratorES -> GUI.
+- post-dio ret TIMEOUT -> bus can't complete a transfer even configured ->
+  readback shows if wrap_en/wacs2_en/dio_en stuck; then suspects = pinmux /
+  spi_mst / PMIC power / PMIF (need evidence).
+
 ## >>> ATHENS HANDOFF 2026-11-15g - gpu12: patch 0187 fixes premature liveness probe <<<
 
 FIX (patch 0187, xnu/patches/0187-athens-pwrap-liveness-fix.patch): the
