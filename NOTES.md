@@ -3,8 +3,34 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
-## >>> ATHENS HANDOFF 2026-11-15k - *** GPU13 ON-DEVICE: PMIC+GPU+GUI ALL LIVE *** <<<
+## >>> ATHENS HANDOFF 2026-11-15l - gpu13 SCREEN = APPLE LOGO ONLY; scan-out gap isolated; patch 0189 FBSTAT diag <<<
 
+USER SAW: Apple logo ONLY, no GUI. Log proves backboardd+SpringBoard ALIVE
+(routine "SMP --- sample 39" spindump thread dumps, NOT a crash) and GUI
+frames composited+queued. Panel = DSI VIDEO mode (jdi,nt36672c,dphy,vdo,120
+per ATHENS.md) -> scans whatever OVL feeds continuously, no per-frame push.
+
+CONCLUSION: present() copies GUI->buffer B + programs OVL_L_ADDR at frame-end,
+but physical panel keeps scanning buffer A (boot logo). Gap is in SCAN-OUT
+switch, NOT compositing/GPU. Only ~4 swaps logged + no "N swaps"(1000) counter
++ no forced-frame/double-buffer-off msgs -> backboardd presented a few frames
+(static homescreen = few swaps is normal) then idle. Double-buffer armed
+("frame end from OVL0_2L INTSTA, panel frame 16571us") = OVL runs at 60Hz.
+
+NOT a freeze-frame feature: sweetfb_hz=0 -> fFlushTicks=1 = copy EVERY vsync
+(max rate); sweetfb_keep only ignores display-off (display is ON).
+
+PATCH 0189 (0189-athens-fb-present-dump.patch): periodic IOLog "SWEET FBSTAT"
+every 240 vsync ticks (~4s) in flushFrames -> dumps swaps/q/copies/flips/
+inPlace/missed/unsure/shown.buf/nextValid/dirty/flipReady/vblankOvl/scanLive/
+scanFrames/scanFallbacks/powerOff/gpuWaits/gpuForced/period. Verified applies
+clean to post-0181 baseline, reproduces work file. Decides: copies=0 (present
+not copying) vs copies>0&flips=0 (frame-end switch not applying) vs flips>0&
+shown.buf=1 (switching to B but panel still on A = layer/scan-out issue).
+
+TEST: build gpu14 (0189), flash, boot, recovery pull -> grep SWEET FBSTAT.
+
+=== prior handoff 2026-11-15k (gpu13 on-device milestone) ===
 gpu13 flashed+booted, sweetlog pulled (.tmp-patch/gpu13-tail.bin, 16 MiB,
 sdc59 skip=13045752 count=4096). MILESTONE - the whole GUI chain unblocked:
 
@@ -29,6 +55,14 @@ GUI COMPOSITING LIVE (the old "cannot match IOAcceleratorES" blocker GONE):
 
 INPUT partially live: PMIC keys work (power->0x30 home->0xe9, "key 0x30 down");
   AthensPMICKeys + VivaKeypad + SweetHIDButtons all opened by backboardd.
+
+USER CONFIRMED SCREEN: **Apple logo ONLY, no GUI visible.** So backboardd
+composites+swaps real frames (log-proven) but the pixels do NOT reach the
+physical panel -> gap is in the SCAN-OUT/PRESENT path (surface->panel), not
+compositing. Apple logo = kernel boot logo still in scan-out buffer.
+NEXT DEBUG: how does SWEET FB swap present? DSI cmd-mode needs TE/vsync-
+triggered frame update; if panel is cmd-mode and no update is pushed, it
+keeps last frame (the logo). Check SweetFramebuffer present/swap + DSI TE.
 
 STILL BROKEN (secondary, none blocked the framebuffer):
   ATHENS TOUCH: nt36672c_jdi.bin not in rootfs -> built-in fw -> "reset state

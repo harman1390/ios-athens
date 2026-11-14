@@ -1,0 +1,22 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -586,6 +586,18 @@
+ 	if (recs != NULL) {
+ 		IOFreeData(recs, SWEET_FB_QUEUE * SWEET_FB_SWAP_REC_SIZE);
+ 	}
++	/* 0189 diag: periodic present-state dump -> sweetlog shows if frames copy+switch */
++	static uint32_t fbstat_ticks;
++	if (!early && (++fbstat_ticks % 240) == 0) {
++		IOLog("SWEET FBSTAT: swaps %llu q %u copies %llu flips %llu inPlace %llu "
++		    "missed %llu unsure %llu early %llu shown.buf %d nextValid %d dirty %d "
++		    "flipReady %d vblankOvl %d scanLive %d scanFrames %llu scanFallbacks %llu "
++		    "powerOff %d gpuWaits %llu gpuForced %llu period %llu\n",
++		    sweet_fb_swap_count, fQueueCount, fCopies, fFlips, fInPlace,
++		    fFlipMissed, fFlipUnsure, fFlipEarly, fShown.buf, fNextValid ? 1 : 0,
++		    fDirty ? 1 : 0, fFlipReady ? 1 : 0, fVblankOvl, fScanLive ? 1 : 0,
++		    fScanFrames, fScanFallbacks, fPowerOff ? 1 : 0, fGpuWaits, fGpuForced, fPeriod);
++	}
+ }
+ 
+ void
