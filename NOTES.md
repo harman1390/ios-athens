@@ -3,6 +3,57 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15w - *** HFS FILESYSTEM RULED OUT *** diag2 log: creates+lookups ALL SUCCEED, ZERO catalog errors; EIO is NOT filesystem; capturing userspace reason via sweetscan <<<
+
+DIAG2 RESULT (eba2140 / athens-boot-0196b.img, run 43644261657, .tmp-patch/
+diag2-log.txt, 4646 lines, flush#54):
+- `hfs_makenode ENTER` fired **335x** — creates DO reach HFS and SUCCEED.
+  Names include plist files, .sock, .tmp, CFNetworkDownload_*, and MANY
+  40-char SHA1 hash dirs (= the per-user temp/cache dir format).
+- `hfs_makenode ERR` = 0, `cat_lookupbykey ERR` = 0, `cat_create ERR` = 0,
+  `cat_acquire_cnid` = 0, **`MacToVFSError EIO` = 0** => ZERO catalog
+  B-tree errors of ANY kind. HFS create/lookup/catalog layer is HEALTHY.
+- Crash storm STILL raging: **964 CRASH lines** (tccd 432, dmd/assistantd/
+  mobileactivation/fitnesscoachingd/ScreenTimeAgent ~104, driverkitd 4).
+  ns2=OS_REASON_SIGNAL, sig5(SIGTRAP)/sig6(SIGABRT) = assertion/abort.
+
+CONCLUSION: **The EIO is NOT from the HFS filesystem.** The earlier "temp dir
+EIO" was either a different/older failure or a non-HFS syscall. Creates work.
+Remaining suspects for the daemon aborts: setattrlist/chmod/chown/setxattr/
+open-flags/statfs/getattrlist on the temp/keychain paths, OR a NON-filesystem
+subsystem entirely (IOKit service, SEP/keybag, Mach service, sandbox profile).
+
+NEXT (no rebuild needed — sweetscan is a boot-arg): rebuilt boot image
+athens-boot-scan.img = SAME eba2140 kernel + `sweetscan=tccd,dmd,assistantd,
+mobileactivation,fitnesscoachingd,ScreenTimeAgent,driverkitd` in cmdline.
+Flashed+rebooted. sweetscan dumps heap STR strings on each abort => the actual
+NSException/abort reason. ~3min boot -> recovery -> pull ring -> grep STR/
+CRASH for the real error. THEN fix THAT layer (not HFS).
+
+## >>> ATHENS HANDOFF 2026-11-15v - EXTENDED DIAG eba2140 BUILT+FLASHED (athens-boot-0196b.img, run 43644261657); booting to localize EIO layer <<<
+
+CI run 43644261657 (commit eba2140) SUCCESS. Artifact xnu-kernel ->
+.tmp-patch/diag2-art/kernel.development.sweet. Verified strings: hfs_makenode
+ENTER/ERR, cat_lookupbykey ERR, MacToVFSError EIO x2, cat_create ERR,
+cat_acquire_cnid.
+
+BOOT IMAGE: shim/out/athens-boot-0196b.img (17,502,208 B) — same manual
+mkpayload+repack, same cmdline (sweetlog=1 sweetfb_hz=0 vivagpu=2
+vivagpufreq=390 cpus=8 ufslogsecs=5). sweetscan/sweetnull deliberately OFF
+(they'd dump ~700 lines/abort x500 crashes = ring overflow, lose kernel data).
+FLASHED to boot, rebooted into iOS. userdata=varfix.
+
+Instrumentation coverage now COMPLETE for HFS catalog layer:
+- hfs_makenode ENTER(name) + ERR(step,err,dcnid,name): is create reached? fails where?
+- cat_lookupbykey ERR(result,errno,parent): EVERY named op (stat/open/lookup)
+- cat_create ERR(cstep,rawresult,fileid) + cat_acquire_cnid raw errors
+- MacToVFSError EIO(btBadNode|default,err): UNIVERSAL catalog->EIO net
+Decision tree for next log: MacToVFSError/cat_lookupbykey fire => catalog
+lookup EIO (see raw code); hfs_makenode ERR fires => create path; NONE fire +
+storm continues => NOT catalog (journal/extents/vnode/VFS) -> pivot.
+
+NEXT: ~3min boot -> recovery -> dd-pull ring -> decode -> grep the new prints.
+
 ## >>> ATHENS HANDOFF 2026-11-15u - DIAG 9b2603c RESULT: ZERO hfs_makenode prints on live storm => EIO is UPSTREAM of create (lookup/VFS); patch 0196 extended to cover lookup+MacToVFSError <<<
 
 BOOT RESULT (athens-boot-0196.img, run 43642300303 / 9b2603c, userdata=varfix):
