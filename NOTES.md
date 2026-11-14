@@ -3,8 +3,50 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
-## >>> ATHENS HANDOFF 2026-11-15j - gpu13 BUILT+VERIFIED: patch 0188 PMIF/ARB_V3 (891f05e, CI 43611718591) <<<
+## >>> ATHENS HANDOFF 2026-11-15k - *** GPU13 ON-DEVICE: PMIC+GPU+GUI ALL LIVE *** <<<
 
+gpu13 flashed+booted, sweetlog pulled (.tmp-patch/gpu13-tail.bin, 16 MiB,
+sdc59 skip=13045752 count=4096). MILESTONE - the whole GUI chain unblocked:
+
+PMIC/PMIF (patch 0188) WORKS, verbatim:
+  pmif_init_done 0x1 swinf2_sta 0x00008441 (fsm 0 init 1) spiwrap_en 0x1
+  PMIC hwcid 0x5930 swcid 0x5920 (real MT6359!) top_int 0x0004
+  regulator 0x1b46/0x172e writes all "(reads 0xXXXX) ok" - PMIF SWINF_2
+  read+write transactions COMPLETE. spi_mst SPIWRAP_EN=1 took effect.
+
+GPU WORKS:
+  VIVA GPU: id 0x90930000 (product 0x9093) cores 3 (0x10005) l2 on
+  accelerator published (MetalPluginName VivaMTLDriver)
+
+GUI COMPOSITING LIVE (the old "cannot match IOAcceleratorES" blocker GONE):
+  exec SpringBoard / exec backboardd
+  IOK backboardd: matching IOAcceleratorES -> VivaGPUAccelerator  (MATCHED!)
+  SWEET FB: display on
+  SWEET SURF: backboardd create id 2/3 1125x2436 BGRA bpr 4608
+  SWEET FB: swap 1..4 layer 0 surface 1125x2436   <- real frames presented
+  SWEET FB: double buffer 0x77e20000/0x7920c000, vsync every 1 frame
+  => SpringBoard homescreen/setup GUI was rendering to the panel.
+
+INPUT partially live: PMIC keys work (power->0x30 home->0xe9, "key 0x30 down");
+  AthensPMICKeys + VivaKeypad + SweetHIDButtons all opened by backboardd.
+
+STILL BROKEN (secondary, none blocked the framebuffer):
+  ATHENS TOUCH: nt36672c_jdi.bin not in rootfs -> built-in fw -> "reset state
+    timeout (last 0x00)" -> "firmware download failed" => NO TOUCH yet.
+  VIVA I2C: unsupported clocks (source 0 Hz speed 400000) - touch I2C path.
+  Userspace daemon CRASHes (sig5/sig6): mobileactivation, chronod, accountsd,
+    mmaintenanced - the known dyld/trust-cache secondary issue; non-fatal.
+  SWEET Sandbox: SpringBoard privilege 1007 denied.
+  VIVA WIFI reserved-EMI/DMA FAILED; THERMAL LVTS id mismatch; CPUFREQ OPP.
+  ZCHECK/0x4d4d4d4d stray-writer scanner still firing (diagnostic, non-fatal
+    here - no panic string in tail).
+
+NEXT: (1) get touch working - nt36672c fw blob into rootfs OR fix SPI reset
+  timeout + I2C clocks; (2) GUI is UP - verify on-screen + try SpringBoard;
+  (3) chase daemon crashes (dyld_shared_cache trust cache) if they block UX;
+  (4) stray-writer ZCHECK remains intermittent-corruption risk.
+
+=== prior handoff 2026-11-15j (gpu13 build) ===
 GPU13 = shim/out/athens-boot-gpu13.img (17,483,776 B). CI 43611718591 SUCCESS on
 891f05e. Kernel .tmp-patch/dl13/kernel.development.sweet. VERIFIED in img:
 athens PMIF init complete / pmif write_test / post-init read_test / pmif_init_done
