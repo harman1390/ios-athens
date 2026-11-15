@@ -1,0 +1,36 @@
+--- a/bsd/sweet_hfs/core/hfs_endian.c
++++ b/bsd/sweet_hfs/core/hfs_endian.c
+@@ -167,7 +167,32 @@
+         /* Don't swap srcDesc->reserved */
+     
+         srcDesc->numRecords	= SWAP_BE16 (srcDesc->numRecords);
+-        
++
++	/*
++	 * A completely zeroed node is a free (unused) B-tree node.  Free catalog
++	 * nodes are legitimately reached on non-hint reads during node
++	 * split/insert/free-list updates; flagging them corrupt makes the volume
++	 * inconsistent and returns EIO to userspace.  Treat a fully zeroed node
++	 * as a valid empty node instead.  Only skip validation when the entire
++	 * node is zeroed - a partially populated node is checked normally below.
++	 */
++	if (srcDesc->numRecords == 0) {
++		u_int8_t *zscan = (u_int8_t *)src->buffer;
++		u_int32_t zleft = src->blockSize;
++		int is_free_node = 1;
++		while (zleft--) {
++			if (*zscan++) { is_free_node = 0; break; }
++		}
++		if (is_free_node) {
++			static u_int32_t sweet_free_bt_nodes;
++			if (sweet_free_bt_nodes < 8)
++				printf("hfs_swap_BTNode: tolerated free node (block %llu)\n",
++					   (unsigned long long)src->blockNum);
++			sweet_free_bt_nodes++;
++			return 0;
++		}
++	}
++
+         /*
+          * Swap the node offsets (including the free space one!).
+          */
