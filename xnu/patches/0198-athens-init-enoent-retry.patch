@@ -1,0 +1,40 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6831,6 +6831,8 @@
+ 	return execve(p, &init_exec_args, retval);
+ }
+ 
++extern void IOSleep(int);
++
+ static const char * init_programs[] = {
+ #if DEBUG
+ 	"/usr/appleinternal/sbin/launchd.debug",
+@@ -6926,6 +6928,29 @@
+ 		}
+ 	}
+ 
++	/* SWEET: an unsealed HFS+ root can transiently fail the launchd lookup
++	 * with ENOENT while mount/namei state settles right after
++	 * vfs_mountroot(), which used to panic the whole boot. execve() failure
++	 * leaves the init proc untouched, so retrying the candidate list is
++	 * safe. Give the filesystem a bounded window to come up before
++	 * panicking. */
++	{
++		int sweet_init_retries = 0;
++		while (error == ENOENT && sweet_init_retries < 40) {
++			sweet_init_retries++;
++			printf("load_init_program: ENOENT on all candidates, retry %d\n",
++			    sweet_init_retries);
++			IOSleep(250);
++			error = ENOENT;
++			for (i = 0; i < sizeof(init_programs) / sizeof(init_programs[0]); i++) {
++				error = load_init_program_at_path(p, (user_addr_t)scratch_addr, init_programs[i]);
++				if (!error) {
++					return;
++				}
++			}
++		}
++	}
++
+ 	panic("Process 1 exec of %s failed, errno %d", ((i == 0) ? "<null>" : init_programs[i - 1]), error);
+ }
