@@ -38,3 +38,4 @@
 +
  	panic("Process 1 exec of %s failed, errno %d", ((i == 0) ? "<null>" : init_programs[i - 1]), error);
  }
+ 
