@@ -4207,3 +4207,13 @@ OPEN / NEXT
   0x1..." (a managed-pool addr, NOT 0x1bfcf0000) then "hfs: mounted
   iOSRoot" -> userspace. If it hangs again, the DMA addr will show whether
   kmem returned an unreachable high page (then bound max_pnum).
+
+## 2026-11-15 subsystem plans doc (research only, no code)
+
+- Wrote docs/ATHENS-SUBSYSTEMS.md: per-subsystem hardware facts (live-dt +
+  stock mt6853.dts/cust dtsi verified) + iOS integration model + probe-first
+  plans for buttons/touch/display/wifi/bt/cellular/camera/audio/battery/
+  gps-fm/nfc-fp/sensors/usb. Verdicts: cellular+fingerprint+FM impossible;
+  camera/audio/BT/GPS research-grade; battery-via-i2c7-bq27411 is the
+  cheapest unblocked win; WiFi needs the MT6853 port deltas listed there.
+- No kernel/ADT/rootfs changes made. Untracked .tmp-patch/* is unrelated WIP.
