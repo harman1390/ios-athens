@@ -3,6 +3,54 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15z - *** KERNEL-ONLY PIVOT: assertion target = powerd, NOT kernel *** userspace reverted to clean gpu.simg; userdata COMPLETE+verified; diagnostic boot launched to capture powerd stack <<<
+
+USER DIRECTIVE (supersedes dyld patch): "stop trying to modify the original
+ios img, keep it as close to factory as possible ONLY modify the kernel".
+The dyld power-assert stub caused a kernel panic and is ABANDONED. All fixes
+now kernel-side only; userspace stays factory+necessary-tweaks.
+
+USERDATA RESTORED (clean gpu.simg, no dyld patch):
+- `fastboot flash -S 64M userdata ios16-root-gpu.simg` wrote chunks OK but
+  failed last piece AGAIN (known ABL final-chunk bug) -> missing output
+  blocks ~3105890->12582911.
+- Extracted tail FROM gpu.simg itself (NOT ios16-root.img, which still has
+  the dyld patch): tools .tmp-patch/simg_tail_gz.py parses sparse chunks,
+  emits raw/FILL/DONT_CARE for blocks>=3105890 through gzip ->
+  iosroot/gpu-tail.gz (177MB -> 38,817,882,112 B). Device in recovery:
+  `gunzip -c /tmp/gpu-tail.gz | dd of=/dev/block/sdc59 bs=4096 seek=3105890
+  conv=notrunc` (toybox dd: conv=notrunc=conv4; plain conv=fsync fails
+  ftruncate). VERIFIED: last block sha256 f881f225.. == gpu.simg last block.
+  userdata = complete consistent gpu.simg (Metal bundle + varfix /var dirs,
+  NO dyld patch).
+
+ROOT CAUSE REFINED (definitive, not guessed):
+- Disassembled IOKit.framework `IOPMAssertionCreateWithProperties`
+  (dsc.05 0x18e55b164) -> `_pm_connect` (0x18e55e0d0) -> `bootstrap_look_up`
+  of service-name string @0x18e5e874a = **"com.apple.PowerManagement.control"**.
+- That is a launchd BOOTSTRAP service = **powerd's** control port, NOT a
+  kernel IOKit user-client. `__conveyMachPortToPowerd` + SweetBattery.cpp:274
+  "registerService wakes powerd" confirm powerd brokers assertions -> kernel
+  IOPMrootDomain.
+- `_io_pm_assertion_create` = mig_get_special_reply_port + voucher_mach_msg_set
+  + mach_msg = a MIG RPC to powerd. profiled blocks because POWERD never
+  replies (powerd exec'd, did AKS sel0/sel7, then went silent = stuck before
+  servicing the control port).
+- powerd stuck cause UNKNOWN yet - likely a kernel service it needs during
+  init (power tree sync / a missing IOKit node). `IODeviceTree:/arm-io/
+  pearl-sep -> none` (no SEP) seen in log.
+
+DIAGNOSTIC BOOT LAUNCHED (boot=athens-boot-pm.img, flashed):
+- Same kernel as smp2 (eio2-art 0197v2) - NO rebuild, boot-arg only.
+- Patched cmdline in athens-payload.bin@0x48 (verified == smp2 ramdisk):
+  sweetsample=powerd,profiled,SpringBoard,backboardd,sleepd,aggregated
+  sweetiolog=powerd,profiled  (sweetiolog traces powerd/profiled IOKit
+  matching+open, 400-line cap). Kept sweetlog=1 sweetfb_hz=0 sweetfb_keep=1.
+- Repacked: viva-bootimg.py repack backup/boot.img Image.gz --ramdisk
+  athens-payload-pm.bin -> shim/out/athens-boot-pm.img; fastboot flash boot.
+NEXT: wait ~15-20min -> recovery -> pull ring -> symbolicate powerd SMP stack
++ IOK lines -> identify what powerd blocks on -> KERNEL fix -> CI rebuild.
+
 ## >>> ATHENS HANDOFF 2026-11-15x - *** GUI BLOCKER ROOT-CAUSED + DYLD FIX BUILT *** profiled hangs in IOPMAssertionCreateWithDescription->_io_pm_assertion_create->mach_msg (power-assertion backend never replies) -> never services MCProfileConnection -> SpringBoard launch-sentinel stalls. FIX = tools/patch-power-assert.py stubs IOPMAssertionCreate{WithDescription,WithProperties}+Release in dsc.05 -> fake success. Applied to ios16-root.img; ios16-root-pm.simg converting; flash userdata + boot next <<<
 
 SMP2 RESULT (.tmp-patch/smp2-log.txt, touch node removed so ring stayed
