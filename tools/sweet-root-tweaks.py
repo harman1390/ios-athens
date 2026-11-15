@@ -155,6 +155,28 @@ def vardirs(root):
             print('vardir', rel)
 
 
+def installd_dirs(root):
+    """MCM codesign-mapping DB home. containermanagerd opens its SQLite DB
+    under /private/var/installd/Library/Caches/com.apple.containermanagerd
+    (ContainerManagerCommon MCMSQLiteDB openDBWithURL). On the single HFS
+    root that whole /private/var/installd tree is absent (it lives on the
+    data volume on real iOS), so openDBWithURL fails -> MCM's
+    fixAndRetryIfPermissionsError can't repair a missing dir -> SIGTRAP
+    crash-loop. backboardd then blocks forever on the container-path XPC
+    (symbolicated r0203 SMP: backboardd->_container_system_path_for_identifier
+    ->containermanagerd; SpringBoard->_BKSDisplayServicesStart->backboardd).
+    Create the tree root:wheel 0755 unconditionally so wrong perms on an
+    existing dir are repaired too. containermanagerd is a root LaunchDaemon."""
+    base = os.path.join(root, 'private/var/installd')
+    for rel in ('', 'Library', 'Library/Caches',
+                'Library/Caches/com.apple.containermanagerd'):
+        d = os.path.join(base, rel) if rel else base
+        os.makedirs(d, exist_ok=True)
+        os.chown(d, 0, 0)
+        os.chmod(d, 0o755)
+        print('installd dir', os.path.relpath(d, root))
+
+
 def activation(root):
     c = find_container(root, 'Data/System', 'com.apple.mobileactivationd')
     if c is None:
@@ -215,6 +237,7 @@ def main():
     launchd(root)
     containers(root)
     vardirs(root)
+    installd_dirs(root)
     activation(root)
     audio(root)
     firmware(root)
