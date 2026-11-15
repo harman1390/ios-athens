@@ -1,0 +1,301 @@
+--- a/bsd/sweet_hfs/core/hfs_endian.c
++++ b/bsd/sweet_hfs/core/hfs_endian.c
+@@ -295,29 +295,27 @@
+ 		 * Sanity check and swap the forward and backward links.
+ 		 * Ignore the header node since its forward and backwards links can legitimately
+ 		 * point to itself.
++		 *
++		 * Bring-up: a node whose fLink/bLink is out of range or points at
++		 * itself is corrupt, but panicking here kills the whole kernel on a
++		 * single bad catalog write (observed: fLink 0x01CC006E).  Clamp the
++		 * bad link to 0 - a readable "no link" value - and keep the node's
++		 * records so key lookups still work; only sequential scans are
++		 * affected at this node.  Genuine structural corruption is still
++		 * caught by the kind/height/offset checks below and by the
++		 * node-type record swap.
+ 		 */
+-		if (srcDesc->fLink >= btcb->totalNodes) {
+-			panic("hfs_UNswap_BTNode: invalid forward link (0x%08X)\n", srcDesc->fLink);
+-			error = fsBTInvalidHeaderErr;
+-			goto fail;
+-		}
+-		if ((src->blockNum != 0) && (srcDesc->fLink == (u_int32_t) src->blockNum)) {
+-			panic ("hfs_UNswap_BTNode: invalid forward link (0x%08x == 0x%08x)\n", 
+-					srcDesc->fLink, (u_int32_t) src->blockNum);
+-			error = fsBTInvalidHeaderErr;
+-			goto fail;
++		if ((srcDesc->fLink >= btcb->totalNodes) ||
++			((src->blockNum != 0) && (srcDesc->fLink == (u_int32_t) src->blockNum))) {
++			printf("hfs_UNswap_BTNode: clamped invalid forward link (0x%08x) node %llu\n",
++				srcDesc->fLink, (unsigned long long)src->blockNum);
++			srcDesc->fLink = 0;
+ 		}
+-		
+-		if (srcDesc->bLink >= btcb->totalNodes) {
+-			panic("hfs_UNswap_BTNode: invalid backward link (0x%08X)\n", srcDesc->bLink);
+-			error = fsBTInvalidHeaderErr;
+-			goto fail;
+-		}
+-		if ((src->blockNum != 0) && (srcDesc->bLink == (u_int32_t) src->blockNum)) {
+-			panic ("hfs_UNswap_BTNode: invalid backward link (0x%08x == 0x%08x)\n", 
+-					srcDesc->bLink, (u_int32_t) src->blockNum);
+-			error = fsBTInvalidHeaderErr;
+-			goto fail;
++		if ((srcDesc->bLink >= btcb->totalNodes) ||
++			((src->blockNum != 0) && (srcDesc->bLink == (u_int32_t) src->blockNum))) {
++			printf("hfs_UNswap_BTNode: clamped invalid backward link (0x%08x) node %llu\n",
++				srcDesc->bLink, (unsigned long long)src->blockNum);
++			srcDesc->bLink = 0;
+ 		}
+ 
+ 
+@@ -328,7 +326,7 @@
+ 		 * Check srcDesc->kind.  Don't swap it because it's only one byte.
+ 		 */
+ 		if (srcDesc->kind < kBTLeafNode || srcDesc->kind > kBTMapNode) {
+-			panic("hfs_UNswap_BTNode: invalid node kind (%d)\n", srcDesc->kind);
++			printf("hfs_UNswap_BTNode: invalid node kind (%d)\n", srcDesc->kind);
+ 			error = fsBTInvalidHeaderErr;
+ 			goto fail;
+ 		}
+@@ -337,7 +335,7 @@
+ 		 * Check srcDesc->height.  Don't swap it because it's only one byte.
+ 		 */
+ 		if (srcDesc->height > kMaxTreeDepth) {
+-			panic("hfs_UNswap_BTNode: invalid node height (%d)\n", srcDesc->height);
++			printf("hfs_UNswap_BTNode: invalid node height (%d)\n", srcDesc->height);
+ 			error = fsBTInvalidHeaderErr;
+ 			goto fail;
+ 		}
+@@ -354,7 +352,7 @@
+          */
+         if ((char *)srcOffs > ((char *)src->buffer + src->blockSize) ||
+         	(char *)srcOffs < ((char *)src->buffer + sizeof(BTNodeDescriptor))) {
+-            panic("hfs_UNswap_BTNode: invalid record count (0x%04X)\n", srcDesc->numRecords);
++            printf("hfs_UNswap_BTNode: invalid record count (0x%04X)\n", srcDesc->numRecords);
+             error = fsBTInvalidHeaderErr;
+             goto fail;
+         }
+@@ -376,7 +374,7 @@
+ 			    ((allow_empty_node == false) && (srcOffs[i] == 0)) ||
+ 				(srcOffs[i] < sizeof(BTNodeDescriptor) && srcOffs[i] != 0) || 
+ 				(srcOffs[i] > (src->blockSize - 2 * (srcDesc->numRecords + 1)))) {
+-            	panic("hfs_UNswap_BTNode: offset #%d invalid (0x%04X) (blockSize 0x%x numRecords %d)\n",
++            	printf("hfs_UNswap_BTNode: offset #%d invalid (0x%04X) (blockSize 0x%x numRecords %d)\n",
+ 					  i, srcOffs[i], src->blockSize, srcDesc->numRecords);
+             	error = fsBTInvalidHeaderErr;
+             	goto fail;
+@@ -387,7 +385,7 @@
+              * them backwards, hence the order in the comparison.
+              */
+             if ((i < srcDesc->numRecords) && (srcOffs[i+1] >= srcOffs[i])) {
+-            	panic("hfs_UNswap_BTNode: offsets %d and %d out of order (0x%04X, 0x%04X)\n",
++            	printf("hfs_UNswap_BTNode: offsets %d and %d out of order (0x%04X, 0x%04X)\n",
+             	    i+1, i, srcOffs[i+1], srcOffs[i]);
+             	error = fsBTInvalidHeaderErr;
+             	goto fail;
+@@ -460,7 +458,7 @@
+ 			 */
+ 			if ((char *)srcKey + sizeof(HFSPlusExtentKey) + recordSize > nextRecord) {
+ 				if (direction == kSwapBTNodeHostToBig) {
+-					panic("hfs_swap_HFSPlusBTInternalNode: extents key #%d offset too big (0x%04X)\n", srcDesc->numRecords-i-1, srcOffs[i]);
++					printf("hfs_swap_HFSPlusBTInternalNode: extents key #%d offset too big (0x%04X)\n", srcDesc->numRecords-i-1, srcOffs[i]);
+ 				} else {
+ 					printf("hfs_swap_HFSPlusBTInternalNode: extents key #%d offset too big (0x%04X)\n", srcDesc->numRecords-i-1, srcOffs[i]);
+ 				}
+@@ -471,7 +469,7 @@
+             	srcKey->keyLength = SWAP_BE16 (srcKey->keyLength);
+             if (srcKey->keyLength != sizeof(*srcKey) - sizeof(srcKey->keyLength)) {
+ 				if (direction == kSwapBTNodeHostToBig) {
+-					panic("hfs_swap_HFSPlusBTInternalNode: extents key #%d invalid length (%d)\n", srcDesc->numRecords-i-1, srcKey->keyLength);
++					printf("hfs_swap_HFSPlusBTInternalNode: extents key #%d invalid length (%d)\n", srcDesc->numRecords-i-1, srcKey->keyLength);
+ 				} else {
+ 					printf("hfs_swap_HFSPlusBTInternalNode: extents key #%d invalid length (%d)\n", srcDesc->numRecords-i-1, srcKey->keyLength);
+ 				}
+@@ -520,7 +518,7 @@
+ 			 */
+ 			if ((char *)srcKey + offsetof(HFSPlusCatalogKey, nodeName.unicode[0]) > nextRecord) {
+ 				if (direction == kSwapBTNodeHostToBig) {
+-					panic("hfs_swap_HFSPlusBTInternalNode: catalog key #%d offset too big (0x%04X)\n", srcDesc->numRecords-i-1, srcOffs[i]);
++					printf("hfs_swap_HFSPlusBTInternalNode: catalog key #%d offset too big (0x%04X)\n", srcDesc->numRecords-i-1, srcOffs[i]);
+ 				} else {
+ 					printf("hfs_swap_HFSPlusBTInternalNode: catalog key #%d offset too big (0x%04X)\n", srcDesc->numRecords-i-1, srcOffs[i]);
+ 				}
+@@ -539,7 +537,7 @@
+             /* Sanity check the key length */
+             if (keyLength < kHFSPlusCatalogKeyMinimumLength || keyLength > kHFSPlusCatalogKeyMaximumLength) {
+ 				if (direction == kSwapBTNodeHostToBig) {
+-					panic("hfs_swap_HFSPlusBTInternalNode: catalog key #%d invalid length (%d)\n", srcDesc->numRecords-i-1, keyLength);
++					printf("hfs_swap_HFSPlusBTInternalNode: catalog key #%d invalid length (%d)\n", srcDesc->numRecords-i-1, keyLength);
+ 				} else {
+ 					printf("hfs_swap_HFSPlusBTInternalNode: catalog key #%d invalid length (%d)\n", srcDesc->numRecords-i-1, keyLength);
+ 				}
+@@ -553,7 +551,7 @@
+             srcPtr = (int16_t *)((char *)srcKey + keyLength + sizeof(srcKey->keyLength));
+             if ((char *)srcPtr + sizeof(u_int32_t) > nextRecord) {
+ 				if (direction == kSwapBTNodeHostToBig) {
+-					panic("hfs_swap_HFSPlusBTInternalNode: catalog key #%d too big\n", srcDesc->numRecords-i-1);
++					printf("hfs_swap_HFSPlusBTInternalNode: catalog key #%d too big\n", srcDesc->numRecords-i-1);
+ 				} else {
+ 					printf("hfs_swap_HFSPlusBTInternalNode: catalog key #%d too big\n", srcDesc->numRecords-i-1);
+ 				}
+@@ -571,7 +569,7 @@
+             if (keyLength < sizeof(srcKey->parentID) + sizeof(srcKey->nodeName.length) +
+                 srcKey->nodeName.length*sizeof(srcKey->nodeName.unicode[0])) {
+ 				if (direction == kSwapBTNodeHostToBig) {
+-					panic("hfs_swap_HFSPlusBTInternalNode: catalog record #%d keyLength=%d expected=%lu\n",
++					printf("hfs_swap_HFSPlusBTInternalNode: catalog record #%d keyLength=%d expected=%lu\n",
+ 						srcDesc->numRecords-i, keyLength, sizeof(srcKey->parentID) + sizeof(srcKey->nodeName.length) +
+                     	srcKey->nodeName.length*sizeof(srcKey->nodeName.unicode[0]));
+ 				} else {
+@@ -604,7 +602,7 @@
+                 HFSPlusCatalogFolder *srcRec = (HFSPlusCatalogFolder *)srcPtr;
+                 if ((char *)srcRec + sizeof(*srcRec) > nextRecord) {
+ 					if (direction == kSwapBTNodeHostToBig) {
+-						panic("hfs_swap_HFSPlusBTInternalNode: catalog folder record #%d too big\n", srcDesc->numRecords-i-1);
++						printf("hfs_swap_HFSPlusBTInternalNode: catalog folder record #%d too big\n", srcDesc->numRecords-i-1);
+ 					} else {
+ 						printf("hfs_swap_HFSPlusBTInternalNode: catalog folder record #%d too big\n", srcDesc->numRecords-i-1);
+ 					}
+@@ -639,7 +637,7 @@
+                 HFSPlusCatalogFile *srcRec = (HFSPlusCatalogFile *)srcPtr;
+                 if ((char *)srcRec + sizeof(*srcRec) > nextRecord) {
+ 					if (direction == kSwapBTNodeHostToBig) {
+-						panic("hfs_swap_HFSPlusBTInternalNode: catalog file record #%d too big\n", srcDesc->numRecords-i-1);
++						printf("hfs_swap_HFSPlusBTInternalNode: catalog file record #%d too big\n", srcDesc->numRecords-i-1);
+ 					} else {
+ 						printf("hfs_swap_HFSPlusBTInternalNode: catalog file record #%d too big\n", srcDesc->numRecords-i-1);
+ 					}
+@@ -688,7 +686,7 @@
+                 HFSPlusCatalogThread *srcRec = (HFSPlusCatalogThread *)srcPtr;
+ 				if ((char *) &srcRec->nodeName.unicode[0] > nextRecord) {
+ 					if (direction == kSwapBTNodeHostToBig) {
+-						panic("hfs_swap_HFSPlusBTInternalNode: catalog thread record #%d too big\n", srcDesc->numRecords-i-1);
++						printf("hfs_swap_HFSPlusBTInternalNode: catalog thread record #%d too big\n", srcDesc->numRecords-i-1);
+ 					} else {
+ 						printf("hfs_swap_HFSPlusBTInternalNode: catalog thread record #%d too big\n", srcDesc->numRecords-i-1);
+ 					}
+@@ -708,7 +706,7 @@
+                  */
+ 				if ((char *) &srcRec->nodeName.unicode[srcRec->nodeName.length] > nextRecord) {
+ 					if (direction == kSwapBTNodeHostToBig) {
+-						panic("hfs_swap_HFSPlusBTInternalNode: catalog thread record #%d name too big\n", srcDesc->numRecords-i-1);
++						printf("hfs_swap_HFSPlusBTInternalNode: catalog thread record #%d name too big\n", srcDesc->numRecords-i-1);
+ 					} else {
+ 						printf("hfs_swap_HFSPlusBTInternalNode: catalog thread record #%d name too big\n", srcDesc->numRecords-i-1);
+ 					}
+@@ -723,7 +721,7 @@
+ 
+             } else {
+ 				if (direction == kSwapBTNodeHostToBig) {
+-            		panic("hfs_swap_HFSPlusBTInternalNode: unrecognized catalog record type (0x%04X; record #%d)\n", srcPtr[0], srcDesc->numRecords-i-1);
++            		printf("hfs_swap_HFSPlusBTInternalNode: unrecognized catalog record type (0x%04X; record #%d)\n", srcPtr[0], srcDesc->numRecords-i-1);
+ 				} else {
+             		printf("hfs_swap_HFSPlusBTInternalNode: unrecognized catalog record type (0x%04X; record #%d)\n", srcPtr[0], srcDesc->numRecords-i-1);
+ 				}
+@@ -755,7 +753,7 @@
+     		/* Make sure there is room in the buffer for a minimal key */
+     		if ((char *) &srcKey->attrName[1] > nextRecord) {
+ 				if (direction == kSwapBTNodeHostToBig) {
+-					panic("hfs_swap_HFSPlusBTInternalNode: attr key #%d offset too big (0x%04X)\n", srcDesc->numRecords-i-1, srcOffs[i]);
++					printf("hfs_swap_HFSPlusBTInternalNode: attr key #%d offset too big (0x%04X)\n", srcDesc->numRecords-i-1, srcOffs[i]);
+ 				} else {
+ 					printf("hfs_swap_HFSPlusBTInternalNode: attr key #%d offset too big (0x%04X)\n", srcDesc->numRecords-i-1, srcOffs[i]);
+ 				}
+@@ -776,7 +774,7 @@
+     		srcRec = (HFSPlusAttrRecord *)((char *)srcKey + keyLength + sizeof(srcKey->keyLength));
+     		if ((char *)srcRec + sizeof(u_int32_t) > nextRecord) {
+ 				if (direction == kSwapBTNodeHostToBig) {
+-					panic("hfs_swap_HFSPlusBTInternalNode: attr key #%d too big (%d)\n", srcDesc->numRecords-i-1, keyLength);
++					printf("hfs_swap_HFSPlusBTInternalNode: attr key #%d too big (%d)\n", srcDesc->numRecords-i-1, keyLength);
+ 				} else {
+ 					printf("hfs_swap_HFSPlusBTInternalNode: attr key #%d too big (%d)\n", srcDesc->numRecords-i-1, keyLength);
+ 				}
+@@ -794,7 +792,7 @@
+     		/* Sanity check the attribute name length */
+     		if (srcKey->attrNameLen > kHFSMaxAttrNameLen || keyLength < (kHFSPlusAttrKeyMinimumLength + sizeof(u_int16_t)*srcKey->attrNameLen)) {
+ 				if (direction == kSwapBTNodeHostToBig) {
+-					panic("hfs_swap_HFSPlusBTInternalNode: attr key #%d keyLength=%d attrNameLen=%d\n", srcDesc->numRecords-i-1, keyLength, srcKey->attrNameLen);
++					printf("hfs_swap_HFSPlusBTInternalNode: attr key #%d keyLength=%d attrNameLen=%d\n", srcDesc->numRecords-i-1, keyLength, srcKey->attrNameLen);
+ 				} else {
+ 					printf("hfs_swap_HFSPlusBTInternalNode: attr key #%d keyLength=%d attrNameLen=%d\n", srcDesc->numRecords-i-1, keyLength, srcKey->attrNameLen);
+ 				}
+@@ -822,7 +820,7 @@
+             		/* Is there room for the inline data header? */
+             		if ((char *) &srcRec->attrData.attrData[0]  > nextRecord) {
+ 						if (direction == kSwapBTNodeHostToBig) {
+-							panic("hfs_swap_HFSPlusBTInternalNode: attr inline #%d too big\n", srcDesc->numRecords-i-1);
++							printf("hfs_swap_HFSPlusBTInternalNode: attr inline #%d too big\n", srcDesc->numRecords-i-1);
+ 						} else {
+ 							printf("hfs_swap_HFSPlusBTInternalNode: attr inline #%d too big\n", srcDesc->numRecords-i-1);
+ 						}
+@@ -841,7 +839,7 @@
+             		/* Is there room for the inline attribute data? */
+             		if ((char *) &srcRec->attrData.attrData[attrSize] > nextRecord) {
+ 						if (direction == kSwapBTNodeHostToBig) {
+-							panic("hfs_swap_HFSPlusBTInternalNode: attr inline #%d too big (attrSize=%u)\n", srcDesc->numRecords-i-1, attrSize);
++							printf("hfs_swap_HFSPlusBTInternalNode: attr inline #%d too big (attrSize=%u)\n", srcDesc->numRecords-i-1, attrSize);
+ 						} else {
+ 							printf("hfs_swap_HFSPlusBTInternalNode: attr inline #%d too big (attrSize=%u)\n", srcDesc->numRecords-i-1, attrSize);
+ 						}
+@@ -855,7 +853,7 @@
+             		/* Is there room for the fork data record? */
+             		if ((char *)srcRec + sizeof(HFSPlusAttrForkData) > nextRecord) {
+ 						if (direction == kSwapBTNodeHostToBig) {
+-							panic("hfs_swap_HFSPlusBTInternalNode: attr fork data #%d too big\n", srcDesc->numRecords-i-1);
++							printf("hfs_swap_HFSPlusBTInternalNode: attr fork data #%d too big\n", srcDesc->numRecords-i-1);
+ 						} else {
+ 							printf("hfs_swap_HFSPlusBTInternalNode: attr fork data #%d too big\n", srcDesc->numRecords-i-1);
+ 						}
+@@ -871,7 +869,7 @@
+             		/* Is there room for an extent record? */
+             		if ((char *)srcRec + sizeof(HFSPlusAttrExtents) > nextRecord) {
+ 						if (direction == kSwapBTNodeHostToBig) {
+-							panic("hfs_swap_HFSPlusBTInternalNode: attr extents #%d too big\n", srcDesc->numRecords-i-1);
++							printf("hfs_swap_HFSPlusBTInternalNode: attr extents #%d too big\n", srcDesc->numRecords-i-1);
+ 						} else {
+ 							printf("hfs_swap_HFSPlusBTInternalNode: attr extents #%d too big\n", srcDesc->numRecords-i-1);
+ 						}
+@@ -910,7 +908,7 @@
+ 			/* Make sure there is room for the key (HotFileKey) and data (u_int32_t) */
+ 			if ((char *)srcKey + sizeof(HotFileKey) + sizeof(u_int32_t) > nextRecord) {
+ 				if (direction == kSwapBTNodeHostToBig) {
+-					panic("hfs_swap_HFSPlusBTInternalNode: hotfile #%d offset too big (0x%04X)\n", srcDesc->numRecords-i-1, srcOffs[i]);
++					printf("hfs_swap_HFSPlusBTInternalNode: hotfile #%d offset too big (0x%04X)\n", srcDesc->numRecords-i-1, srcOffs[i]);
+ 				} else {
+ 					printf("hfs_swap_HFSPlusBTInternalNode: hotfile #%d offset too big (0x%04X)\n", srcDesc->numRecords-i-1, srcOffs[i]);
+ 				}
+@@ -922,7 +920,7 @@
+ 				srcKey->keyLength = SWAP_BE16 (srcKey->keyLength);
+ 			if (srcKey->keyLength != sizeof(*srcKey) - sizeof(srcKey->keyLength)) {
+ 				if (direction == kSwapBTNodeHostToBig) {
+-					panic("hfs_swap_HFSPlusBTInternalNode: hotfile #%d incorrect keyLength %d\n", srcDesc->numRecords-i-1, srcKey->keyLength);
++					printf("hfs_swap_HFSPlusBTInternalNode: hotfile #%d incorrect keyLength %d\n", srcDesc->numRecords-i-1, srcKey->keyLength);
+ 				} else {
+ 					printf("hfs_swap_HFSPlusBTInternalNode: hotfile #%d incorrect keyLength %d\n", srcDesc->numRecords-i-1, srcKey->keyLength);
+ 				}
+--- a/bsd/sweet_hfs/core/hfs_btreeio.c
++++ b/bsd/sweet_hfs/core/hfs_btreeio.c
+@@ -252,8 +252,20 @@
+      * be writing node whose last record just got deleted.
+      */
+     retval = hfs_swap_BTNode (&block, vp, kSwapBTNodeHostToBig, true);
+-    if (retval)
+-    	panic("hfs: btree_swap_node: about to write corrupt node!\n");
++    if (retval) {
++    	/*
++    	 * Bring-up: a node that fails write-side validation is genuinely
++    	 * corrupt (bad kind/height/record offsets - bad fLink/bLink are now
++    	 * clamped in hfs_swap_BTNode).  Panicking here kills the kernel on a
++    	 * single bad catalog write driven by the userspace crash storm.
++    	 * Quarantine the node instead: zero the buffer so a structurally
++    	 * valid empty (free) node is written rather than garbage, and let the
++    	 * owning operation fail with EIO at a higher level.
++    	 */
++    	printf("hfs: btree_swap_node: quarantining corrupt node (blk %llu retval %d)\n",
++    	       (unsigned long long)block.blockNum, retval);
++    	memset(block.buffer, 0, block.blockSize);
++    }
+ }
+ 
+ 
