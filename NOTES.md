@@ -3,7 +3,46 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
-## >>> ATHENS HANDOFF 2026-11-15x - *** PATCH 0198 BUILT + FLASHED, BOOT TEST IN PROGRESS *** init-ENOENT retry kernel (run 43708245523, SHA 1aa6d375) flashed as athens-boot-0198.img; watching for retry prints + userspace <<<
+## >>> ATHENS HANDOFF 2026-11-15y - *** 0198-v1 PROVEN: retry got launchd+userspace, but MARGINAL -> widened to ~120s *** ring shows retries 1-40 all ENOENT then launchd exec'd; sibling boot exhausted->panic @6954; touch spam confirmed STALE <<<
+
+0198-v1 BOOT RESULT (athens-boot-0198.img, kernel SHA 1aa6d375, run 43708245523):
+- Patch ENGAGED: ring shows "ENOENT on all candidates, retry 1..40" then
+  launchd exec'd (shared_region dyld maps, Darwin Bootstrapper, ondemand
+  mode, exec mount/keybagd/usermanagerd/dirs_cleaner/SpringBoard/backboardd,
+  FBSTAT swaps). FULL USERSPACE REACHED. The retry WORKS.
+- BUT success landed on the LAST allowed retry (~10s). A sibling/earlier
+  boot exhausted all 40 -> panic @kern_exec.c:6954 (post-patch line).
+  => 10s window is marginal; ENOENT-clear time is variable.
+- panic_active()/SWEETPAN captures panic-time console; transcript held a
+  full boot because the record accumulates while the op stays latched.
+
+ROOT-CAUSE EVIDENCE (not guessed):
+- HFS mount EVERY boot: "hfs_mark_inconsistent ... fsck will be forced",
+  "cat_delete() failed to delete thread record", "Removed 2 orphaned files
+  and 3 directories", journal replay. Volume stays dirty (prior panics)
+  -> catalog/B-tree lookups return ENOENT for a VARIABLE window post-mount.
+- /sbin/launchd EXISTS in image (541600B); namecache does NOT cache ENOENT
+  (no vnode to cache) so each retry does a real lookup -> purely time-
+  dependent FS readiness, NOT a permanent negative entry.
+- TOUCH SPAM = STALE, confirmed: kernel's own NUB2 enumeration lists NO
+  spi4/touch/novatek node (notouch ADT verified byte-identical). AthensNT
+  36672C needs a VivaDTNub(novatek,nt36672c) published by AthensSPI, which
+  needs an spi4 ADT node -> cannot instantiate. 5562 "firmware download"
+  msgs are leftover ring data from prior touch-enabled boots (ring is 4.2MB,
+  holds many boots). NOT a current-boot problem. sweettouch=0 also gates
+  base SweetHIDTouch correctly.
+
+PATCH 0198-v2 (commit eb440de): retries 40->480 (250ms each ~=120s), log
+every 8th retry (480 lines would flood ring), print "<path> loaded after
+N retries" to record actual settle time in ring. Still bounded -> genuinely
+broken FS still panics. CI run 43710561622 (verify_strings="loaded after
+%d retries").
+
+NEXT: when kernel lands -> mkpayload(notouch.adt)+viva-bootimg -> flash ->
+reboot -> ring should show "loaded after N retries" (N=real settle secs) then
+userspace. If N small & stable -> resume powerd diagnostic (sweetsample
+powerd already in cmdline). If still panics @6954 after 480 -> FS genuinely
+broken -> investigate HFS catalog/fsck offline.
 
 PATCH 0198 STATUS: CI run 43708245523 SUCCESS (earlier run 43707132937 failed
 verify_strings because patch file had CRLF/mixed endings -> "corrupt patch at
