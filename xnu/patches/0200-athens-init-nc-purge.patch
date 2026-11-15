@@ -1,0 +1,16 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6944,6 +6944,13 @@
+ 			}
+ 			IOSleep(250);
+ 			error = ENOENT;
++			/* A failed lookup leaves a negative namecache entry, so every
++			 * later retry would return the cached ENOENT without asking
++			 * HFS again. Drop the root mount's namecache so each retry is
++			 * a real filesystem lookup. */
++			if (rootvnode != NULLVP) {
++				cache_purgevfs(vnode_mount(rootvnode));
++			}
+ 			for (i = 0; i < sizeof(init_programs) / sizeof(init_programs[0]); i++) {
+ 				error = load_init_program_at_path(p, (user_addr_t)scratch_addr, init_programs[i]);
+ 				if (!error) {
