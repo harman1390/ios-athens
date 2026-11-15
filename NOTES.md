@@ -41,13 +41,22 @@ IOKit user assertion API in dyld_shared_cache_arm64.05 to return fake success
   never hang. No real sleep on this port (sweetfb_keep) so fake assertions
   are harmless. Offsets via `ipsw dyld a2o` (all in dsc.05 __TEXT).
 
-APPLIED: ios16-root.img (has Metal bundle + all varfix dirs) patched + synced.
-img2simg -> ios16-root-pm.simg running. NEXT: fastboot flash userdata
-ios16-root-pm.simg, boot (reuse smp2 kernel - has sweetlog+sweetsample+
-sweetfb_hz=0), wait ~15min, pull ring, VERIFY profiled stack clears
-IOPMAssertion and SpringBoard swaps climb past 5 / GUI appears. If profiled
-still blocks elsewhere the clean sampler names the next gate. Touch stays
-disabled in this diag image (--athens-notouch) only to keep logs clean.
+APPLIED+FLASHED (2026-11-15): patched ios16-root.img -> img2simg ->
+ios16-root-pm.simg (871 chunks). `fastboot flash -S 64M userdata` wrote
+chunks 1-187 OKAY but **188/188 FAILED "sparse image write failure"** (the
+KNOWN final-piece issue). Parsed simg: failed fastboot piece = last ~64MB
+of sparse file, starts inside sparse-chunk 864 -> missing output blocks
+~3103288->12582911. FIX (same dd-tail method as gpu.simg): extracted
+ios16-root.img blocks 3103288-12582911 (9479624 blk, ~36GiB, mostly FILL
+zeros) -> gzip -1 = iosroot/pm-tail.gz (178MB) -> MSYS_NO_PATHCONV=1
+adb push /tmp/pm-tail.gz -> recovery `gunzip -c | dd of=/dev/block/sdc59
+bs=4096 seek=3103288 conv=notrunc` = 9479624 rec, 36GiB, 161MB/s, EXIT=0.
+userdata COMPLETE. Rebooted into iOS (boot=smp2 kernel: sweetlog=1,
+sweetsample, sweetfb_hz=0, --athens-notouch). NEXT: wait ~15-20min, recovery,
+pull ring, VERIFY profiled stack clears IOPMAssertion + SpringBoard swaps
+climb past 5 / GUI. If still blocked, clean sampler names next gate.
+
+## >>> ATHENS HANDOFF 2026-11-15w - *** SPRINGBOARD STALL ROOT CAUSE SYMBOLICATED ***
 
 ## >>> ATHENS HANDOFF 2026-11-15w - *** SPRINGBOARD STALL ROOT CAUSE SYMBOLICATED *** not display/GPU/errno: SpringBoard's launch-sentinel thread blocks in a SYNCHRONOUS XPC to the managed-config service (MCProfileConnection checkIn -> profiled/mdmd) that never replies; sampling those daemons NOW <<<
 
