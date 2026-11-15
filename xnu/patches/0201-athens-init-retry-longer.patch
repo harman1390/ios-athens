@@ -1,0 +1,11 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -6936,7 +6936,7 @@
+ 	 * panicking. */
+ 	{
+ 		int sweet_init_retries = 0;
+-		while (error == ENOENT && sweet_init_retries < 480) {
++		while (error == ENOENT && sweet_init_retries < 2400) {
+ 			sweet_init_retries++;
+ 			if (sweet_init_retries == 1 || (sweet_init_retries % 8) == 0) {
+ 				printf("load_init_program: ENOENT on all candidates, retry %d\n",
