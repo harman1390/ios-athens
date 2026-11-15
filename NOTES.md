@@ -3,6 +3,53 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15w - *** INIT-SPAWN ENOENT PANIC ROOT-CAUSED + PATCH 0198 retry building *** reproducible "Process 1 exec /sbin/launchd ENOENT @kern_exec.c:6929"; intermittent (a boot DID reach userspace); kernel-only retry fix in CI run 43707132937 <<<
+
+PANIC (confirmed x2, identical caller 0xfffffe0007848628):
+`panic(cpu 1): Process 1 exec of /sbin/launchd failed, errno 2 @kern_exec.c:6929`
+- `load_init_program()` (bsd_init end) iterates init_programs[], calls
+  execve via load_init_program_at_path; ALL candidates ENOENT -> panic. NO
+  retry in stock code. /sbin/launchd is LAST candidate -> panic names it.
+- pm.img kernel == smp2 kernel (only cmdline differs: sweetsample/sweetiolog
+  added powerd,profiled). userspace = clean gpu.simg (verified: /sbin/launchd
+  present in source img 541600B; dd tail re-audited = all tail FILL chunks
+  are value-0 so emit_zeros was CORRECT, last-block sha256 matched).
+- pm.img ADT verified NOTOUCH (adt region has zero nt36672c/spi4/touch
+  strings; earlier "touch spam" in ring = LEFTOVER from prior touch-enabled
+  gpu19/spifix boots, ring persists across reboots). NOT a pm.img regression.
+- Panic transcript (SWEETPAN record, 256KB panic-time console) shows: panic
+  msg + panic-screen UTF16 garbage, THEN a complete subsequent boot reaching
+  userspace (mounted iOSRoot, load_init_program, exec launchd, ignition,
+  daemons, crash storm, FBSTAT). panic_active() stayed latched across
+  panic->reboot so new boot's console appended. => ENOENT is INTERMITTENT,
+  not deterministic corruption. A boot got past init fine.
+- 0196(hfsmakenode-diag)/0197(eio-syscall-diag) RULED OUT: both are
+  read-only printf diagnostics, don't touch lookup/exec logic.
+
+ROOT-CAUSE ASSESSMENT (evidence-based, not guessed):
+- execve->ENOENT = namei/vnode lookup of /sbin/launchd failed transiently on
+  the unsealed HFS+ root right after vfs_mountroot. Candidates: (a) HFS+
+  namei/namecache cold-settle race, (b) known intermittent stray-writer
+  memory corruption hitting vnode/namei. Cannot fully distinguish yet, but
+  intermittency is CONFIRMED (successful boot in same record).
+
+PATCH 0198 (xnu/patches/0198-athens-init-enoent-retry.patch, commit 8873173):
+- Wraps init_programs[] loop: on total ENOENT, IOSleep(250) x up to 40
+  (~10s) retrying all candidates before panic. execve() failure leaves init
+  proc untouched => retry safe. Mirrors existing vfs_mountroot IOSleep
+  retry (bsd_init.c:894). extern void IOSleep(int) added.
+- If transient: converts panic->successful boot. If persistent: still
+  panics after ~10s (same outcome, bounded). Retry prints "ENOENT on all
+  candidates, retry N" -> settle time measurable from ring.
+- CI: workflow_dispatch run 43707132937 (DEVELOPMENT/SWEET,
+  verify_strings="ENOENT on all candidates").
+
+NEXT: when kernel lands -> repack boot img (same shim Image.gz + new kernel
+payload path via mkpayload/viva-bootimg) -> fastboot flash boot ONLY ->
+reboot -> watch for "ENOENT on all candidates, retry" in ring + whether it
+reaches userspace -> then resume powerd-stack diagnostic (sweetsample
+powerd,profiled already in pm.img cmdline). userdata stays gpu.simg.
+
 ## >>> ATHENS HANDOFF 2026-11-15z - *** KERNEL-ONLY PIVOT: assertion target = powerd, NOT kernel *** userspace reverted to clean gpu.simg; userdata COMPLETE+verified; diagnostic boot launched to capture powerd stack <<<
 
 USER DIRECTIVE (supersedes dyld patch): "stop trying to modify the original
