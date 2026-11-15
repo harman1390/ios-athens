@@ -4235,3 +4235,12 @@ OPEN / NEXT
   MTK equivalent of QcomBaseband from scratch = largest subsystem project.
 - Updated docs/ATHENS-SUBSYSTEMS.md §6 + added port-landscape table;
   corrected ATHENS.md cellular rows (were "ports do not do cellular" - wrong).
+
+## 2026-11-15 TO-DO.md master list written
+
+- Consolidated all research into TO-DO.md: P0 GUI blocker (userspace
+  stall - backboardd/SpringBoard mach-wait, crash-storm daemon common
+  crash PC 0x1f6073198, GPU still needed), P1 infra (pwrap/USB/touch
+  FW/buttons), P2 usable tier (battery i2c7-first, WiFi 9-step MT6853
+  port, sensors, display, charging), P3 research-grade (cellular MTK
+  CCCI bridge, camera, audio, BT, GPS, LVTS), excluded list.
