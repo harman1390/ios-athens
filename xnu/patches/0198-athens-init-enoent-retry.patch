@@ -9,7 +9,7 @@
  static const char * init_programs[] = {
  #if DEBUG
  	"/usr/appleinternal/sbin/launchd.debug",
-@@ -6926,6 +6928,29 @@
+@@ -6926,6 +6928,33 @@
  		}
  	}
  
@@ -21,15 +21,19 @@
 +	 * panicking. */
 +	{
 +		int sweet_init_retries = 0;
-+		while (error == ENOENT && sweet_init_retries < 40) {
++		while (error == ENOENT && sweet_init_retries < 480) {
 +			sweet_init_retries++;
-+			printf("load_init_program: ENOENT on all candidates, retry %d\n",
-+			    sweet_init_retries);
++			if (sweet_init_retries == 1 || (sweet_init_retries % 8) == 0) {
++				printf("load_init_program: ENOENT on all candidates, retry %d\n",
++				    sweet_init_retries);
++			}
 +			IOSleep(250);
 +			error = ENOENT;
 +			for (i = 0; i < sizeof(init_programs) / sizeof(init_programs[0]); i++) {
 +				error = load_init_program_at_path(p, (user_addr_t)scratch_addr, init_programs[i]);
 +				if (!error) {
++					printf("load_init_program: %s loaded after %d retries\n",
++					    init_programs[i], sweet_init_retries);
 +					return;
 +				}
 +			}
