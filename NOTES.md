@@ -69,6 +69,18 @@ NEXT: ~15-20 min boot -> recovery -> pull ring -> symbolicate new SMP dumps
 call (e.g. AppleKeyStore/SEP stub, containermanagerd, a missing IOKit
 service), that's the single fix point for the whole launch-gate chain.
 
+smp boot #1 RESULT (.tmp-patch/smp-log.txt, 76433 lines, flush #6485 wrapped):
+- ZERO SMP lines - NOT because sampler broke (cmdline 472<608 fits, arg
+  verified in payload) but because **ATHENS TOUCH firmware-download retry
+  spam flooded the 4MiB ring** (16435/20000 lines = touch; ring wraps every
+  few min, evicting the 120s-spaced SMP dumps). Also saw `ATHENS PMIC KEYS:
+  key 0x30 down` (a real keypress registered).
+- FIX: rebuilt with `--athens-notouch` (mkadt drops spi4/NT36672C node -
+  touch already non-functional, loses nothing) -> `athens-boot-smp2.img`,
+  same sweetsample list. FLASHED + rebooting. Ring now stays clean -> SMP
+  for profiled/mdmd/tccd/mobileactivation/containermanager/nanoprefsyncd/
+  cfprefsd/BackupAgent2 will survive to be symbolicated.
+
 ## >>> ATHENS HANDOFF 2026-11-15z - *** CROSS-REPO RESEARCH + REAL GUI BLOCKER IDENTIFIED *** crash storm is NORMAL (sweet/viva prove it); actual blocker = display-off + possible SW-renderer crash-guard; sweetfb_keep=1 test IN FLIGHT <<<
 
 CROSS-REPO RESEARCH (user asked: how do other repos get GUI+touch):
