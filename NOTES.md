@@ -3,7 +3,17 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
-## >>> ATHENS HANDOFF 2026-11-15w - *** INIT-SPAWN ENOENT PANIC ROOT-CAUSED + PATCH 0198 retry building *** reproducible "Process 1 exec /sbin/launchd ENOENT @kern_exec.c:6929"; intermittent (a boot DID reach userspace); kernel-only retry fix in CI run 43707132937 <<<
+## >>> ATHENS HANDOFF 2026-11-15x - *** PATCH 0198 BUILT + FLASHED, BOOT TEST IN PROGRESS *** init-ENOENT retry kernel (run 43708245523, SHA 1aa6d375) flashed as athens-boot-0198.img; watching for retry prints + userspace <<<
+
+PATCH 0198 STATUS: CI run 43708245523 SUCCESS (earlier run 43707132937 failed
+verify_strings because patch file had CRLF/mixed endings -> "corrupt patch at
+line 41"; fixed to pure LF in commit d992327). "ENOENT on all candidates, retry
+%d" confirmed present in kernel.development.sweet. Artifact kernel SHA256:
+1aa6d3756b785b6f0614d201ad5ca70adde8ca006f23a7e210145e40ff7e2d37.
+Repacked shim/out/athens-boot-0198.img (mkpayload kernel0198 + notouch.adt +
+same diag cmdline; viva-bootimg repack backup/boot.img Image.gz). FLASHED boot.
+Now booting; if retry engages, ring will show "ENOENT on all candidates, retry
+N" then either userspace (transient, FIXED) or panic after ~10s (persistent).
 
 PANIC (confirmed x2, identical caller 0xfffffe0007848628):
 `panic(cpu 1): Process 1 exec of /sbin/launchd failed, errno 2 @kern_exec.c:6929`
@@ -41,14 +51,17 @@ PATCH 0198 (xnu/patches/0198-athens-init-enoent-retry.patch, commit 8873173):
 - If transient: converts panic->successful boot. If persistent: still
   panics after ~10s (same outcome, bounded). Retry prints "ENOENT on all
   candidates, retry N" -> settle time measurable from ring.
-- CI: workflow_dispatch run 43707132937 (DEVELOPMENT/SWEET,
-  verify_strings="ENOENT on all candidates").
+- CI: workflow_dispatch run 43708245523 SUCCESS (first attempt 43707132937
+  failed verify_strings on CRLF patch; fixed d992327). Kernel SHA256
+  1aa6d3756b785b6f0614d201ad5ca70adde8ca006f23a7e210145e40ff7e2d37.
 
-NEXT: when kernel lands -> repack boot img (same shim Image.gz + new kernel
-payload path via mkpayload/viva-bootimg) -> fastboot flash boot ONLY ->
-reboot -> watch for "ENOENT on all candidates, retry" in ring + whether it
-reaches userspace -> then resume powerd-stack diagnostic (sweetsample
-powerd,profiled already in pm.img cmdline). userdata stays gpu.simg.
+DONE: repacked shim/out/athens-boot-0198.img (mkpayload new kernel +
+athens-notouch.adt + same diag cmdline; viva-bootimg repack backup/boot.img
+Image.gz) -> fastboot flash boot -> reboot. userdata stays gpu.simg.
+NEXT: watch ring for "ENOENT on all candidates, retry" + userspace. If clean
+boot -> resume powerd-stack diagnostic (sweetsample powerd,profiled in cmdline,
+sampler fires ~90s). If still panics -> inspect retry count/final errno, then
+chase namecache/VFS negative-cache + stray-writer memory corruption.
 
 ## >>> ATHENS HANDOFF 2026-11-15z - *** KERNEL-ONLY PIVOT: assertion target = powerd, NOT kernel *** userspace reverted to clean gpu.simg; userdata COMPLETE+verified; diagnostic boot launched to capture powerd stack <<<
 
