@@ -3,6 +3,52 @@
 **STATUS.md = the live status board (goal + per-subsystem verified/broken
 matrix). Update it on every verified change. This file stays the log.**
 
+## >>> ATHENS HANDOFF 2026-11-15x - *** GUI BLOCKER ROOT-CAUSED + DYLD FIX BUILT *** profiled hangs in IOPMAssertionCreateWithDescription->_io_pm_assertion_create->mach_msg (power-assertion backend never replies) -> never services MCProfileConnection -> SpringBoard launch-sentinel stalls. FIX = tools/patch-power-assert.py stubs IOPMAssertionCreate{WithDescription,WithProperties}+Release in dsc.05 -> fake success. Applied to ios16-root.img; ios16-root-pm.simg converting; flash userdata + boot next <<<
+
+SMP2 RESULT (.tmp-patch/smp2-log.txt, touch node removed so ring stayed
+clean; 12,372 lines): sampler caught the REAL chain, fully symbolicated:
+- **profiled (pid121) main thread:** `_mach_msg` <- `_io_pm_assertion_create`
+  <- `IOPMAssertionCreateWithProperties` <- `IOPMAssertionCreateWithDescription`
+  <- `__retainPowerAssertion` <- `-[MCPowerAssertion initWithReason:]`.
+  = profiled is STUCK creating a kernel/powerd POWER ASSERTION; the MIG
+  mach_msg never returns -> profiled never finishes init -> never vends
+  com.apple.managedconfiguration.profiled.
+- **SpringBoard** + **nanoprefsyncd** both block in
+  `MCProfileConnection checkIn` -> `_xpc_connection_send_message_with_reply_sync`
+  waiting on profiled. containermanagerd/cfprefsd sampled HEALTHY (idle
+  runloops) - NOT the problem. mdmd/tccd/mobileactivation/BackupAgent2 never
+  launched (by-design on-demand / crash-loop) - not the profiled gate.
+- DEPENDENCY CHAIN (confirmed): SpringBoard -> MCProfileConnection checkIn
+  -> profiled -> IOPMAssertionCreate* -> HANG. Fixing profiled's assertion
+  unblocks SpringBoard's launch sentinel AND nanoprefsyncd at once.
+
+WHY NOT RootDomainUserClient: its externalMethod dispatchArray has NO
+assertion-create selector (only sleep/shutdown/restart/allow/display-power/
+user-assertion-LEVELS). User-space IOPMAssertion* routes elsewhere
+(powerd com.apple.iokit.powerdxpc or a dedicated client). Backend hang
+cause (kernel workloop vs powerd stuck) NOT yet isolated - but the client-
+side stub is robust to EITHER. SweetBattery IS a complete IOPMPowerSource
+(publishes full state pre-registerService) so power source is probably fine.
+
+FIX (tools/patch-power-assert.py, modeled on patch-sw-renderer.py): stub the
+IOKit user assertion API in dyld_shared_cache_arm64.05 to return fake success
+- `IOPMAssertionCreateWithDescription` @0x981a70 -> mov w0,#0xffff; ret
+  (non-zero fake io_connect_t; callers only check != IO_OBJECT_NULL)
+- `IOPMAssertionCreateWithProperties` @0x977154 -> mov w0,#0; mov x8,#1;
+  str x8,[x3]; ret (kIOReturnSuccess + dummy IOPMAssertionID=1)
+- `IOPMAssertionRelease` @0x976b3c -> mov w0,#0; ret (no-op; fake conn never
+  mach'd). Subsequent Set*/Release on the fake conn fail FAST (invalid port),
+  never hang. No real sleep on this port (sweetfb_keep) so fake assertions
+  are harmless. Offsets via `ipsw dyld a2o` (all in dsc.05 __TEXT).
+
+APPLIED: ios16-root.img (has Metal bundle + all varfix dirs) patched + synced.
+img2simg -> ios16-root-pm.simg running. NEXT: fastboot flash userdata
+ios16-root-pm.simg, boot (reuse smp2 kernel - has sweetlog+sweetsample+
+sweetfb_hz=0), wait ~15min, pull ring, VERIFY profiled stack clears
+IOPMAssertion and SpringBoard swaps climb past 5 / GUI appears. If profiled
+still blocks elsewhere the clean sampler names the next gate. Touch stays
+disabled in this diag image (--athens-notouch) only to keep logs clean.
+
 ## >>> ATHENS HANDOFF 2026-11-15w - *** SPRINGBOARD STALL ROOT CAUSE SYMBOLICATED *** not display/GPU/errno: SpringBoard's launch-sentinel thread blocks in a SYNCHRONOUS XPC to the managed-config service (MCProfileConnection checkIn -> profiled/mdmd) that never replies; sampling those daemons NOW <<<
 
 sweetfb_keep=1 BOOT RESULT (.tmp-patch/eio2-log.txt, 9249 lines, flush#116):
