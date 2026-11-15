@@ -177,6 +177,30 @@ def installd_dirs(root):
         print('installd dir', os.path.relpath(d, root))
 
 
+def tcc_dirs(root):
+    """TCC database homes. tccd (com.apple.tccd, UserName=mobile) opens its
+    sqlite TCC.db under ~/Library/Application Support/com.apple.TCC and the
+    binary carries an "aborting..."/db_queue assert when it cannot set up the
+    DB (seen on athens r0203c: tccd crash-looped 440x, which left profiled's
+    TCCAccessSetOverride unanswered -> migration hang -> SpringBoard
+    waitForMigration stall -> Apple logo). On the single HFS root the whole
+    mobile "Application Support" tree is absent (data-volume-only on real
+    iOS), exactly like /private/var/installd was. Create the parents and the
+    com.apple.TCC leaf for both the mobile user and the system /Library TCC
+    store, unconditionally so wrong perms get repaired. tccd runs as mobile
+    (uid 501); the /Library store is root-owned."""
+    for rel, uid, gid in (
+            ('Library/Application Support/com.apple.TCC', 0, 0),
+            ('private/var/mobile/Library/Application Support', MOBILE, MOBILE),
+            ('private/var/mobile/Library/Application Support/com.apple.TCC',
+             MOBILE, MOBILE)):
+        d = os.path.join(root, rel)
+        os.makedirs(d, exist_ok=True)
+        os.chown(d, uid, gid)
+        os.chmod(d, 0o755)
+        print('tccdir', rel)
+
+
 def activation(root):
     c = find_container(root, 'Data/System', 'com.apple.mobileactivationd')
     if c is None:
@@ -238,6 +262,7 @@ def main():
     containers(root)
     vardirs(root)
     installd_dirs(root)
+    tcc_dirs(root)
     activation(root)
     audio(root)
     firmware(root)
