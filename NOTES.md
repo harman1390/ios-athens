@@ -4219,3 +4219,17 @@ OPEN / NEXT
   camera/audio/BT/GPS research-grade; battery-via-i2c7-bq27411 is the
   cheapest unblocked win; WiFi needs the MT6853 port deltas listed there.
 - No kernel/ADT/rootfs changes made. Untracked .tmp-patch/* is unrelated WIP.
+
+## 2026-11-15 cellular verdict corrected + port landscape surveyed
+
+- User challenged "cellular impossible" — CONFIRMED cellular works on
+  iOS-on-Android ports, but ONLY Qualcomm: UniXNU/QcomBaseband (chiba233,
+  from Trogdor-ipadOS) boots the QC modem under XNU (TrustZone/SMP2P/
+  GLINK/QRTR/QMI/RMTFS/IPA) -> reg+SMS+IPv4 data on iOS17 Coachz;
+  UniXNU-pong (Nothing Phone 2) has data+IMS+VoLTE on iOS 18.6.2;
+  hakios-fajita LTE data; hakios-op8pro reg+SMS.
+- MTK side: hakios "mtk" branch (Infinix Hot 20 MT6768) has NO cellular;
+  no public MTK/CCCI baseband bridge exists. Athens cellular = write the
+  MTK equivalent of QcomBaseband from scratch = largest subsystem project.
+- Updated docs/ATHENS-SUBSYSTEMS.md §6 + added port-landscape table;
+  corrected ATHENS.md cellular rows (were "ports do not do cellular" - wrong).

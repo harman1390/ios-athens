@@ -140,9 +140,12 @@ fallback. `ATHENS_CMDLINE` replaces the whole command line.
 
 "Daily driver" = boots to a usable SpringBoard you can unlock, touch,
 browse, and leave running. Scored against the verified SWEETLOG state.
-**Cellular is realistically out of reach** — iOS has no MediaTek baseband
-stack; even the most advanced iOS-on-Android ports do not do cellular.
-The realistic ceiling is a **Wi-Fi-only iOS device** (iPad-class).
+**Cellular is realistically out of reach for now** — Qualcomm ports
+(HakiOS/QcomBaseband, UniXNU-pong) have working LTE/VoLTE via a baseband
+bridge, but it is Qualcomm-only (QMI/QRTR/IPA). MT6853's modem speaks
+CCCI and no MTK baseband bridge exists publicly; writing one is the
+largest single subsystem project possible. The realistic ceiling is a
+**Wi-Fi-only iOS device** (iPad-class). See `docs/ATHENS-SUBSYSTEMS.md` §6.
 
 | Subsystem | State | Evidence | Gap to daily-driver |
 | --- | --- | --- | --- |
@@ -156,7 +159,7 @@ The realistic ceiling is a **Wi-Fi-only iOS device** (iPad-class).
 | Wi-Fi | ❌ none | `wifid`/`wifianalyticsd` exec but no connac driver | connac2x2 driver port (big) |
 | Audio | ❌ none | `audioclocksyncd` exec, no codec driver | codec + audio stack port |
 | USB link | ❓ | ssusb xhci0 present, link unconfirmed | confirm adb/peripheral path |
-| Cellular/baseband | ❌ | no MTK modem stack in iOS | **research-grade, likely never** |
+| Cellular/baseband | ❌ | Qualcomm ports solved it (QcomBaseband); MTK needs a CCCI bridge that doesn't exist | **research-grade, very large** |
 | Camera/sensors/NFC/GPS | ❌ | not ported | each a driver project |
 | Sleep/wake, DVFS, thermal | ❌ | not validated | power-management bring-up |
 
@@ -173,8 +176,8 @@ The realistic ceiling is a **Wi-Fi-only iOS device** (iPad-class).
 **Honest distance:** visible+touchable GUI is *close* if the GPU match is
 a small fix (days) but *weeks* if it's a deeper DT/driver issue; the full
 userspace Metal stack is the long pole. A stable Wi-Fi-only daily driver
-is realistically **months** of iterative on-device work; cellular is not
-on the table. Current state ≈ **early bring-up / pre-GUI** — roughly the
+is realistically **months** of iterative on-device work; cellular would
+add a from-scratch MTK baseband bridge on top of that. Current state ≈ **early bring-up / pre-GUI** — roughly the
 "boots but can't yet show a desktop" stage.
 
 ## Handoff (2026-11-06, Phase 0 partial — device session 1)

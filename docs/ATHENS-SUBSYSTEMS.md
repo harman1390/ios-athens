@@ -111,16 +111,46 @@ See research notes (previous session). Summary:
   loads via the same WMT channel (viva `wifi wmt` logs show the chip
   enumerating functions).
 
-## 6. Cellular — not feasible
+## 6. Cellular — achieved on Qualcomm ports; no MTK bridge exists
 
-- Facts **[verified]**: MT6853 has an integrated modem (the `lte`/`ccif`
-  infrastructure exists), but the baseband runs its own RTOS and protocol
-  stack.
-- iOS side: CommCenter/baseband is Apple-proprietary end-to-end. No iOS-on-
-  Android port has ever brought up a MediaTek/Qualcomm modem — the AP-side
-  driver is only half the problem; the modem firmware speaks a different
-  protocol entirely.
-- Verdict: impossible without a from-scratch baseband stack. Exclude.
+**Correction (2026-11-15):** cellular is NOT impossible — it has been done on
+iOS-on-Android ports, but **only on Qualcomm** so far. Verified on GitHub:
+
+- **UniXNU/QcomBaseband** (HoshinoYumeka/@chiba233, extracted from
+  Trogdor-ipadOS): Qualcomm modem boots *under XNU* — TrustZone firmware
+  load, SMP2P/GLINK/QRTR, ~88 QMI services, RMTFS serving modemst1/2+fsc+fsg,
+  IPA v4.2 packet engine, SIM/USIM, NAS registration, signal bars, IPv4
+  cellular data. Runs iOS 17 (21H461) on Coachz.
+- **UniXNU-pong** (Nothing Phone 2, SM8475): iOS **18.6.2** — cellular data,
+  IMS registered, **VoLTE working**.
+- **hakios-fajita** (OnePlus 6T, SD845): LTE registration + data
+  (88 MB down / 56 MB up measured).
+- **hakios-op8pro** (OnePlus 8 Pro, SD865): LTE registration + SMS; calls/
+  mobile data still pending.
+- **hakios-apollo** (Mi 10T, SD865): cellular "not started — very large".
+
+How it works (hackios-web cellular docs): the bridge publishes Apple's
+`AppleBaseband`/`AppleBasebandPCIControl`/`AppleBasebandPCIInterface`
+IOKit personalities (what CommCenter/ABM/BBUpdater bind to) and translates to
+the Qualcomm stack — QMUX/QRTR transport, QMI CTL clients, SAHARA firmware
+exchange, IPA/WDA/QMAP data path, SIM activation identity.
+
+**Athens (MT6853) reality:**
+- MTK AP↔modem is **CCCI** (`/dev/ccci*`, MD-side RTOS, EFS/NVRAM
+  calibration) — a completely different protocol family from QMI/QRTR/IPA,
+  with far less public documentation (only forensic-level papers exist).
+- The HakiOS `mtk` branch (Infinix Hot 20, MT6768 — also MediaTek) has
+  **no cellular**; no public MTK baseband bridge exists anywhere.
+- An athens cellular port = write an MTK CCCI baseband bridge + modem
+  bring-up from scratch: CCCI transport, MD firmware boot, NVRAM/EFS
+  serving, data path, then the same AppleBaseband personalities.
+- Good news: `modem`/`persist`/`nvram` partitions are preserved per
+  AGENTS.md — the calibration data a modem needs survives.
+
+**Verdict: research-grade, very large — realistically the hardest subsystem
+on this list.** Proven architecture, but the MTK implementation is
+unwritten. Requires deep MTK modem reverse engineering; park behind
+everything else.
 
 ## 7. Camera — hardware is rich; iOS pipeline is the wall
 
@@ -254,4 +284,23 @@ See research notes (previous session). Summary:
 5. **WiFi MT6853 port** — the big one; sequence in §4.
 6. **Sensors enumeration + HID bridge** — medium effort, real iOS value.
 7. **Display backlight/DSI** — panel bring-up.
-8. Research-grade / excluded: camera, audio, BT, GPS, cellular, NFC, FP, FM.
+8. Research-grade / excluded: camera, audio, BT, GPS, cellular (§6 —
+   Qualcomm-solved, MTK bridge unwritten), NFC, FP, FM.
+
+## Other iOS-on-Android ports — landscape (verified 2026-11-15)
+
+| Port | Device / SoC | iOS | Progress highlights |
+|---|---|---|---|
+| **HakiOS** (oosexgang/hakios-xnu-kernel) | POCO X5 Pro (SD778G) reference; OnePlus 8/8 Pro (SD865); OnePlus 6T (SD845); **Infinix Hot 20 (MT6768, `mtk` branch)** | 16.5 / 17 | The most advanced ecosystem. Qualcomm ports: cellular via QcomBaseband (reg/SMS/data/VoLTE), GPU+Metal, WiFi/BT, touch, sensors, haptics, flashlight, charging. MTK branch: Mali-G52 via panfrost+Metal, touch, SCP sensors, CONNSYS WiFi, partial BT — **no cellular** |
+| **UniXNU-pong** | Nothing Phone 2 (SM8475) | **18.6.2** | Newest iOS ported. Adreno 730+Metal, ath11k WiFi, USB, audio partial (ADSP/AudioReach/TFA9873), battery, Glyph LEDs, **cellular+IMS+VoLTE** |
+| **ios-apollo** (aTechGeekDev) | Mi 10T/10T Pro/K30s (SD865) | 16.7.16 | ~67%. WiFi (ath11k), BT (UART HCI: A2DP/HFP), speakers (ADSP+CS35L41), GPU (freedreno), touch NT36675, buttons, backlight, battery. Cellular not started |
+| **ios-viva** (Nik300) — athens upstream | MT6781 Dimensity 820 | 16 | conac2x2 WiFi stack athens inherits; no cellular |
+| **ios-sweet** (dipa-studio) — apollo ancestor | (early bring-up) | 16 | CPU rendering only; ancestor of the sweet/apollo line |
+| **ios-athens** (this project) | RMX2117 MT6853 | 16 | See STATUS.md |
+| Project Sandcastle (MVG) | real iPhones/iPads (checkm8) | 10–12 | Different category: genuine Apple baseband, cellular trivial |
+
+Key takeaway: the scene's two lineages converged on "Linux drivers on a
+compatibility layer" (ath11k/freedreno/panfrost — Qualcomm mostly) vs
+"from-scratch Apple-personality drivers" (viva's conac WiFi — MediaTek).
+Athens is the only active **MediaTek** port besides hakios-mtk; cellular
+proof exists only for the Qualcomm lineage.
