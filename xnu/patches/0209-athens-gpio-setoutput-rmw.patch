@@ -1,0 +1,36 @@
+diff --git a/iokit/Kernel/arm/VivaIO.cpp b/iokit/Kernel/arm/VivaIO.cpp
+index e1d02fb..26b566e 100644
+--- a/iokit/Kernel/arm/VivaIO.cpp
++++ b/iokit/Kernel/arm/VivaIO.cpp
+@@ -3,8 +3,9 @@
+  *
+  * GPIO (0x10005000, Xiaomi viva-r-oss pinctrl-mt6781.c /
+  * pinctrl-mtk-common-v2.c): DIR 0x000, DOUT 0x100, DIN 0x200, + 0x10 per
+- * 32 pins, race-free SET at +4 and CLR at +8. Pin modes are left as LK set
+- * them (the touch pins are already GPIO).
++ * 32 pins. mt6853's paris pinctrl accesses these as plain read-modify-write
++ * bitmask registers (mtk_hw_set_value -> mtk_rmw), so setOutput/getInput do
++ * RMW on the bank word - there are no set/clr aliases on this SoC.
+  *
+  * I2C v2 (i2c-mtk.c, i2c_common: ver 2, set_ltiming, cnt_constraint,
+  * set_dt_div, ext_time_config 0x1801): source clock from the ADT
+@@ -84,8 +85,17 @@ VivaGPIO::setOutput(uint32_t pin, bool high)
+ 		return kIOReturnNotPermitted;
+ 	}
+ 	uint32_t bank = 0x10 * (pin / 32), bit = 1u << (pin % 32);
+-	wr32(GPIO_DOUT + bank + (high ? GPIO_SET : GPIO_CLR), bit);   /* level first, then drive */
+-	wr32(GPIO_DIR + bank + GPIO_SET, bit);
++	/* mt6853 uses the paris pinctrl: GPIO DIR/DOUT/DIN are plain
++	 * read-modify-write bitmask registers (pinctrl-mtk-common-v2
++	 * mtk_hw_set_value -> mtk_rmw), NOT set/clr aliases. The old
++	 * SET/CLR writes hit unrelated offsets and clobbered the whole
++	 * bank word, so the touch reset/enable pins were never driven and
++	 * the NT36672C stayed in reset (every SPI read 0xFF). Do a real
++	 * RMW: level into DOUT first, then mark the pin output in DIR. */
++	uint32_t o = rd32(GPIO_DOUT + bank);
++	wr32(GPIO_DOUT + bank, high ? (o | bit) : (o & ~bit));
++	uint32_t d = rd32(GPIO_DIR + bank);
++	wr32(GPIO_DIR + bank, d | bit);
+ 	return kIOReturnSuccess;
+ }
+ 
