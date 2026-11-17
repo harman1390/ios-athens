@@ -1,0 +1,63 @@
+diff --git a/iokit/Kernel/arm/hid/AthensNT36672C.cpp b/iokit/Kernel/arm/hid/AthensNT36672C.cpp
+index 899520a..05b7c48 100644
+--- a/iokit/Kernel/arm/hid/AthensNT36672C.cpp
++++ b/iokit/Kernel/arm/hid/AthensNT36672C.cpp
+@@ -786,13 +786,21 @@ mt6360_ldo_xfer(uint8_t reg, bool wr, uint8_t *val)
+ 	return 0;
+ }
+ 
+-/* Enable MT6360 LDO2 (vtp) before the first SPI touch access. vtp runs at
+- * 1.8 V (live regulator.microvolts=1800000): vsel reg 0x215 (offset 0x15)
+- * = 0x40 selects 1.8 V on ldo_vout_ranges2, then enable reg 0x211 (offset
+- * 0x11) bit 0x40. Voltage is set first like the regulator framework does. */
++/* Power the NT36672C touch section before the first SPI touch access.
++ *
++ * vtp = MT6360 LDO2 is the touch I/O rail (i2c5). The touch section's
++ * reset/enable is NOT the panel reset (GPIO86 = display section, resets the
++ * DSI video the iOS framebuffer relies on -> black screen) but GPIO43, which
++ * Android's touchscreen@0 pinctrl-0 "reset1_active" state drives output-high
++ * (pinctrl/reset1_active pinmux = gpio43 func0). iOS has no pinctrl driver,
++ * so without this the touch section stays in reset -> every SPI read 0x00.
++ * GPIO33 (reset-gpio prop) is held high separately in start(); chip resets
++ * are done over SPI (engReset/SWRST), matching the vendor driver.
++ */
+ static void
+-athens_touch_power(void)
++athens_touch_power(VivaGPIO *gpio)
+ {
++	/* --- MT6360 LDO2 "vtp" (touch I/O, 1.8 V) over i2c5 slave 0x64 --- */
+ 	uint8_t v = 0, vv = 0x40;
+ 	if (mt6360_ldo_xfer(0x15, false, &vv) == 0) {
+ 		IOLog("ATHENS TOUCH: MT6360 LDO2 vout reg=0x%02x\n", vv);
+@@ -809,6 +817,19 @@ athens_touch_power(void)
+ 		v |= 0x40;
+ 		mt6360_ldo_xfer(0x11, true, &v);
+ 	}
++	/* verify the enable actually latched (the write path is otherwise
++	 * unproven - a silent NAK would leave vtp off). */
++	uint8_t rb = 0;
++	if (mt6360_ldo_xfer(0x11, false, &rb) == 0) {
++		IOLog("ATHENS TOUCH: MT6360 LDO2 enable readback=0x%02x%s\n",
++		    rb, (rb & 0x40) ? " (on)" : " (STILL OFF)");
++	}
++
++	/* --- touch reset/enable GPIO43 (pinctrl reset1_active = output-high,
++	 * func0). Release the touch section from reset / enable it. --- */
++	gpio->setPinFunc(43, 0);
++	gpio->setOutput(43, true);
++	IOLog("ATHENS TOUCH: gpio43 (touch reset/enable) func0 out-high\n");
+ }
+ 
+ bool
+@@ -835,8 +856,9 @@ AthensNT36672C::start(IOService *provider)
+ 		IOLog("ATHENS TOUCH: missing SPI bus, GPIO or work loop\n");
+ 		return false;
+ 	}
+-	/* Power the touch rail (MT6360 LDO2 "vtp") before reset/SPI bring-up. */
+-	athens_touch_power();
++	/* Power the NT36672C touch section (vtp rail + reset/enable GPIO43)
++	 * before reset/SPI bring-up. */
++	athens_touch_power(fGPIO);
+ 
+ 	/* Default to the no-flash map: this panel is nf_nt36672c (oppo,tp_noflash,
+ 	 * FW_20611_NF_NT36672C_JDI) = hw_crc 0. chipTrim may override to a flash
