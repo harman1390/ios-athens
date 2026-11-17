@@ -1,0 +1,42 @@
+diff --git a/iokit/Kernel/arm/AthensSPI.cpp b/iokit/Kernel/arm/AthensSPI.cpp
+index 86795fc..8059ce9 100644
+--- a/iokit/Kernel/arm/AthensSPI.cpp
++++ b/iokit/Kernel/arm/AthensSPI.cpp
+@@ -98,13 +98,33 @@ AthensSPI::getWorkLoop(void) const
+ void
+ AthensSPI::initHW(void)
+ {
+-	/* soft reset, then static config: mode 0 MSB, ~9.6 MHz, cs_idle 2,
+-	 * finish intr (we poll STATUS0 busy instead), no pause/deassert. */
++	/* soft reset, then static config: mode 0 MSB, ~9.1 MHz SCK, finish
++	 * intr (we poll STATUS0 busy instead), CS idle = PAUSE_EN (high). */
+ 	wr32(SPI_CMD, rd32(SPI_CMD) | SPI_CMD_RST);
+ 	IODelay(10);
+ 	wr32(SPI_CMD, rd32(SPI_CMD) & ~SPI_CMD_RST);
+-	wr32(SPI_CFG0, (5 << 0) | (5 << 8) | (0 << 16) | (0 << 24));
+-	wr32(SPI_CFG1, (2 - 1) << 0);        /* cs_idletime 2 -> field value 1 */
++	/* mt6765-spi -> mt6765_compat has enhance_timing=true. In that mode
++	 * the SCK high/low half-periods go in CFG2 (two 16-bit fields) and
++	 * the CS setup/hold go in CFG0 at the ADJUST offsets
++	 * (CS_HOLD=0, CS_SETUP=16) -- NOT the legacy CFG0 SCK/CS layout the
++	 * old code wrote. With CFG2 left at its reset value the SCK
++	 * half-period is ~1 cycle (~54 MHz) or dead, far outside the
++	 * NT36672C's ~9.6 MHz spec, so the chip never latched a command and
++	 * every read returned 0xFF. Replicate mtk_spi_prepare_transfer for
++	 * the fixed 9.6 MHz xfer speed:
++	 *   spi_clk = ifrao_spi4 = spi_sel(mainpll_d5_d4) = 2184/20 = 109.2M
++	 *   div = DIV_ROUND_UP(109.2M,9.6M) = 12 ; sck_time = (12+1)/2 = 6
++	 *   cs_time = 12 ; mtk_default_chip_info cs_* all 0 -> use cs_time
++	 *   CFG2 = (sck-1)|(sck-1)<<16 ; CFG0 = (hold-1)|(setup-1)<<16
++	 *   CFG1 cs_idle = cs_idletime-1 */
++#define SPI_SRC_HZ     109200000u    /* mainpll_d5_d4 = 2184 MHz / 20 */
++#define SPI_XFER_HZ    9600000u      /* touchscreen spi-max-frequency */
++	uint32_t sdiv = (SPI_SRC_HZ + SPI_XFER_HZ - 1) / SPI_XFER_HZ; /* 12 */
++	uint32_t sck_t = (sdiv + 1) / 2;                            /* 6  */
++	uint32_t cs_t  = sck_t * 2;                                 /* 12 */
++	wr32(SPI_CFG2, ((sck_t - 1) & 0xffff) | (((sck_t - 1) & 0xffff) << 16));
++	wr32(SPI_CFG0, ((cs_t - 1) & 0xffff) | (((cs_t - 1) & 0xffff) << 16));
++	wr32(SPI_CFG1, (cs_t - 1) << 0);        /* cs_idletime -> field value */
+ 	wr32(SPI_PAD_SEL, 0);
+ 	/* Idle state = CS deasserted (PAUSE_EN set = CS high). transferGated
+ 	 * clears PAUSE_EN to assert CS for each frame then sets it again, giving
