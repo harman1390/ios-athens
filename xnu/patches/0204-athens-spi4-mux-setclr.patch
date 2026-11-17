@@ -1,0 +1,22 @@
+diff --git a/iokit/Kernel/arm/AthensSPI.cpp b/iokit/Kernel/arm/AthensSPI.cpp
+--- a/iokit/Kernel/arm/AthensSPI.cpp
++++ b/iokit/Kernel/arm/AthensSPI.cpp
+@@ -232,9 +232,17 @@
+ 	 * defaults work). */
+ 	if (fTopRegs != 0) {
+ 		volatile uint32_t *top = (volatile uint32_t *)fTopRegs;
+-		top[CLK_CFG6_CLR / 4] = SPI_SEL_VAL << SPI_SEL_LSB;
++		/* spi_sel is a 2-bit field at lsb16 plus a setclr gate at bit23
++		 * (MUX_GATE_CLR_SET_UPD pdn). SET/CLR are bit-level, so writing the
++		 * value to both leaves bit17 stale - a leftover 1 pins the mux on
++		 * gated msdcpll_d4 -> dead SCK -> MISO reads 0x00. Clear the whole
++		 * field and the gate bit, then set the parent (clk-mt6853.c
++		 * spi_parents[1]=mainpll_d5_d4; gate ops: bit=0 running). */
++		top[CLK_CFG6_CLR / 4] = (0x3u << SPI_SEL_LSB) | (1u << 23);
+ 		top[CLK_CFG6_SET / 4] = SPI_SEL_VAL << SPI_SEL_LSB;
+ 		top[CLK_CFG_UPDATE / 4] = 1u << TOP_MUX_SPI_SHIFT;
++		IOLog("ATHENS SPI: spi_sel=%u cfg6=0x%08x\n",
++		    (top[CLK_CFG6 / 4] >> SPI_SEL_LSB) & 0x3u, top[CLK_CFG6 / 4]);
+ 	}
+ 	if (fInfraRegs != 0) {
+ 		/* Enable the ifrao_spi4 clock gate. With mtk_clk_gate_ops_setclr a
