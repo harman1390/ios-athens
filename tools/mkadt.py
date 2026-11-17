@@ -386,6 +386,33 @@ def athens_devices(ph, phandle, gic_ph, ecid):
             ('scl-gpio', u32(97)),
             ('sda-gpio', u32(98)),
         ]),
+        # I2C5 (i2c5@11d00000, SPI 117 level, 400 kHz): the SUB-PMIC bus -
+        # live FDT i2c5@11d00000 hosts subpmic@0x34 / subpmic_pmic@0x1a /
+        # subpmic_ldo@0x64 (mediatek,subpmic_* = MT6360) and usb_type_c@0x4e.
+        # The touch controller's supply "vtp" is MT6360 LDO2 (live DT
+        # mt6360_ldo_dts/ldo2: regulator-name "vtp", always-on+default-on,
+        # 1.8 V) reached through touch/vtouch-supply. iOS has no MT6360 driver,
+        # so vtp is likely off -> NT36672C reads back 0x00. This node lets
+        # VivaI2C bind bus 5 so a driver can enable LDO2 (reg 0x11 bit 0x40 on
+        # slave 0x64, CRC8-framed). reg1 0x10217500 = APDMA like i2c0.
+        # SCL GPIO107 / SDA GPIO108 (live scl-gpio-id 0x6b / sda-gpio-id 0x6c);
+        # LK already muxes i2c5 for PMIC so pins should stay in I2C function.
+        # source-clock = univpll_d5_d4 = univpll/20 ~= 124.8 MHz (clk-mt6853
+        # i2c_sel parents {26m, mainpll_d4_d8, univpll_d5_d4}); the athens i2c0
+        # node omits source-clock so VivaI2C rejects it - set it here.
+        node('i2c5', [
+            ph(),
+            ('compatible', cstr('mediatek,mt6781-i2c')),
+            ('reg', io(0x11d00000, 0x1000) + io(0x10217500, 0x80)),
+            ('interrupt-parent', u32(gic_ph)),
+            ('interrupts', spi(0x75, IRQ_LEVEL_HIGH)),
+            ('bus-id', u32(5)),
+            ('clock-frequency', u32(400000)),
+            ('clock-div', u32(5)),
+            ('source-clock', u32(124800000)),
+            ('scl-gpio', u32(107)),
+            ('sda-gpio', u32(108)),
+        ]),
         # SPI4 (spi4@11018000, SPI 163 level): MTK SPI host (spi-mt65xx.c,
         # iokit/Kernel/arm/AthensSPI.cpp). reg0=SPI block, reg1=topckgen
         # (spi_sel mux -> msdcpll_d4, CLK_CFG_6 lsb16=3, update bit26),
