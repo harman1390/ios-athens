@@ -147,7 +147,7 @@ LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
 | Kernel reaches launchd | ✅ | run-6: pid 1 init exec'd /sbin/launchd — died only at the signature stage (below) |
 | launchd exec | ✅ | run-7: `unentitled_ios_sim_launch=1` fixed the WRONG_PLATFORM kill — launchd ran the full early-boot task chain (fsck→mount→FIPS POST→keybagd→usermanagerd→cache loader→"Early boot complete"→SpringBoard+xpcproxy spawns) |
 | Read-write root | ✅ boots | run-8 (ufsrw=1 rootrw=1): mount panic gone — boot reached **Apple logo + moving progress bar** (first iOS UI on hardware; kernel bootscreen rendering works) |
-| GUI stage | ✅ rendering on-device; ⛔ userspace-stalled | **gpu16 (0189+0190+0191)**: display path CONFIRMED working — `SWEET FBSTAT swaps 7 copies 7 flips 5 shown.buf 1 vblankOvl 1` (copy+flip+OVL0_2L frame-end all live, video-mode DSI panel). Panel shows static Apple logo because SpringBoard/backboardd threads are PARKED (not crashed) with nothing new to render — userspace never produced the home screen. Real blocker = **123-daemon crash storm** (`sig 5 code 0x600000001` SIGTRAP, shared PC 0x198f746dc; accountsd×31 dmd×18 mobileactivation×14) = known trust-cache/signing/entitlement problem, NOT display. |
+| GUI stage | ✅ **HELLO/setup screen reached** | Display CONFIRMED working (SWEET FBSTAT swaps + VIVA GPU accelerator published VivaMTLDriver + IOSurface compositing). Apple-logo stall was a USERSPACE chain, all fixed in rootfs: containermanagerd MCM dir, profiled power-assert stub, tccd confstr()+/var/tmp 1777, mobileactivationd migration-fail crash (mobileactivationd_patch NOPs 2 crash branches; getActivationState via ADT /chosen Hactivation). 2026-11-17e: device reaches iOS Hello/setup screen. Touch pending (athens-notouch.adt). gpu16 detail: FBSTAT swaps 7 copies 7 flips 5, video-mode DSI. | **gpu16 (0189+0190+0191)**: display path CONFIRMED working — `SWEET FBSTAT swaps 7 copies 7 flips 5 shown.buf 1 vblankOvl 1` (copy+flip+OVL0_2L frame-end all live, video-mode DSI panel). Panel shows static Apple logo because SpringBoard/backboardd threads are PARKED (not crashed) with nothing new to render — userspace never produced the home screen. Real blocker = **123-daemon crash storm** (`sig 5 code 0x600000001` SIGTRAP, shared PC 0x198f746dc; accountsd×31 dmd×18 mobileactivation×14) = known trust-cache/signing/entitlement problem, NOT display. |
 | Buttons (PWR/VOL) | ✅ working | gpu13 log: `power->0x30 home->0xe9`, `key 0x30 down` — PMIC keys (MT6359, EINT118) deliver HID events to backboardd; AthensPMICKeys+VivaKeypad+SweetHIDButtons all opened. vol-down GPIO still untested. |
 | UFS DMA carve | ⚠️ replaced | `ufsdma=0xfd000000` sat INSIDE dram_r1 alloc-range — flawed. 0177: CAP_64AS (bit24 set in real read) → DMA from managed >4G pool; fallback moved to 0x4e000000 (below both dummy-read ranges) |
 | ufs_scsi silent-spin risk | ⚠️ patched | 0177: 2²⁸ hard poll cap + host-state dump — a stuck command now times out loudly instead of hanging |
@@ -168,14 +168,14 @@ LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
 |---|---|---|
 | `sweet_ufs` host driver | ⚠️ | works on lowmem boots (log tail writes verified); highmem path untested |
 | userdata GPT discovery | ✅ | LUN 2, partition 58 (sdc59), first LBA 0x272800 |
-| iOS root in userdata | ⬜ | iosroot/ios16-root.img exists; mount not yet exercised on highmem |
+| iOS root in userdata | ✅ | HFS+ iOS root in sdc59 mounts RW every boot; launchd+full userspace runs; GUI renders (2026-11-17e). Rootfs tweaks in tools/sweet-root-tweaks.py + dyld patches (confstr/power-assert) + mobileactivationd binary patch |
 
 ## Peripherals (not started — do not regress the above when adding)
 
 | Item | Status | Reference |
 |---|---|---|
 | Framebuffer console | ✅ | LK fb 0x77e20000 1080×2400 stride 4352 (ARBG) — panic UI renders |
-| IOMobileFramebuffer / CoreAnimation | ⬜ | ios-sweet upstream has the full software-render stack to adapt |
+| IOMobileFramebuffer / CoreAnimation | ✅ | Confirmed end-to-end: FB service published+answering, backboardd IOSurface BGRA swaps, GPU accelerator (VivaMTLDriver) compositing, SpringBoard renders Hello/setup screen (2026-11-17e) |
 | Touch | ❌ root cause found, fix pending build | gpu13: `nt36672c_jdi.bin not found -> built-in fw -> reset state timeout (last 0x00) -> firmware download failed`. CONFIRMED chip = `oppo,tp_noflash`/`nf_nt36672c` JDI = **noflash hw_crc=0**, but driver defaulted to nt36672a flash map (hw_crc=1) -> wrong BLD-CRC download path -> fw never boots. fw blob itself is correct (all 3 copies byte-identical 139264B). **Patch 0190** = faithful noflash port (full vendor trim table+maps, eng_reset, POR_CD, event_buf 0x11A00/0x11E00 auto-discover, raw trim-ID log). Awaiting build. See docs/ATHENS-TOUCH.md |
 | Keys (PWR/VOL) | ✅ working (see Buttons row) | PWRKEY/HOMEKEY=MT6359 PMIC keys (EINT118) confirmed delivering HID events on gpu13; vol-down=EINT80 GPIO key untested |
 | Battery/charger | ⬜ | MT6359 FGADC + MT6360 |
