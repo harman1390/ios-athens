@@ -146,7 +146,9 @@ def vardirs(root):
             ('private/var/mobile/Library/Logs', MOBILE, MOBILE, 0o755),
             ('private/var/mobile/Library/WebKit', MOBILE, MOBILE, 0o755),
             ('private/var/mobile/Library/SyncedPreferences', MOBILE, MOBILE, 0o755),
-            ('private/var/mobile/Library/Favorites', MOBILE, MOBILE, 0o755)):
+            ('private/var/mobile/Library/Favorites', MOBILE, MOBILE, 0o755),
+            ('private/var/mobile/Library/mad', MOBILE, MOBILE, 0o755),
+            ('private/var/mobile/Library/Keychains', MOBILE, MOBILE, 0o755)):
         d = os.path.join(root, rel)
         if not os.path.isdir(d):
             os.makedirs(d)
@@ -156,6 +158,54 @@ def vardirs(root):
         elif mode & 0o1000 and os.stat(d).st_mode & 0o7777 != mode:
             os.chmod(d, mode)
             print('vardir mode', rel, oct(mode))
+
+
+def mobileactivationd_patch(root):
+    """Stop mobileactivationd crash-looping on activation-data migration.
+
+    main() runs the com.apple.MobileActivationMigrator migration once,
+    synchronously, before it brings up its NSXPC listener. On this port the
+    sydro migration cannot complete (keychain / data-volume state the single
+    HFS root does not have), so the failure branch logs "Migration failed."
+    and hits __os_crash -> brk #0x1. The daemon respawned ~460x/boot and
+    SpringBoard's synchronous activation XPC (getActivationState) never got
+    an answer -> Apple logo.
+
+    Two sites reach the crash thunk, both guarded by `tbz w19,#0,<crash>`:
+      * sync path   0x100050470 -> loc_100050668 -> 0x1001bf35c
+      * async block 0x100050718 -> loc_100050730 -> 0x1001bf6a0
+    NOP-ing the tbz makes migration failure fall through to the same
+    success tail as migration success (the error object is simply retained
+    and ignored), so the listener comes up either way. Verified these are
+    the ONLY two BL call sites to the two MigrationFailed thunks in the
+    20H392 build (xref scan of __text). Idempotent: only writes when the
+    expected tbz encoding is present."""
+    path = os.path.join(root, 'usr/libexec/mobileactivationd')
+    NOP = b'\x1f\x20\x03\xd5'
+    sites = {0x50470: b'\xd3\x0f\x00\x36',   # tbz w19,#0 -> MigrationFailed-main
+             0x50718: b'\xd3\x00\x00\x36'}   # tbz w19,#0 -> MigrationFailed-block
+    try:
+        with open(path, 'r+b') as f:
+            data = f.read()
+            if data[:4] != b'\xcf\xfa\xed\xfe':
+                print('mobileactivationd: not a Mach-O, skipped')
+                return
+            patched = False
+            for off, expect in sites.items():
+                cur = data[off:off + 4]
+                if cur == NOP:
+                    continue                      # already patched
+                if cur != expect:
+                    print('mobileactivationd: unexpected bytes at %#x (%s), skipped'
+                          % (off, cur.hex()))
+                    return
+                f.seek(off)
+                f.write(NOP)
+                patched = True
+            if patched:
+                print('mobileactivationd: migration-fail crash branches NOP-ed')
+    except FileNotFoundError:
+        print('mobileactivationd: not present, skipped')
 
 
 def installd_dirs(root):
@@ -267,6 +317,7 @@ def main():
     installd_dirs(root)
     tcc_dirs(root)
     activation(root)
+    mobileactivationd_patch(root)
     audio(root)
     firmware(root)
     merge_pref(root, 'com.apple.migration', {
