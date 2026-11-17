@@ -1,8 +1,8 @@
 diff --git a/iokit/Kernel/arm/hid/AthensNT36672C.cpp b/iokit/Kernel/arm/hid/AthensNT36672C.cpp
-index 0e2d718..9312f4e 100644
+index 0e2d718..899520a 100644
 --- a/iokit/Kernel/arm/hid/AthensNT36672C.cpp
 +++ b/iokit/Kernel/arm/hid/AthensNT36672C.cpp
-@@ -707,6 +707,99 @@ AthensNT36672C::init(OSDictionary *props)
+@@ -707,6 +707,110 @@ AthensNT36672C::init(OSDictionary *props)
  	return true;
  }
  
@@ -13,8 +13,9 @@ index 0e2d718..9312f4e 100644
 + * it over i2c5 (VivaI2C bus 5) with the MT6360 LDO-bank protocol
 + * (linux drivers/mfd/mt6360-core.c): slave 0x64, registers at bank offset
 + * 0x00-0x3F with a data-size field in the command byte's top bits, every
-+ * transaction trailed by a CRC8 (poly 0x07, MSB-first). LDO2 enable = reg
-+ * 0x211 -> bank offset 0x11, bit 0x40 (drivers/regulator/mt6360-regulator.c). */
++ * transaction trailed by a CRC8 (poly 0x07, MSB-first). LDO2 vout = reg
++ * 0x215 -> offset 0x15 = 0x40 for 1.8 V; enable = reg 0x211 -> offset 0x11,
++ * bit 0x40 (drivers/regulator/mt6360-regulator.c). */
 +extern "C" int
 +viva_i2c_xfer_bus(uint32_t bus, uint8_t addr, const uint8_t *wbuf, uint32_t wlen,
 +    uint8_t *rbuf, uint32_t rlen);
@@ -84,11 +85,21 @@ index 0e2d718..9312f4e 100644
 +	return 0;
 +}
 +
-+/* Enable MT6360 LDO2 (vtp) before the first SPI touch access. */
++/* Enable MT6360 LDO2 (vtp) before the first SPI touch access. vtp runs at
++ * 1.8 V (live regulator.microvolts=1800000): vsel reg 0x215 (offset 0x15)
++ * = 0x40 selects 1.8 V on ldo_vout_ranges2, then enable reg 0x211 (offset
++ * 0x11) bit 0x40. Voltage is set first like the regulator framework does. */
 +static void
 +athens_touch_power(void)
 +{
-+	uint8_t v = 0;
++	uint8_t v = 0, vv = 0x40;
++	if (mt6360_ldo_xfer(0x15, false, &vv) == 0) {
++		IOLog("ATHENS TOUCH: MT6360 LDO2 vout reg=0x%02x\n", vv);
++		if (vv != 0x40) {
++			vv = 0x40;
++			mt6360_ldo_xfer(0x15, true, &vv);
++		}
++	}
 +	if (mt6360_ldo_xfer(0x11, false, &v) != 0) {
 +		return;
 +	}
@@ -102,7 +113,7 @@ index 0e2d718..9312f4e 100644
  bool
  AthensNT36672C::start(IOService *provider)
  {
-@@ -731,6 +824,9 @@ AthensNT36672C::start(IOService *provider)
+@@ -731,6 +835,9 @@ AthensNT36672C::start(IOService *provider)
  		IOLog("ATHENS TOUCH: missing SPI bus, GPIO or work loop\n");
  		return false;
  	}
