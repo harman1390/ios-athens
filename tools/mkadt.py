@@ -362,12 +362,15 @@ def athens_devices(ph, phandle, gic_ph, ecid):
         ])]),
         # GPIO (pio/pinctrl@10005000): only pins that must be driven go here.
         # 33 = NT36672C touch reset (live FDT novatek reset-gpio; the earlier
-        # guess of 15 came from the disproven Goodix population).
+        # guess of 15 came from the disproven Goodix population). 41/136/137/138
+        # = NT36672C panel power (pm-enable/lcd-1p8/bias, live FDT panel3+4
+        # gpios) and 86 = panel reset - iOS has no LCM driver so the touch
+        # driver drives them itself (see athens_touch_power).
         node('gpio', [
             ph(),
             ('compatible', cstr('mediatek,mt6781-gpio')),
             ('reg', io(0x10005000, 0x1000)),
-            ('output-pins', u32(33)),
+            ('output-pins', u32(33, 41, 86, 136, 137, 138)),
         ]),
         # I2C0 (i2c0@11e00000, SPI 112 level, 400 kHz): second reg is the APDMA
         # channel (0x10217080); SCL GPIO 97, SDA GPIO 98 (dts). Source clock and
