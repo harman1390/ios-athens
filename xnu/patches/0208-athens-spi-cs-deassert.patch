@@ -1,0 +1,44 @@
+diff --git a/iokit/Kernel/arm/AthensSPI.cpp b/iokit/Kernel/arm/AthensSPI.cpp
+index cb0a416..092c404 100644
+--- a/iokit/Kernel/arm/AthensSPI.cpp
++++ b/iokit/Kernel/arm/AthensSPI.cpp
+@@ -106,7 +106,12 @@ AthensSPI::initHW(void)
+ 	wr32(SPI_CFG0, (5 << 0) | (5 << 8) | (0 << 16) | (0 << 24));
+ 	wr32(SPI_CFG1, (2 - 1) << 0);        /* cs_idletime 2 -> field value 1 */
+ 	wr32(SPI_PAD_SEL, 0);
+-	wr32(SPI_CMD, SPI_CMD_TXMSBF | SPI_CMD_RXMSBF | SPI_CMD_FINISH_IE);
++	/* Idle state = CS deasserted (PAUSE_EN set = CS high). transferGated
++	 * clears PAUSE_EN to assert CS for each frame then sets it again, giving
++	 * the NT36672C the CS rising edge it needs between set_page/data frames
++	 * (mtk_spi_set_cs uses PAUSE_EN for CS on mt6765-spi). */
++	wr32(SPI_CMD, SPI_CMD_TXMSBF | SPI_CMD_RXMSBF | SPI_CMD_FINISH_IE |
++	    SPI_CMD_PAUSE_EN);
+ }
+ 
+ bool
+@@ -381,6 +386,8 @@ AthensSPI::transferGated(const uint8_t *txbuf, uint8_t *rxbuf, uint32_t len)
+ 				memcpy(rxbuf + i, &w, n);
+ 			}
+ 		}
++		wr32(SPI_CMD, rd32(SPI_CMD) | SPI_CMD_PAUSE_EN);   /* CS high */
++		IODelay(10);                                    /* tCSH idle-high */
+ 		return kIOReturnSuccess;
+ 	}
+ 
+@@ -412,6 +419,8 @@ AthensSPI::transferGated(const uint8_t *txbuf, uint8_t *rxbuf, uint32_t len)
+ 		fDMA->performOperation(kIOMemoryIncoherentIOFlush, 0, len);
+ 		memcpy(rxbuf, fDMABuf, len);
+ 	}
++	wr32(SPI_CMD, rd32(SPI_CMD) | SPI_CMD_PAUSE_EN);       /* CS high */
++	IODelay(10);                                        /* tCSH idle-high */
+ 	return kIOReturnSuccess;
+ 
+ timeout:
+@@ -420,6 +429,7 @@ timeout:
+ 		IOLog("ATHENS SPI: transfer %u B timeout (status0 %08x status1 %08x)\n",
+ 		    len, rd32(SPI_STATUS0), rd32(SPI_STATUS1));
+ 	}
++	wr32(SPI_CMD, rd32(SPI_CMD) | SPI_CMD_PAUSE_EN);       /* CS high */
+ 	wr32(SPI_CMD, rd32(SPI_CMD) | SPI_CMD_RST);
+ 	IODelay(10);
+ 	wr32(SPI_CMD, rd32(SPI_CMD) & ~SPI_CMD_RST);
