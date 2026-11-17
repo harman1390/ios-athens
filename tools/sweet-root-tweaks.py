@@ -153,6 +153,9 @@ def vardirs(root):
             os.chown(d, uid, gid)
             os.chmod(d, mode)
             print('vardir', rel)
+        elif mode & 0o1000 and os.stat(d).st_mode & 0o7777 != mode:
+            os.chmod(d, mode)
+            print('vardir mode', rel, oct(mode))
 
 
 def installd_dirs(root):
