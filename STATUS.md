@@ -180,7 +180,7 @@ LIVE-DT VERIFICATION HARVEST (adb, PitchBlack, 2026-11-12):
 | Keys (PWR/VOL) | ✅ working (see Buttons row) | PWRKEY/HOMEKEY=MT6359 PMIC keys (EINT118) confirmed delivering HID events on gpu13; vol-down=EINT80 GPIO key untested |
 | Battery/charger | ⬜ | MT6359 FGADC + MT6360 |
 | Wi‑Fi/BT | ⬜ | on-die CONNSYS_6853 connac2x2 (wifi@0x18000000 SPI377, consys@0x18002000, btif@0x1100c000 — stock mt6853.dtb) — viva's connac driver/registry work is the reference to adapt |
-| GPU (Mali G57 @0x13000000) | ✅ powered on, compositing | gpu13: `VIVA GPU: id 0x90930000 cores 3 l2 on`, `accelerator published (MetalPluginName VivaMTLDriver)`, backboardd matched `IOAcceleratorES->VivaGPUAccelerator`, real BGRA surface swaps. Depends on PMIC/PMIF (below). See docs/ATHENS-GPU.md |
+| GPU (Mali G57 @0x13000000) | ✅ powered on, compositing | gpu13: `VIVA GPU: id 0x90930000 cores 3 l2 on`, `accelerator published (MetalPluginName VivaMTLDriver)`, backboardd matched `IOAcceleratorES->VivaGPUAccelerator`, real BGRA surface swaps. Depends on PMIC/PMIF (below). See docs/ATHENS-GPU.md. **Needs boot-arg `vivagpu=2`** (absent = `VIVA GPU: off`, driver never starts): 2026-11-17 shim/out/athens-boot.img was built without it (GPU off) - fixed in shim/out/athens-boot-gui.img (NOTES 17b) |
 | PMIC / pwrap (MT6359) | ✅ WORKING | gpu13 patch 0188 = MT6853 **PMIF/ARB_V3 SWINF_2** (NOT classic WACS2): `pmif_init_done 1`, `spiwrap_en 1`, `swinf2_sta 0x8441 (fsm0 init1)`, `hwcid 0x5930 swcid 0x5920`, regulator R/W verified `ok`. spi_mst@0x10028000 added to ADT. This was THE GUI blocker. |
 
 ## Non-regression rules
