@@ -1,0 +1,114 @@
+diff --git a/iokit/Kernel/arm/hid/AthensNT36672C.cpp b/iokit/Kernel/arm/hid/AthensNT36672C.cpp
+index 0e2d718..9312f4e 100644
+--- a/iokit/Kernel/arm/hid/AthensNT36672C.cpp
++++ b/iokit/Kernel/arm/hid/AthensNT36672C.cpp
+@@ -707,6 +707,99 @@ AthensNT36672C::init(OSDictionary *props)
+ 	return true;
+ }
+ 
++/* MT6360 sub-PMIC LDO2 = "vtp", the NT36672C touch supply (live DT
++ * mt6360_ldo_dts/ldo2 regulator-name "vtp", touchscreen/vtouch-supply).
++ * iOS has no MT6360 driver, so nothing enables the rail and the chip reads
++ * back 0x00 on SPI (recovery proves the part is fine once vtp is up). Enable
++ * it over i2c5 (VivaI2C bus 5) with the MT6360 LDO-bank protocol
++ * (linux drivers/mfd/mt6360-core.c): slave 0x64, registers at bank offset
++ * 0x00-0x3F with a data-size field in the command byte's top bits, every
++ * transaction trailed by a CRC8 (poly 0x07, MSB-first). LDO2 enable = reg
++ * 0x211 -> bank offset 0x11, bit 0x40 (drivers/regulator/mt6360-regulator.c). */
++extern "C" int
++viva_i2c_xfer_bus(uint32_t bus, uint8_t addr, const uint8_t *wbuf, uint32_t wlen,
++    uint8_t *rbuf, uint32_t rlen);
++
++static uint8_t
++mt6360_crc8(const uint8_t *d, uint32_t n)
++{
++	uint8_t tbl[256];
++	for (int i = 0; i < 256; i++) {
++		uint8_t c = (uint8_t)i;
++		for (int j = 0; j < 8; j++) {
++			c = (c & 0x80) ? (uint8_t)((c << 1) ^ 0x07) : (uint8_t)(c << 1);
++		}
++		tbl[i] = c;
++	}
++	uint8_t crc = 0;
++	for (uint32_t i = 0; i < n; i++) {
++		crc = tbl[crc ^ d[i]];
++	}
++	return crc;
++}
++
++/* One MT6360 LDO register byte access on i2c5 slave 0x64 (CRC8-framed).
++ * reg = bank offset 0x00-0x3F. wr==false reads into *val, true writes *val. */
++static int
++mt6360_ldo_xfer(uint8_t reg, bool wr, uint8_t *val)
++{
++	uint8_t wbuf[8], rbuf[8];
++	uint8_t cmd = reg & 0x3f;              /* 1-byte access -> size bits 00 */
++	if (!wr) {
++		int ok = -1;
++		wbuf[0] = cmd;
++		for (int t = 0; t < 40 && ok != 0; t++) {
++			ok = viva_i2c_xfer_bus(5, 0x64, wbuf, 1, rbuf, 2);
++			if (ok != 0) {
++				IOSleep(50);
++			}
++		}
++		if (ok != 0) {
++			IOLog("ATHENS TOUCH: MT6360 LDO read: i2c5 not ready\n");
++			return -1;
++		}
++		uint8_t cbuf[3] = { 0xC9, cmd, rbuf[0] };   /* 0xC9 = 0x64 read addr */
++		if (mt6360_crc8(cbuf, 3) != rbuf[1]) {
++			IOLog("ATHENS TOUCH: MT6360 LDO crc %02x != %02x\n", rbuf[1],
++			    mt6360_crc8(cbuf, 3));
++		}
++		*val = rbuf[0];
++		return 0;
++	}
++	uint8_t cbuf[3] = { 0xC8, cmd, *val };          /* 0xC8 = 0x64 write addr */
++	wbuf[0] = cmd;
++	wbuf[1] = *val;
++	wbuf[2] = mt6360_crc8(cbuf, 3);
++	wbuf[3] = 0;
++	int ok = -1;
++	for (int t = 0; t < 40 && ok != 0; t++) {
++		ok = viva_i2c_xfer_bus(5, 0x64, wbuf, 4, NULL, 0);
++		if (ok != 0) {
++			IOSleep(50);
++		}
++	}
++	if (ok != 0) {
++		IOLog("ATHENS TOUCH: MT6360 LDO write failed\n");
++		return -1;
++	}
++	return 0;
++}
++
++/* Enable MT6360 LDO2 (vtp) before the first SPI touch access. */
++static void
++athens_touch_power(void)
++{
++	uint8_t v = 0;
++	if (mt6360_ldo_xfer(0x11, false, &v) != 0) {
++		return;
++	}
++	IOLog("ATHENS TOUCH: MT6360 LDO2 reg=0x%02x%s\n", v, (v & 0x40) ? " (on)" : "");
++	if (!(v & 0x40)) {
++		v |= 0x40;
++		mt6360_ldo_xfer(0x11, true, &v);
++	}
++}
++
+ bool
+ AthensNT36672C::start(IOService *provider)
+ {
+@@ -731,6 +824,9 @@ AthensNT36672C::start(IOService *provider)
+ 		IOLog("ATHENS TOUCH: missing SPI bus, GPIO or work loop\n");
+ 		return false;
+ 	}
++	/* Power the touch rail (MT6360 LDO2 "vtp") before reset/SPI bring-up. */
++	athens_touch_power();
++
+ 	/* Default to the no-flash map: this panel is nf_nt36672c (oppo,tp_noflash,
+ 	 * FW_20611_NF_NT36672C_JDI) = hw_crc 0. chipTrim may override to a flash
+ 	 * variant if the ID says so. */
